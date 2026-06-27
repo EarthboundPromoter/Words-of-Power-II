@@ -9,11 +9,18 @@ landed and is lightly tested — expect rough edges.
 ## Install
 
 1. You need your own copy of **Rift Wizard 3** and a screen reader (NVDA or JAWS).
-2. Extract `screen_reader/` into `Rift Wizard 3/mods/`.
-3. Run `enable_screen_reader.exe` (or add `screen_reader` to `enabled_mods` in
-   `options2.dat`), then launch the game — the reader speaks on startup. (Close the
-   game first; it re-saves options on exit. Windows may warn about the unsigned exe —
-   choose *Run anyway*. `--disable` turns the mod back off.)
+2. From your `Rift Wizard 3/mods/` folder, clone this repo into a folder named
+   `screen_reader` — the folder name must match the mod's entry module:
+
+   ```
+   git clone https://github.com/EarthboundPromoter/Words-of-Power-II.git screen_reader
+   ```
+
+   Update later with `git pull` from inside that folder.
+3. Run `screen_reader/bin/enable_screen_reader.exe` (or, from the folder,
+   `python enable_screen_reader.py`), then launch the game — the reader speaks on
+   startup. Close the game first; it re-saves options on exit. Windows may warn about
+   the unsigned exe — choose *Run anyway*. `--disable` turns the mod back off.
 
 ## What's new vs. the RW2 mod — crafting
 
