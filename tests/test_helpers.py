@@ -65,12 +65,14 @@ def test_classify_resist_handles_none_damages():
 # The functions only need level.width, level.height, and level.tiles[x][y].can_walk.
 
 class _FakeTile:
-    def __init__(self, walkable):
+    def __init__(self, walkable, is_chasm=False):
         self.can_walk = walkable
+        self.is_chasm = is_chasm
 
 class _FakeLevel:
     """Minimal level object built from an ASCII grid.
-    W = wall, . = walkable floor. Origin (0,0) is top-left."""
+    W = wall, . = walkable floor, C = chasm (non-walkable, transparent).
+    Origin (0,0) is top-left."""
     def __init__(self, grid_str):
         rows = [line for line in grid_str.strip().split('\n')]
         self.height = len(rows)
@@ -81,7 +83,7 @@ class _FakeLevel:
             col = []
             for y in range(self.height):
                 ch = rows[y][x] if x < len(rows[y]) else 'W'
-                col.append(_FakeTile(ch == '.'))
+                col.append(_FakeTile(ch == '.', is_chasm=(ch == 'C')))
             self.tiles.append(col)
 
 
@@ -446,6 +448,53 @@ class TestClassifyTerrain:
         cls, axis = _classify_terrain(level, 4, 1)
         assert cls == 'corridor'
         assert 'east-west' in axis
+
+    def test_north_south_catwalk(self):
+        # 1-wide passage flanked by chasm (C) on both sides → catwalk, not corridor
+        #   01234
+        # 0 WWWWW
+        # 1 WC.CW
+        # 2 WC.CW  <- player at (2,2)
+        # 3 WC.CW
+        # 4 WWWWW
+        level = _FakeLevel(
+            "WWWWW\n"
+            "WC.CW\n"
+            "WC.CW\n"
+            "WC.CW\n"
+            "WWWWW"
+        )
+        cls, axis = _classify_terrain(level, 2, 2)
+        assert cls == 'catwalk'
+        assert 'north-south' in axis
+
+    def test_east_west_catwalk(self):
+        #   0123456
+        # 0 CCCCCCC
+        # 1 W.....W  <- player at (3,1)
+        # 2 CCCCCCC
+        level = _FakeLevel(
+            "CCCCCCC\n"
+            "W.....W\n"
+            "CCCCCCC"
+        )
+        cls, axis = _classify_terrain(level, 3, 1)
+        assert cls == 'catwalk'
+        assert 'east-west' in axis
+
+    def test_mixed_wall_and_chasm_flank_is_corridor(self):
+        # One flank solid wall, the other chasm → stays a plain corridor (a catwalk
+        # requires drops on BOTH sides). Player at (2,2): west=wall, east=chasm.
+        level = _FakeLevel(
+            "WWWWW\n"
+            "WW.CW\n"
+            "WW.CW\n"
+            "WW.CW\n"
+            "WWWWW"
+        )
+        cls, axis = _classify_terrain(level, 2, 2)
+        assert cls == 'corridor'
+        assert 'north-south' in axis
 
     def test_dead_end_one_exit(self):
         # Spur off a room — only one exit (north), diagonals also walled

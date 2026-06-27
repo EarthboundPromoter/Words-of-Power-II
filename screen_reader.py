@@ -5713,7 +5713,7 @@ if _PyGameView is not None:
 
             # Corridor branch scan — report perpendicular openings along the axis
             branch_text = ""
-            if tc == 'corridor' and axis:
+            if tc in ('corridor', 'catwalk') and axis:
                 branches = _scan_corridor_branches(level, px, py, axis)
                 if branches:
                     branch_text = ". ".join(branches)

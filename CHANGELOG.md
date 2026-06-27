@@ -5,6 +5,13 @@ an early work-in-progress RW3 port — expect frequent changes.
 
 ## 2026-06-27
 
+### Added
+- **"Catwalk" terrain label for bridges over chasms.** A corridor with chasm on *both*
+  sides — a walkway over the abyss — now reads as "catwalk" instead of "corridor," so
+  you know there are drops to either side. Tracks your actual position, so a passage
+  that shifts between walled and open stretches relabels as you move; any flank that's
+  solid wall or a map edge keeps it a plain "corridor."
+
 ### Changed
 - Version set to **0.1.0** — this Rift Wizard 3 port is its own mod, restarting the
   numbering rather than continuing the Rift Wizard 2 line's count.

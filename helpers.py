@@ -218,10 +218,31 @@ def _check_corridor_end(level, tx, ty, corridor_dx, corridor_dy):
             return _count_exits(level, end_x, end_y) == 1
     return False
 
+def _corridor_is_catwalk(level, x, y, axis):
+    """True if BOTH walls flanking the player's corridor tile are chasm rather than
+    solid rock — i.e. a catwalk over the abyss. Purely taxonomic: it describes the
+    shape (a walkway with drops to either side), and implies nothing about threat.
+    Checks the immediate flanks only, so the label tracks the player's actual
+    position as a mixed passage transitions between walled and chasm-flanked stretches.
+    A map-edge flank or a single solid-wall flank keeps it a plain 'corridor'."""
+    if axis == 'north-south':
+        flanks = ((x + 1, y), (x - 1, y))
+    else:  # east-west
+        flanks = ((x, y + 1), (x, y - 1))
+    for nx, ny in flanks:
+        if not (0 <= nx < level.width and 0 <= ny < level.height):
+            return False
+        tile = level.tiles[nx][ny]
+        # At a corridor tile both flanks are non-walkable by definition; require
+        # both be chasm. can_walk guard is defensive (a branch opening here).
+        if tile.can_walk or not getattr(tile, 'is_chasm', False):
+            return False
+    return True
+
 def _classify_terrain(level, x, y):
     """Classify tile geometry from cardinal raycasts.
     Returns (class_name, axis_label) or (class_name, None).
-    class_name: 'corridor', 'junction', 'dead_end', 'bend', 'open'.
+    class_name: 'corridor', 'catwalk', 'junction', 'dead_end', 'bend', 'open'.
     axis_label: corridor axis + dead end terminus info, None otherwise.
     Corridor dead end detection: checks terminal tiles so player knows
     before committing whether a corridor leads nowhere."""
@@ -244,7 +265,8 @@ def _classify_terrain(level, x, y):
         axis = 'north-south'
         if dead_ends:
             axis += ', dead end ' + ' and '.join(dead_ends)
-        return ('corridor', axis)
+        cls = 'catwalk' if _corridor_is_catwalk(level, x, y, 'north-south') else 'corridor'
+        return (cls, axis)
     if e + w >= 2 and n == 0 and s == 0:
         dead_ends = []
         if e >= 1 and _check_corridor_end(level, x + e, y, 1, 0):
@@ -254,7 +276,8 @@ def _classify_terrain(level, x, y):
         axis = 'east-west'
         if dead_ends:
             axis += ', dead end ' + ' and '.join(dead_ends)
-        return ('corridor', axis)
+        cls = 'catwalk' if _corridor_is_catwalk(level, x, y, 'east-west') else 'corridor'
+        return (cls, axis)
 
     # Junction: 3+ cardinal exits AND constrained space
     if exits >= 3:
@@ -300,6 +323,7 @@ def _classify_terrain(level, x, y):
 
 _TERRAIN_LABELS = {
     'corridor': lambda axis: f"corridor {axis}",
+    'catwalk': lambda axis: f"catwalk {axis}",
     'junction': lambda axis: "junction",
     'dead_end': lambda axis: "dead end",
     'bend': lambda axis: "turn",
