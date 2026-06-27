@@ -1433,6 +1433,17 @@ def test_compose_side_section_non_stacking_buff_no_duration():
     assert compose_side_section(chain) == expected
 
 
+def test_compose_side_section_self_buff_refresh_reads_as_extended():
+    """Re-casting an already-active non-stacking self-buff reads as an
+    extension, not a fresh apply."""
+    wizard = _wizard_snap()
+    refresh = _buff_apply_event(2, 1, wizard, buff_name="Clarity",
+                                turns_left=8, stack_type=3, stack_count_after=1)
+    refresh['payload']['is_refresh'] = True
+    chain = [_player_cast(1, spell_name="Clarity Spell"), refresh]
+    assert compose_side_section(chain) == "Side. Buffs: Clarity extended to 8 turns."
+
+
 def test_compose_side_section_heals_and_buffs_both_present():
     """Side combines Heals and Buffs sub-sections, in that order."""
     wizard = _wizard_snap()
@@ -2176,14 +2187,59 @@ def test_debuffs_section_skips_silent_activate():
     assert compose_debuffs_applied_section(chain) == ""
 
 
-def test_debuffs_section_skips_refresh():
+def test_debuffs_section_refresh_renders_extended_line():
+    """A refresh (duration extension) on an enemy renders as an extended
+    line, not silently dropped."""
     target = _target_snap(unit_id=200, name='Goblin', x=3, y=4)
     chain = [
         _player_cast(1),
-        _buff_apply(2, 1, target, buff_name='Poisoned', turns_left=5,
+        _buff_apply(2, 1, target, buff_name='Poisoned', turns_left=8,
                     buff_type=2, is_refresh=True),
     ]
-    assert compose_debuffs_applied_section(chain) == ""
+    assert (compose_debuffs_applied_section(chain)
+            == "Goblin (3,4) poisoned, extended to 8 turns.")
+
+
+def test_debuffs_section_extended_group_collapses():
+    """Multiple same-debuff extensions collapse into one extended line."""
+    chain = [_player_cast(1)]
+    for i in range(3):
+        t = _target_snap(unit_id=200 + i, name='Goblin', x=3 + i, y=4)
+        chain.append(_buff_apply(2 + i, 1, t, buff_name='Poisoned',
+                                 turns_left=8, buff_type=2, is_refresh=True))
+    assert (compose_debuffs_applied_section(chain)
+            == "3 Goblins at (3,4), (4,4), (5,4) poisoned,"
+               " extended to 8 turns each.")
+
+
+def test_debuffs_section_two_groups_new_and_extended():
+    """A mixed cast — some newly poisoned, some extended — renders two
+    distinct collapsed groups."""
+    chain = [_player_cast(1)]
+    for i in range(2):
+        t = _target_snap(unit_id=200 + i, name='Goblin', x=3 + i, y=4)
+        chain.append(_buff_apply(2 + i, 1, t, buff_name='Poisoned',
+                                 turns_left=5, buff_type=2))
+    for i in range(2):
+        t = _target_snap(unit_id=210 + i, name='Goblin', x=5 + i, y=4)
+        chain.append(_buff_apply(10 + i, 1, t, buff_name='Poisoned',
+                                 turns_left=8, buff_type=2, is_refresh=True))
+    assert (compose_debuffs_applied_section(chain)
+            == "2 debuffs applied: 2 Goblins at (3,4), (4,4) poisoned,"
+               " 5 turns each. 2 Goblins at (5,4), (6,4) poisoned,"
+               " extended to 8 turns each.")
+
+
+def test_buffs_section_refresh_renders_extended_line():
+    """A buff refresh on an ally renders as a verb-led extended line."""
+    ally = _target_snap(unit_id=200, name='Goatia', x=8, y=8)
+    chain = [
+        _player_cast(1),
+        _buff_apply(2, 1, ally, buff_name='Strength', turns_left=8,
+                    buff_type=1, is_refresh=True),
+    ]
+    assert (compose_buffs_applied_section(chain)
+            == "Goatia (8,8) Strength extended to 8 turns.")
 
 
 def test_debuffs_section_no_duration():

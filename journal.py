@@ -160,20 +160,75 @@ def _snapshot_unit(unit):
     }
 
 
+def _buff_agency(buff):
+    """Classify a buff's agency impact for the crisis cadence (Model A).
+
+    'control' = stops or limits the owner's turn — any `Stun` subclass,
+    which covers Stun, Petrify, Glassed, Frozen, Sleep, Fear (the
+    is_stunned family, Level.py:2165). 'silence' = blocks casting only.
+    None = no agency impact. Read at capture time via isinstance off the
+    live buff, since the snapshot stores only primitives downstream."""
+    stun_cls = getattr(Level, 'Stun', None)
+    if stun_cls is not None and isinstance(buff, stun_cls):
+        return 'control'
+    silence_cls = getattr(Level, 'Silence', None)
+    if silence_cls is not None and isinstance(buff, silence_cls):
+        return 'silence'
+    return None
+
+
+def _buff_resist_penalties(buff):
+    """For a buff that lowers resistances, capture the OWNER's *effective*
+    resist total for each damage type the buff reduces.
+
+    Buff.apply folds a buff's resists into the owner additively
+    (owner.resists[dtype] += resist, Level.py:1147), so by the time
+    EventOnBuffApply fires the owner's resists reflect this buff's
+    contribution. Reading owner.resists here yields the same value the game
+    shows on the character sheet — which is what the crisis class-4 read
+    speaks when a stacking penalty (e.g. Melted Armor, -10 Physical/stack)
+    deepens the wizard's vulnerability with no damage tick to reveal it.
+
+    Returns {dtype_name: effective_resist} for types the buff modifies
+    NEGATIVELY, or {} for buffs that don't lower resistances (the common
+    case — cheap empty-defaultdict short-circuit)."""
+    own = getattr(buff, 'resists', None)
+    owner = getattr(buff, 'owner', None)
+    if not own or owner is None:
+        return {}
+    owner_res = getattr(owner, 'resists', None)
+    if owner_res is None:
+        return {}
+    out = {}
+    try:
+        for dtype, mod in own.items():
+            if mod < 0:
+                name = getattr(dtype, 'name', None) or str(dtype)
+                out[name] = owner_res.get(dtype, 0)
+    except Exception:
+        return {}
+    return out
+
+
 def _snapshot_buff(buff):
     """Snapshot the fields downstream consumers need from a Buff.
 
     `buff_type` distinguishes bless (1) from curse / debuff (2) from
     passive (0) and item (3). The digest's debuff/buff split sub-sections
-    read this to filter and route applies appropriately."""
+    read this to filter and route applies appropriately. `agency` feeds
+    the crisis Model-A cadence (per-turn countdown for control debuffs).
+    `resist_penalty` feeds the crisis class-4 read (effective resist total
+    when a debuff lowers the owner's resistances)."""
     if buff is None:
-        return {'id': None, 'name': None}
+        return {'id': None, 'name': None, 'agency': None}
     return {
         'id': id(buff),
         'name': getattr(buff, 'name', None),
         'turns_left': getattr(buff, 'turns_left', None),
         'stack_type': getattr(buff, 'stack_type', None),
         'buff_type': getattr(buff, 'buff_type', None),
+        'agency': _buff_agency(buff),
+        'resist_penalty': _buff_resist_penalties(buff),
     }
 
 
@@ -519,7 +574,6 @@ def install_hooks():
     original_add_obj = Level.Level.add_obj
     original_remove_obj = Level.Level.remove_obj
     original_unit_kill = Level.Unit.kill
-    original_unit_steal_hp = getattr(Level.Unit, 'steal_hp', None)  # RW3: removed; guard so install doesn't crash (port #14)
     original_unit_equip = Level.Unit.equip
     original_unit_apply_buff = Level.Unit.apply_buff
     original_buff_advance = Level.Buff.advance
@@ -676,45 +730,6 @@ def install_hooks():
         return original_unit_kill(self, damage_event=damage_event,
                                   trigger_death_event=trigger_death_event)
 
-    def patched_unit_steal_hp(self, amount, source):
-        # Game's Unit.steal_hp at Level.py:2219-2234 has a broken
-        # raise_event() call (no args) — EventOnDamaged never fires for
-        # life-drain. Capture the actual HP delta after the original runs
-        # so we report what really happened (clamped to remaining HP).
-        pre_hp = self.cur_hp
-        result = original_unit_steal_hp(self, amount, source)
-        actual = pre_hp - self.cur_hp
-        if actual > 0:
-            source_name = (
-                f"{source.owner.name} {source.name}"
-                if getattr(source, 'owner', None) is not None
-                else getattr(source, 'name', None)
-            )
-            source_unit_id = (
-                id(source.owner)
-                if getattr(source, 'owner', None) is not None
-                else None
-            )
-            journal.record('EventOnPreDamaged', {
-                'target': _snapshot_unit(self),
-                'damage_pre_resist': actual,
-                'damage_post_resist': actual,
-                'resisted': False,
-                'damage_type': None,
-                'source_name': source_name,
-                'source_unit_id': source_unit_id,
-                'is_steal_hp': True,
-            })
-            journal.record('EventOnDamaged', {
-                'target': _snapshot_unit(self),
-                'damage': actual,
-                'damage_type': None,
-                'source_name': source_name,
-                'source_unit_id': source_unit_id,
-                'is_steal_hp': True,
-            })
-        return result
-
     def patched_unit_equip(self, item):
         # Game's Unit.equip at Level.py:1714-1716 fires the equipment's
         # EventOnUnitAdded trigger directly without raising the event
@@ -737,19 +752,26 @@ def install_hooks():
         return result
 
     def patched_unit_apply_buff(self, buff, duration=0):
-        # Game's Unit.apply_buff at Level.py:2120-2128 silently
-        # early-returns for STACK_NONE / STACK_DURATION refreshes — the
-        # existing buff's turns_left is extended but no EventOnBuffApply
-        # fires. Synthesize a record tagged is_refresh so refresh phrasing
-        # ("Bless refreshed, 8 turns") becomes possible.
+        # RW3's Unit.apply_buff (Level.py:2404-2455) resolves a re-application
+        # of an already-present same-typed buff several ways; only some raise
+        # EventOnBuffApply. We detect the outcome by observing buff-list STATE
+        # before/after — NOT by counting raised events. (The old "no events
+        # raised" heuristic is dead in RW3: apply_buff now raises an
+        # unconditional EventOnBuffAttemptApply at Level.py:2414, so every call
+        # advances journal.sequence and seq_before == seq_after never holds.)
         #
-        # Detection by post-call observation: snapshot the same-typed
-        # existing buff before the call, then check if (a) it existed,
-        # (b) no events were raised by the call, and (c) the stack type
-        # is one of the silent-return types. Other early-returns (immune,
-        # not-alive, clarity reduction) all happen BEFORE the existing
-        # check at Level.py:2117, so a non-None pre-existing buff combined
-        # with no raised events identifies the refresh path uniquely.
+        #   - Fresh apply / intensity stack / STACK_REPLACE: the PASSED buff is
+        #     appended to self.buffs (Level.py:2439) and a real EventOnBuffApply
+        #     fires — already captured (and tagged with agency by _snapshot_buff).
+        #     Nothing to synthesize.
+        #   - Silent duration refresh (STACK_NONE max() / STACK_DURATION/TRANSFORM
+        #     +=, Level.py:2428-2434): the passed buff is discarded and the
+        #     EXISTING buff's turns_left is mutated with no EventOnBuffApply.
+        #     Synthesize one tagged is_refresh so the cadence can speak the new
+        #     remaining duration — but ONLY when the duration actually changed.
+        #     A no-op max() refresh, a debuff-immune block, or a clarity re-stun
+        #     all leave turns_left untouched (or never reach the existing branch)
+        #     and stay silent.
         pre_existing = None
         if hasattr(self, 'buffs'):
             pre_existing = next(
@@ -758,15 +780,21 @@ def install_hooks():
                  and type(b) == type(buff)),
                 None,
             )
-        seq_before = journal.sequence
+        pre_turns = (getattr(pre_existing, 'turns_left', None)
+                     if pre_existing is not None else None)
         result = original_unit_apply_buff(self, buff, duration)
-        seq_after = journal.sequence
-        is_silent_refresh = (
+
+        buffs = getattr(self, 'buffs', None) or ()
+        if buff in buffs:
+            # Fresh apply / intensity stack / replace — real EventOnBuffApply
+            # already captured. Nothing to do.
+            pass
+        elif (
             pre_existing is not None
-            and seq_after == seq_before
-            and getattr(buff, 'stack_type', None) in (Level.STACK_NONE, Level.STACK_DURATION)
-        )
-        if is_silent_refresh:
+            and pre_existing in buffs
+            and getattr(pre_existing, 'turns_left', None) != pre_turns
+        ):
+            # Silent duration refresh that changed the remaining duration.
             journal.record('EventOnBuffApply', {
                 'target': _snapshot_unit(self),
                 'buff': _snapshot_buff(pre_existing),
@@ -849,11 +877,10 @@ def install_hooks():
     Level.Level.add_obj = patched_add_obj
     Level.Level.remove_obj = patched_remove_obj
     Level.Unit.kill = patched_unit_kill
-    if original_unit_steal_hp is not None:
-        Level.Unit.steal_hp = patched_unit_steal_hp
-    # else: RW3 removed Unit.steal_hp (port #14) — skip the life-drain synthesis
-    # hook. Life-drain now flows through normal damage events; revisit whether
-    # any synthesis is still needed during the combat-narration validation pass.
+    # NB: RW2/RW3 Unit.steal_hp was dead code (never called; RW2's body had a
+    # broken argless raise_event). RW3 life-drain flows through deal_damage with
+    # Tags.Heal → EventOnDamaged (victim) + EventOnHealed (drainer), both already
+    # captured. No steal_hp hook needed. (Verified 2026-06-27.)
     Level.Unit.equip = patched_unit_equip
     Level.Unit.apply_buff = patched_unit_apply_buff
     Level.Buff.advance = patched_buff_advance

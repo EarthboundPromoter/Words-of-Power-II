@@ -1020,10 +1020,17 @@ _BUFF_TYPE_CURSE = 2
 _BUFF_TYPE_ITEM = 3
 
 
-def _classify_buff_applies(chain, want_buff_type):
+def _classify_buff_applies(chain, want_buff_type, refresh_only=False):
     """Walk chain for non-wizard EventOnBuffApply records matching the
     given buff_type. Returns the same equivalence-class structure used
     by both Debuffs and Buffs renderers.
+
+    `refresh_only` selects which half of the player-chain applies to
+    collect: False (default) = fresh applies; True = refreshes (duration
+    extensions, is_refresh=True from the journal, only synthesized when
+    the remaining duration actually changed). The two are rendered as
+    separate groups so "newly poisoned" and "poison extended" stay
+    distinct (compress-don't-curate) while each still collapses.
 
     Filters out applies on targets that died in this same chain — once
     the target is dead, the status is irrelevant. The player only cares
@@ -1052,7 +1059,10 @@ def _classify_buff_applies(chain, want_buff_type):
         target = payload.get('target') or {}
         if target.get('is_player_controlled'):
             continue
-        if payload.get('is_silent_activate') or payload.get('is_refresh'):
+        if payload.get('is_silent_activate'):
+            continue
+        # Route fresh applies vs refreshes to separate groups.
+        if bool(payload.get('is_refresh')) != refresh_only:
             continue
         if target.get('id') in dead_target_ids:
             # Target dies in this chain — debuff/buff is irrelevant.
@@ -1127,6 +1137,34 @@ def _render_buff_class_line(cls):
     return f"{target_phrase} gained {name}."
 
 
+def _render_debuff_extended_line(cls):
+    """Extended-debuff line: like the apply line but signalling a duration
+    extension ('Goblin (3,4) poisoned, extended to 8 turns.')."""
+    target_phrase = _format_target_phrase(
+        cls['target'], cls['count'], cls['members']
+    )
+    adj = cls['buff_name'].lower()
+    turns = cls['turns_left']
+    each_suffix = " each" if cls['count'] > 1 else ""
+    if turns and turns > 0:
+        return f"{target_phrase} {adj}, extended to {turns} turns{each_suffix}."
+    return f"{target_phrase} {adj}, extended."
+
+
+def _render_buff_extended_line(cls):
+    """Extended-buff line, verb-led ('Ally Wolf (3,3) Strength extended to
+    8 turns.')."""
+    target_phrase = _format_target_phrase(
+        cls['target'], cls['count'], cls['members']
+    )
+    name = cls['buff_name']
+    turns = cls['turns_left']
+    each_suffix = " each" if cls['count'] > 1 else ""
+    if turns and turns > 0:
+        return f"{target_phrase} {name} extended to {turns} turns{each_suffix}."
+    return f"{target_phrase} {name} extended."
+
+
 def _render_buff_apply_section(classes, plural_label, line_renderer):
     """Render an equivalence-class list. Single application: bare line.
     Multi: 'N {plural_label} applied: line1. line2. ...'."""
@@ -1139,18 +1177,44 @@ def _render_buff_apply_section(classes, plural_label, line_renderer):
     return f"{total} {plural_label} applied: " + " ".join(lines)
 
 
+def _render_extended_section(classes, line_renderer):
+    """Render the extended (refresh) group. Each line self-describes the
+    extension and its target count, so no separate count header is used
+    (that would double the word 'extended')."""
+    if not classes:
+        return ""
+    return " ".join(line_renderer(cls) for cls in classes)
+
+
+def _compose_two_group_section(chain, want_buff_type, plural_label,
+                               apply_renderer, extended_renderer):
+    """Render fresh applies and refresh-extensions as two collapsed groups,
+    joined into one section string."""
+    applied = _classify_buff_applies(chain, want_buff_type)
+    extended = _classify_buff_applies(chain, want_buff_type, refresh_only=True)
+    fresh_part = _render_buff_apply_section(applied, plural_label, apply_renderer)
+    extended_part = _render_extended_section(extended, extended_renderer)
+    return " ".join(p for p in (fresh_part, extended_part) if p)
+
+
 def compose_debuffs_applied_section(chain):
     """Compose the Debuffs-applied section: non-wizard targets, buff_type=2.
-    Adjective-form rendering ('Goblin (3,4) poisoned, 5 turns.')."""
-    classes = _classify_buff_applies(chain, _BUFF_TYPE_CURSE)
-    return _render_buff_apply_section(classes, "debuffs", _render_debuff_class_line)
+    Adjective-form rendering ('Goblin (3,4) poisoned, 5 turns.'), with a
+    separate extended group for refreshes ('... poisoned, extended to 8
+    turns.')."""
+    return _compose_two_group_section(
+        chain, _BUFF_TYPE_CURSE, "debuffs",
+        _render_debuff_class_line, _render_debuff_extended_line)
 
 
 def compose_buffs_applied_section(chain):
     """Compose the Buffs-applied section: non-wizard targets, buff_type=1.
-    Verb-led rendering ('Ally Wolf (3,3) gained Strength, 5 turns.')."""
-    classes = _classify_buff_applies(chain, _BUFF_TYPE_BLESS)
-    return _render_buff_apply_section(classes, "buffs", _render_buff_class_line)
+    Verb-led rendering ('Ally Wolf (3,3) gained Strength, 5 turns.'), with a
+    separate extended group for refreshes ('... Strength extended to 8
+    turns.')."""
+    return _compose_two_group_section(
+        chain, _BUFF_TYPE_BLESS, "buffs",
+        _render_buff_class_line, _render_buff_extended_line)
 
 
 # Back-compat alias: the previous combined section is kept for any
@@ -1213,6 +1277,10 @@ def compose_side_section(chain):
         info['stack_count'] = payload.get('stack_count_after')
         info['turns_left'] = buff.get('turns_left')
         info['stack_type'] = buff.get('stack_type')
+        if payload.get('is_refresh'):
+            info['saw_refresh'] = True
+        else:
+            info['saw_fresh'] = True
 
     parts = []
 
@@ -1241,9 +1309,11 @@ def _format_buff_apply(name, info):
     when N > 1, or "Buff applied, now M stacks" for a single apply.
 
     Non-stacking (STACK_NONE, STACK_DURATION, STACK_REPLACE):
-    "Buff applied, T turns" if turns_left > 0, else "Buff applied".
+    "Buff applied, T turns" if turns_left > 0, else "Buff applied". A
+    refresh with no fresh apply this chain (the wizard re-cast a buff they
+    already had) renders "Buff extended to T turns" instead.
 
-    STACK_TYPE_TRANSFORM and refreshes are deferred — not handled here.
+    STACK_TYPE_TRANSFORM is deferred — not handled here.
     """
     count = info.get('count', 1)
     stack_count = info.get('stack_count')
@@ -1258,8 +1328,11 @@ def _format_buff_apply(name, info):
             return f"{name} applied {count} times, now {stack_count} {stack_word}"
         return f"{name} applied, now {stack_count} {stack_word}"
 
-    # Non-stacking: report duration when present.
+    # Non-stacking: report duration when present. A pure refresh (re-cast
+    # of an already-active buff) reads as an extension.
     if turns_left and turns_left > 0:
+        if info.get('saw_refresh') and not info.get('saw_fresh'):
+            return f"{name} extended to {turns_left} turns"
         return f"{name} applied, {turns_left} turns"
     return f"{name} applied"
 

@@ -6,6 +6,20 @@ an early work-in-progress RW3 port — expect frequent changes.
 ## 2026-06-27
 
 ### Added
+- **Buff and debuff refreshes, stacks, and lingering control are now spoken.**
+  - Stun, freeze, petrify, and silence on you now count down each turn ("Still
+    stunned, 2 turns left") until they lift, so you always know when you'll act again.
+  - Re-applying a debuff to enemies (or a buff to allies) that *extends* its duration
+    reads as its own "extended to N turns" group, distinct from fresh applications;
+    re-casting one of your own buffs reads "extended" rather than a second "applied."
+  - A debuff that lowers your resistance (e.g. Melted Armor as it stacks) reports the
+    new effective value — "Physical resistance now -30%" — when it deepens.
+  - Stacked damage-over-time (e.g. several Bleed stacks) sums to its true per-turn
+    total instead of repeating identical ticks.
+  - Non-stacking re-applications no longer chatter — a debuff is announced once and
+    on meaningful escalation, not every turn an aura re-applies it.
+  - *Freshly built and unit-tested; not yet heard across many live situations — please
+    report anything that sounds off or doesn't fire when it should.*
 - **"Catwalk" terrain label for bridges over chasms.** A corridor with chasm on *both*
   sides — a walkway over the abyss — now reads as "catwalk" instead of "corridor," so
   you know there are drops to either side. Tracks your actual position, so a passage

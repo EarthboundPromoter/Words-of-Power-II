@@ -470,6 +470,60 @@ def test_status_ticks_dot_damage_on_enemy():
     assert lines == ["Goblin (3,4) Poisoned: 1 Poison, 3 turns left."]
 
 
+def _bleed_stack(seq, target, turns):
+    """A buff_tick root + its EventOnDamaged child for one Bleed stack."""
+    return [
+        {
+            'sequence': seq, 'parent': None, 'event_type': 'buff_tick',
+            'payload': {
+                'buff': {'name': 'Bleed', 'turns_left': turns,
+                         'stack_type': 2},
+                'owner': target,
+            },
+            'marks': [],
+        },
+        {
+            'sequence': seq + 1, 'parent': seq, 'event_type': 'EventOnDamaged',
+            'payload': {
+                'target': target, 'damage': 3, 'damage_type': 'Physical',
+                'source_name': 'Bleed', 'source_turns_left': turns,
+            },
+            'marks': [],
+        },
+    ]
+
+
+def test_status_ticks_dot_stacks_sum_on_single_target():
+    """Three Bleed stacks on one Goblin sum to the true per-turn total, and
+    report the longest remaining duration."""
+    g = _enemy_snap(uid=200, name='Goblin', x=3, y=4)
+    records = []
+    for i, turns in enumerate((4, 3, 2)):
+        records.extend(_bleed_stack(10 + i * 10, g, turns))
+    idx = _build_index(records)
+    lines, _claimed = _render_status_ticks(records, idx, wizard_team=0,
+                                           show_coords=True)
+    assert lines == ["Goblin (3,4) Bleed: 9 Physical, 4 turns left."]
+
+
+def test_status_ticks_dot_stacks_collapse_across_targets():
+    """Two Goblins each carrying two Bleed stacks (6 each) collapse to one
+    line — not four, and not a phantom target count."""
+    records = []
+    seq = 10
+    for uid, x in ((200, 3), (201, 5)):
+        g = _enemy_snap(uid=uid, name='Goblin', x=x, y=4)
+        records.extend(_bleed_stack(seq, g, 3))
+        records.extend(_bleed_stack(seq + 2, g, 3))
+        seq += 10
+    idx = _build_index(records)
+    lines, _claimed = _render_status_ticks(records, idx, wizard_team=0,
+                                           show_coords=True)
+    assert len(lines) == 1
+    assert lines[0].startswith("2 Goblins")
+    assert "Bleed: 6 Physical each" in lines[0]
+
+
 def test_status_ticks_skips_wizard_dot():
     """Wizard DOT tick is crisis territory; orphan skips."""
     records = [

@@ -247,6 +247,32 @@ class _CrisisProducer:
         # don't re-announce the same threshold each turn while the wizard
         # stays below it. Resets on heal-back-up.
         self._last_threshold_index = -1
+        # Refresh/stack cadence state (Model A — see
+        # docs/REFRESH_STACK_NARRATION_DESIGN.md).
+        # name -> 'control' / 'silence', learned from apply-record snapshots
+        # (the journal tags each buff with its agency class). Drives the
+        # per-turn countdown poll, which reads LIVE buffs (no snapshot, no
+        # Level import) and looks agency up by name.
+        self._agency_by_name = {}
+        # name -> announced severity high-water mark. A wizard debuff is
+        # voiced at apply only on a NEW worst-known high (first onset, or a
+        # longer remaining duration), never on flat re-application — that is
+        # the noise gate. Cleared when the debuff fades.
+        self._debuff_high = {}
+        # dtype name -> announced effective resist low-water (a negative
+        # percent). Class-4: scaling resist penalties (Melted Armor,
+        # Electrified, Blood Curse, Idol of Weakness) stack at the same
+        # duration, so the severity gate can't catch them — the escalation
+        # lives in the resist total. Spoken on a new low; synced to the
+        # post-removal effective when the debuff fades.
+        self._resist_low = {}
+
+    @staticmethod
+    def _severity(turns):
+        """Severity ordering for the high-water gate. A permanent debuff
+        (turns_left 0 or None) is the worst possible, so it sorts above any
+        finite duration."""
+        return float('inf') if not turns else turns
 
     def fire(self, journal_records, wizard_unit, log_fn, telemetry=None):
         """Walk journal records since last fire. Identify wizard-target
@@ -294,24 +320,29 @@ class _CrisisProducer:
 
         lines = []
         categories_present = set()
+        # Names voiced at apply/escalation THIS fire — the countdown poll
+        # skips them so a control debuff isn't both announced and counted
+        # down in the same turn.
+        announced = set()
+
+        # Wizard damage first — DOT ticks summed per source so a stacked
+        # Bleed reads its true per-turn total.
+        damage_lines = self._compose_damage_taken(new_records)
+        if damage_lines:
+            lines.extend(damage_lines)
+            categories_present.add('damage_taken')
 
         for rec in new_records:
-            line = _render_damage_taken(rec)
-            if line:
-                lines.append(line)
-                categories_present.add('damage_taken')
-                _claim(rec)
-                continue
-            line = _render_buff_applied(rec)
-            if line:
-                lines.append(line)
-                categories_present.add('debuff_applied')
-                _claim(rec)
+            if self._handle_wizard_debuff_apply(
+                    rec, lines, categories_present, announced):
                 continue
             line = _render_buff_faded(rec)
             if line:
                 lines.append(line)
                 categories_present.add('buff_faded')
+                # The debuff is gone — drop its high-water mark so a fresh
+                # application later re-announces from scratch.
+                self._forget_debuff(rec)
                 _claim(rec)
                 continue
             line = _render_wizard_death(rec)
@@ -339,6 +370,13 @@ class _CrisisProducer:
         if threshold_line:
             lines.append(threshold_line)
             categories_present.add('hp_threshold')
+
+        # Per-turn countdown for control/agency debuffs still active on the
+        # wizard (Model A agency rule — like the cloud-on-tile renotify).
+        agency_lines = self._maybe_agency_lines(wizard_unit, announced)
+        if agency_lines:
+            lines.extend(agency_lines)
+            categories_present.add('agency_countdown')
 
         text = " ".join(lines).strip()
 
@@ -389,6 +427,159 @@ class _CrisisProducer:
             return None
         self._last_threshold_index = idx
         return f"Wizard at {cur_hp} HP, {label}."
+
+    def _compose_damage_taken(self, new_records):
+        """Wizard damage lines. DOT ticks (source is a buff, so the journal
+        captured source_turns_left) are summed per (source, type) so a
+        3-stack Bleed reads "Wizard took 9 Physical from Bleed." instead of
+        three identical ticks; all other damage renders per event, unchanged.
+        Claims the records it consumes."""
+        lines = []
+        dot_totals = {}   # (source, dtype) -> summed damage
+        dot_order = []
+        for rec in new_records:
+            if rec.get('event_type') != 'EventOnDamaged':
+                continue
+            payload = rec.get('payload') or {}
+            target = payload.get('target') or {}
+            if not _is_wizard_snap(target):
+                continue
+            damage = payload.get('damage')
+            if damage is None or damage <= 0:
+                continue
+            if payload.get('source_turns_left') is not None:
+                # DOT tick — aggregate by source and damage type.
+                key = (payload.get('source_name'), payload.get('damage_type'))
+                if key not in dot_totals:
+                    dot_order.append(key)
+                    dot_totals[key] = 0
+                dot_totals[key] += damage
+                _claim(rec)
+            else:
+                line = _render_damage_taken(rec)
+                if line:
+                    lines.append(line)
+                    _claim(rec)
+        for key in dot_order:
+            source, dtype = key
+            total = dot_totals[key]
+            dtype_str = f" {dtype}" if dtype else ""
+            if source:
+                lines.append(f"Wizard took {total}{dtype_str} from {source}.")
+            else:
+                lines.append(f"Wizard took {total}{dtype_str}.")
+        return lines
+
+    def _handle_wizard_debuff_apply(self, rec, lines, categories, announced):
+        """Claim and conditionally voice an EventOnBuffApply whose target is
+        the wizard and whose buff is a debuff (curse). Returns True if the
+        record was ours (claimed), False to let other branches try it.
+
+        Voicing is gated by a per-buff high-water mark: the apply line fires
+        only on a new worst-known severity (first onset, or a longer remaining
+        duration), never on flat re-application. That single gate kills the
+        sustained-aura chatter (Fear/Poison re-applied every turn) while still
+        announcing real onset and escalation. Control debuffs also feed the
+        agency cache for the per-turn countdown poll."""
+        if rec.get('event_type') != 'EventOnBuffApply':
+            return False
+        payload = rec.get('payload') or {}
+        target = payload.get('target') or {}
+        if not _is_wizard_snap(target):
+            return False
+        buff = payload.get('buff') or {}
+        name = buff.get('name')
+        # buff_type 2 = curse / debuff. Self-buffs are not crisis content.
+        if not name or buff.get('buff_type') != 2:
+            return False
+
+        # Learn the agency class for the countdown poll (which reads live
+        # buffs and has no snapshot to consult).
+        agency = buff.get('agency')
+        if agency in ('control', 'silence'):
+            self._agency_by_name[name] = agency
+
+        # This debuff apply is crisis's to own — claim it even when the line
+        # is suppressed, so the orphan producer doesn't re-narrate it.
+        _claim(rec)
+
+        severity = self._severity(buff.get('turns_left'))
+        prev = self._debuff_high.get(name)
+        if prev is None or severity > prev:
+            line = _render_buff_applied(rec)
+            if line:
+                lines.append(line)
+                categories.add('debuff_applied')
+                announced.add(name)
+            self._debuff_high[name] = severity
+
+        # Class-4: a deepening resist penalty has no damage tick to reveal
+        # it, so read the effective resist total the game shows.
+        self._maybe_resist_lines(buff, lines, categories)
+        return True
+
+    def _maybe_resist_lines(self, buff_snap, lines, categories):
+        """Emit '{Type} resistance now -N%.' when a debuff drives the
+        wizard's effective resist for a damage type to a new negative low.
+        Reads the effective total captured at apply time (the character-sheet
+        value), gated by a per-type low-water mark so a flat re-application or
+        a non-deepening stack stays silent."""
+        penalties = buff_snap.get('resist_penalty') or {}
+        for dtype, effective in penalties.items():
+            if effective is None or effective >= 0:
+                continue
+            prev = self._resist_low.get(dtype)
+            if prev is None or effective < prev:
+                lines.append(f"{dtype} resistance now {effective}%.")
+                categories.add('resist_penalty')
+                self._resist_low[dtype] = effective
+
+    def _forget_debuff(self, rec):
+        """Drop a faded debuff's high-water mark so a later re-application
+        re-announces from onset, and sync the resist low-water to the
+        post-removal effective totals (Buff.unapply has already subtracted
+        this buff's contribution by EventOnBuffRemove time)."""
+        buff = ((rec.get('payload') or {}).get('buff')) or {}
+        name = buff.get('name')
+        if name is not None:
+            self._debuff_high.pop(name, None)
+        for dtype, effective in (buff.get('resist_penalty') or {}).items():
+            if effective is None or effective >= 0:
+                # Recovered to no penalty — a later debuff re-announces.
+                self._resist_low.pop(dtype, None)
+            else:
+                # Partial recovery (other stacks remain): raise the floor so
+                # the next deepening re-announces from the current level.
+                self._resist_low[dtype] = effective
+
+    def _maybe_agency_lines(self, wizard_unit, announced):
+        """Per-turn countdown for control/agency debuffs active on the wizard.
+        Reads LIVE buffs (post-advance, so turns_left is the remaining count)
+        and emits 'Still stunned, N turns left' for each control/silence buff
+        — except those already voiced at apply/escalation this turn (in
+        `announced`), so onset and countdown never double up."""
+        if wizard_unit is None:
+            return []
+        buffs = getattr(wizard_unit, 'buffs', None)
+        if not buffs:
+            return []
+        out = []
+        seen = set()
+        for buff in buffs:
+            name = getattr(buff, 'name', None)
+            if not name or name in seen or name in announced:
+                continue
+            if self._agency_by_name.get(name) not in ('control', 'silence'):
+                continue
+            seen.add(name)
+            adj = _DEBUFF_PHRASING.get(name, name.lower())
+            turns = getattr(buff, 'turns_left', None)
+            if turns:
+                turn_word = "turn" if turns == 1 else "turns"
+                out.append(f"Still {adj}, {turns} {turn_word} left.")
+            else:
+                out.append(f"Still {adj}.")
+        return out
 
     def _maybe_emit_unmodeled(self, telemetry, scanned_records, output):
         """Surface forensic telemetry when crisis processed records but

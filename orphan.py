@@ -539,10 +539,14 @@ def _render_status_ticks(records, idx, wizard_team, show_coords):
         and not _has_mark(r, ORPHAN_MARK)
     ]
 
-    # Aggregate DOT lines by signature: (buff_name, target_id, target_tier,
-    # dtype, damage_post_resist, turns_left).
-    dot_groups = {}
-    dot_order = []
+    # Aggregate DOT damage in two passes. A single target can carry several
+    # stacks of the same DOT (STACK_INTENSITY — e.g. Bleed), each ticking its
+    # own EventOnDamaged in one turn. Pass 1 sums damage per target (and keeps
+    # the longest remaining duration) so a 3-stack Bleed reads "9 Physical",
+    # not three "3 Physical" lines or a phantom "3 targets". Pass 2 groups
+    # targets by their per-target total for the "N enemies ... each" collapse.
+    per_target = {}   # (buff_name, target_id, dtype) -> accumulator
+    pt_order = []
 
     for root in buff_tick_roots:
         chain = _gather_chain(records, root, idx)
@@ -557,20 +561,36 @@ def _render_status_ticks(records, idx, wizard_team, show_coords):
             buff_name = payload.get('source_name')
             if not buff_name:
                 continue
-            damage = payload.get('damage')
+            damage = payload.get('damage') or 0
             dtype = payload.get('damage_type')
-            turns = payload.get('source_turns_left')
-            sig = (
-                buff_name, target.get('name'), target.get('tier'),
-                dtype, damage, turns,
-            )
-            if sig not in dot_groups:
-                dot_order.append(sig)
-                dot_groups[sig] = []
-            dot_groups[sig].append(target)
+            turns = payload.get('source_turns_left') or 0
+            key = (buff_name, target.get('id'), dtype)
+            acc = per_target.get(key)
+            if acc is None:
+                pt_order.append(key)
+                per_target[key] = {
+                    'target': target, 'buff_name': buff_name,
+                    'dtype': dtype, 'damage': damage, 'turns': turns,
+                }
+            else:
+                acc['damage'] += damage
+                if turns > acc['turns']:
+                    acc['turns'] = turns
         for rec in chain:
             _claim(rec)
             claimed.append(rec)
+
+    dot_groups = {}
+    dot_order = []
+    for key in pt_order:
+        acc = per_target[key]
+        t = acc['target']
+        sig = (acc['buff_name'], t.get('name'), t.get('tier'),
+               acc['dtype'], acc['damage'], acc['turns'])
+        if sig not in dot_groups:
+            dot_order.append(sig)
+            dot_groups[sig] = []
+        dot_groups[sig].append(t)
 
     for sig in dot_order:
         buff_name, target_name, _tier, dtype, damage, turns = sig

@@ -449,3 +449,245 @@ def test_producer_skips_already_claimed_records():
     rec['marks'] = [CRISIS_MARK]
     section = p.fire([rec], _StubWizard(50, 50), noop, telemetry=None)
     assert section[1] == ""
+
+
+# ---- Refresh/stack cadence (Model A) ----
+
+
+class _StubBuff:
+    def __init__(self, name, turns_left):
+        self.name = name
+        self.turns_left = turns_left
+
+
+class _StubWizardBuffs:
+    """Wizard stub that exposes a live `.buffs` list for the agency poll.
+    Full HP by default so the HP-threshold branch stays quiet."""
+    def __init__(self, cur_hp=50, max_hp=50, x=10, y=10, buffs=None):
+        self.cur_hp = cur_hp
+        self.max_hp = max_hp
+        self.x = x
+        self.y = y
+        self.buffs = buffs if buffs is not None else []
+
+
+def _apply_record(name, turns, agency=None, buff_type=2, seq=20,
+                  resist_penalty=None):
+    return {
+        'sequence': seq, 'parent': None,
+        'event_type': 'EventOnBuffApply',
+        'payload': {
+            'target': _wizard_snap(),
+            'buff': {
+                'name': name, 'buff_type': buff_type,
+                'turns_left': turns, 'agency': agency,
+                'resist_penalty': resist_penalty or {},
+            },
+        },
+        'marks': [],
+    }
+
+
+def _noop(_):
+    pass
+
+
+def test_control_onset_then_per_turn_countdown():
+    """Control debuff: apply line on onset, then per-turn countdown — and
+    no double-up on the onset turn."""
+    p = _CrisisProducer()
+    w = _StubWizardBuffs(buffs=[_StubBuff('Stunned', 3)])
+
+    s = p.fire([_apply_record('Stunned', 3, 'control', seq=10)], w, _noop)
+    assert "Wizard stunned, 3 turns." in s[1]
+    assert "Still stunned" not in s[1]
+
+    w.buffs = [_StubBuff('Stunned', 2)]
+    s = p.fire([], w, _noop)
+    assert s[1] == "Still stunned, 2 turns left."
+
+    w.buffs = [_StubBuff('Stunned', 1)]
+    s = p.fire([], w, _noop)
+    assert s[1] == "Still stunned, 1 turn left."
+
+
+def test_noncontrol_debuff_announced_once_then_suppressed():
+    """Non-control debuff re-applied to the same duration is silent after
+    onset (no high-water escalation), and gets no countdown."""
+    p = _CrisisProducer()
+    w = _StubWizardBuffs(buffs=[_StubBuff('Poisoned', 5)])
+
+    s = p.fire([_apply_record('Poisoned', 5, None, seq=10)], w, _noop)
+    assert s[1] == "Wizard poisoned, 5 turns."
+
+    s = p.fire([_apply_record('Poisoned', 5, None, seq=11)], w, _noop)
+    assert s[1] == ""
+
+
+def test_control_escalation_reannounced_then_counts_from_new_high():
+    p = _CrisisProducer()
+    w = _StubWizardBuffs(buffs=[_StubBuff('Stunned', 2)])
+
+    s = p.fire([_apply_record('Stunned', 2, 'control', seq=10)], w, _noop)
+    assert "Wizard stunned, 2 turns." in s[1]
+
+    w.buffs = [_StubBuff('Stunned', 4)]
+    s = p.fire([_apply_record('Stunned', 4, 'control', seq=11)], w, _noop)
+    assert "Wizard stunned, 4 turns." in s[1]
+    assert "Still stunned" not in s[1]
+
+    w.buffs = [_StubBuff('Stunned', 3)]
+    s = p.fire([], w, _noop)
+    assert s[1] == "Still stunned, 3 turns left."
+
+
+def test_fade_clears_highwater_reannounces():
+    p = _CrisisProducer()
+    w = _StubWizardBuffs(buffs=[_StubBuff('Poisoned', 5)])
+
+    s = p.fire([_apply_record('Poisoned', 5, None, seq=10)], w, _noop)
+    assert s[1] == "Wizard poisoned, 5 turns."
+
+    w.buffs = []
+    fade = _buff_record('EventOnBuffRemove', _wizard_snap(), name='Poisoned')
+    fade['sequence'] = 11
+    s = p.fire([fade], w, _noop)
+    assert s[1] == "Wizard's Poisoned faded."
+
+    w.buffs = [_StubBuff('Poisoned', 5)]
+    s = p.fire([_apply_record('Poisoned', 5, None, seq=12)], w, _noop)
+    assert s[1] == "Wizard poisoned, 5 turns."
+
+
+def test_silence_counts_down():
+    p = _CrisisProducer()
+    w = _StubWizardBuffs(buffs=[_StubBuff('Silenced', 2)])
+
+    s = p.fire([_apply_record('Silenced', 2, 'silence', seq=10)], w, _noop)
+    assert "Wizard silenced, 2 turns." in s[1]
+
+    w.buffs = [_StubBuff('Silenced', 1)]
+    s = p.fire([], w, _noop)
+    assert s[1] == "Still silenced, 1 turn left."
+
+
+def test_suppressed_reapply_still_claimed():
+    """A suppressed flat re-application is still claimed so the orphan
+    producer doesn't re-narrate it."""
+    p = _CrisisProducer()
+    w = _StubWizardBuffs(buffs=[_StubBuff('Poisoned', 5)])
+
+    p.fire([_apply_record('Poisoned', 5, None, seq=10)], w, _noop)
+    rec2 = _apply_record('Poisoned', 5, None, seq=11)
+    p.fire([rec2], w, _noop)
+    assert _has_crisis_mark(rec2)
+
+
+# ---- Class-4: scaling resist penalty read ----
+
+
+def test_resist_penalty_deepens_on_each_stack():
+    """A stacking resist penalty (same duration each stack) is silent on the
+    severity gate but speaks the deepening effective resist."""
+    p = _CrisisProducer()
+    w = _StubWizardBuffs(buffs=[_StubBuff('Melted Armor', 3)])
+
+    s = p.fire([_apply_record('Melted Armor', 3, seq=10,
+                              resist_penalty={'Physical': -10})], w, _noop)
+    assert "Physical resistance now -10%." in s[1]
+
+    s = p.fire([_apply_record('Melted Armor', 3, seq=11,
+                              resist_penalty={'Physical': -20})], w, _noop)
+    assert s[1] == "Physical resistance now -20%."
+
+
+def test_resist_penalty_not_deepening_is_silent():
+    p = _CrisisProducer()
+    w = _StubWizardBuffs(buffs=[_StubBuff('Melted Armor', 3)])
+
+    p.fire([_apply_record('Melted Armor', 3, seq=10,
+                          resist_penalty={'Physical': -10})], w, _noop)
+    s = p.fire([_apply_record('Melted Armor', 3, seq=11,
+                              resist_penalty={'Physical': -10})], w, _noop)
+    assert s[1] == ""
+
+
+def test_resist_recovers_on_fade_then_reannounces():
+    p = _CrisisProducer()
+    w = _StubWizardBuffs(buffs=[_StubBuff('Melted Armor', 3)])
+
+    p.fire([_apply_record('Melted Armor', 3, seq=10,
+                          resist_penalty={'Physical': -10})], w, _noop)
+
+    w.buffs = []
+    fade = _buff_record('EventOnBuffRemove', _wizard_snap(), name='Melted Armor')
+    fade['sequence'] = 11
+    fade['payload']['buff']['resist_penalty'] = {'Physical': 0}
+    p.fire([fade], w, _noop)
+
+    s = p.fire([_apply_record('Melted Armor', 3, seq=12,
+                              resist_penalty={'Physical': -10})], w, _noop)
+    assert "Physical resistance now -10%." in s[1]
+
+
+def test_resist_still_positive_no_line():
+    """A resist-lowering debuff whose effective total stays non-negative is
+    not a vulnerability — no resist line."""
+    p = _CrisisProducer()
+    w = _StubWizardBuffs(buffs=[_StubBuff('Chilled', 3)])
+
+    s = p.fire([_apply_record('Chilled', 3, seq=10,
+                              resist_penalty={'Fire': 20})], w, _noop)
+    assert "resistance now" not in s[1]
+
+
+# ---- Slice 4: wizard DOT damage summing ----
+
+
+def _dot_damage(source, damage=3, dtype='Physical', turns=4, seq=10):
+    """A DOT-tick EventOnDamaged on the wizard (source is a buff, so the
+    journal captured source_turns_left)."""
+    return {
+        'sequence': seq, 'parent': None, 'event_type': 'EventOnDamaged',
+        'payload': {
+            'target': _wizard_snap(), 'damage': damage,
+            'damage_type': dtype, 'source_name': source,
+            'source_turns_left': turns,
+        },
+        'marks': [],
+    }
+
+
+def test_wizard_dot_stacks_sum_per_source():
+    """Three Bleed ticks on the wizard sum to one line."""
+    p = _CrisisProducer()
+    w = _StubWizardBuffs()
+    recs = [_dot_damage('Bleed', 3, 'Physical', 4, seq=s) for s in (10, 11, 12)]
+    s = p.fire(recs, w, _noop)
+    assert "Wizard took 9 Physical from Bleed." in s[1]
+    assert "took 3 Physical" not in s[1]
+
+
+def test_wizard_distinct_dot_sources_not_merged():
+    """Different DOT sources stay distinct."""
+    p = _CrisisProducer()
+    w = _StubWizardBuffs()
+    recs = [
+        _dot_damage('Bleed', 3, 'Physical', 4, seq=10),
+        _dot_damage('Poisoned', 1, 'Poison', 5, seq=11),
+    ]
+    s = p.fire(recs, w, _noop)
+    assert "Wizard took 3 Physical from Bleed." in s[1]
+    assert "Wizard took 1 Poison from Poisoned." in s[1]
+
+
+def test_wizard_nondot_damage_not_summed():
+    """Non-DOT hits (no buff source) render per event, never summed."""
+    p = _CrisisProducer()
+    w = _StubWizardBuffs()
+    r1 = _damage_record(_wizard_snap(), damage=5, dtype='Fire', source='Imp')
+    r1['sequence'] = 10
+    r2 = _damage_record(_wizard_snap(), damage=5, dtype='Fire', source='Imp')
+    r2['sequence'] = 11
+    s = p.fire([r1, r2], w, _noop)
+    assert s[1].count("Wizard took 5 Fire from Imp.") == 2
