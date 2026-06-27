@@ -1,0 +1,15 @@
+# Local / generated — not for distribution
+__pycache__/
+*.pyc
+*.log
+logs/
+telemetry/
+telemetry_enabled
+
+# Internal dev docs (kept locally, out of the public repo)
+docs/
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec

@@ -1,0 +1,7710 @@
+# Rift Wizard 2 Screen Reader Mod — Words of Power
+MOD_VERSION = "0.4.0"
+
+import sys
+import os
+
+import datetime
+import ctypes
+
+# Get the directory where this mod file is located
+mod_dir = os.path.dirname(os.path.abspath(__file__))
+
+# Add base game directory to path (for Level, Spells, etc.)
+game_dir = os.path.abspath(os.path.join(mod_dir, '../..'))
+if game_dir not in sys.path:
+    sys.path.append(game_dir)
+
+# Add mod directory to path (for helpers.py imports)
+if mod_dir not in sys.path:
+    sys.path.insert(0, mod_dir)
+
+# Set up logging to file — archive previous log before overwriting
+log_file_path = os.path.join(mod_dir, "screen_reader_debug.log")
+log_archive_dir = os.path.join(mod_dir, "logs")
+os.makedirs(log_archive_dir, exist_ok=True)
+if os.path.exists(log_file_path) and os.path.getsize(log_file_path) > 0:
+    mtime = os.path.getmtime(log_file_path)
+    stamp = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d_%H-%M-%S")
+    archive_name = f"screen_reader_debug_{stamp}.log"
+    try:
+        os.rename(log_file_path, os.path.join(log_archive_dir, archive_name))
+    except OSError:
+        pass  # If rename fails (e.g. duplicate), just overwrite
+log_file = open(log_file_path, 'w', encoding='utf-8')
+
+# Dev-only telemetry: writes structured JSONL to local disk for the author's
+# own post-run analysis. The telemetry module is NOT shipped in the release zip,
+# so this import fails on player machines and _telemetry is set to None below.
+# Every _telemetry call in the mod is wrapped in try/except, so None is safe.
+# Even if the module were present, it requires a sentinel file (telemetry_enabled)
+# to activate and contains zero network code — no data ever leaves the machine.
+# The mod makes no outbound connections of any kind.
+# Source: https://github.com/EarthboundPromoter/Words-of-Power
+try:
+    from . import telemetry as _telemetry  # type: ignore
+except Exception:
+    try:
+        import telemetry as _telemetry  # type: ignore
+    except Exception:
+        _telemetry = None
+
+
+def log(message):
+    """Write to both console and log file."""
+    timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+    full_message = f"[{timestamp}] {message}"
+    print(full_message)
+    log_file.write(full_message + "\n")
+    log_file.flush()
+    try:
+        _telemetry.capture(full_message)
+    except Exception:
+        pass
+
+log("=" * 60)
+log(f"Words of Power v{MOD_VERSION}")
+log(f"Mod directory: {mod_dir}")
+log(f"Game directory: {game_dir}")
+log(f"Log file: {log_file_path}")
+log("=" * 60)
+
+# ============================================================================
+# SETTINGS
+# ============================================================================
+import configparser as _configparser
+
+# Schema-driven settings: single source of truth for default values + comment
+# blocks. Adding a new setting? Add to this list once. Both default-write (for
+# fresh installs) and back-fill (for upgraders whose settings.ini predates the
+# new key) read from here, so users always see new options in their file.
+#
+# Tuple shape: (section, key, default, comment). Section enables logical
+# grouping in settings.ini — e.g. [Composer] for new-pipeline flags so users
+# can find them as a cluster.
+_SETTINGS_SCHEMA = [
+    ('words_of_power', 'show_coordinates', 'true',
+     "# Show absolute grid coordinates in scan output and movement announcements.\n"
+     "# Coordinates appear after direction info: \"Wolf, 3 east (12,8)\"\n"
+     "# Default: true"),
+    ('words_of_power', 'pathfind_marked', 'true',
+     "# Announce pathfinding for the marked target. On marking, speaks the full\n"
+     "# compressed path. Each subsequent turn, prepends the next single step\n"
+     "# (\"Move north.\") to the regular mark readout. Set false to silence the\n"
+     "# navigation channel without losing the rest of the mark info.\n"
+     "# Default: true"),
+    ('words_of_power', 'journal_log_enabled', 'false',
+     "# Dev-only: write a per-event JSONL trace of internal capture-stage records\n"
+     "# to journal_debug.log. Used by the mod author for debugging the data-model\n"
+     "# pipeline. No effect on speech behavior. Leave false unless instructed.\n"
+     "# Default: false"),
+    ('words_of_power', 'digest_enabled', 'false',
+     "# Enable the direct-action digest: a composed summary of one player\n"
+     "# keypress's full effect chain (cast, damage, kills, procs, side-effects)\n"
+     "# emitted at turn-end as a single utterance, replacing the per-event\n"
+     "# combat speech that would otherwise come from the batcher for that\n"
+     "# chain. Crisis events (player damage taken, HP threshold, wizard\n"
+     "# death) continue to fire immediately regardless of this setting.\n"
+     "# Default: false (opt-in; first-release rollout)"),
+    # ------------------------------------------------------------------
+    # [Composer] — the new section-producer pipeline (crisis + orphan,
+    # alongside the digest). Flags default OFF for a strangler-fig
+    # rollout: the legacy batcher continues handling combat narration
+    # until producers are validated in parallel mode and the kill
+    # switch is flipped.
+    # ------------------------------------------------------------------
+    ('Composer', 'crisis_enabled', 'false',
+     "# Enable the crisis producer: foregrounds player-state-change events\n"
+     "# (damage taken, HP threshold, debuffs applied, buffs fading, wizard\n"
+     "# death, cloud-on-tile, displacement) at the top of each turn's\n"
+     "# utterance via the Wizard-prefix convention. Replaces the legacy\n"
+     "# batcher's IMMEDIATE-tier handling of these events when also\n"
+     "# legacy_batcher_combat_enabled=false.\n"
+     "# Default: false (opt-in; parallel-mode validation phase)"),
+    ('Composer', 'orphan_enabled', 'false',
+     "# Enable the orphan-window composer: composes the ambient/enemy-turn\n"
+     "# body of each turn's utterance — non-player actions (enemy + ally\n"
+     "# casts, attacks, deaths) and status ticks (DOTs, fades, unfreeze).\n"
+     "# Equipment passives are handled by equipment_enabled, a separate\n"
+     "# producer at a distinct priority. Replaces the legacy batcher's\n"
+     "# collapsed-tier combat handling when also\n"
+     "# legacy_batcher_combat_enabled=false.\n"
+     "# Default: false (opt-in; parallel-mode validation phase)"),
+    ('Composer', 'equipment_enabled', 'false',
+     "# Enable the equipment producer: composes gear-driven narrative\n"
+     "# (equipment_tick chains — sub-cast items like Explosive Spore\n"
+     "# Manual, direct-effect items like Stone Mask) at priority 150,\n"
+     "# between digest (player keypress) and orphan (ambient). Independent\n"
+     "# from orphan_enabled because gear narrative and ambient enemy\n"
+     "# narrative evolve on different timelines. Replaces legacy batcher\n"
+     "# coverage of equipment effects when also\n"
+     "# legacy_batcher_combat_enabled=false.\n"
+     "# Default: false (opt-in; parallel-mode validation phase)"),
+    ('Composer', 'legacy_batcher_combat_enabled', 'true',
+     "# Strangler-fig kill switch. When true (default), the legacy batcher's\n"
+     "# combat handlers continue to render damage / casts / deaths / heals /\n"
+     "# buffs / shields / spawns alongside the digest. When false, those\n"
+     "# handlers bail at a shared check at top, leaving combat narration\n"
+     "# entirely to the new pipeline (digest + crisis + equipment + orphan).\n"
+     "# Flip to false only after crisis_enabled, equipment_enabled, and\n"
+     "# orphan_enabled have all been validated in parallel-mode play.\n"
+     "# Default: true"),
+    ('Composer', 'dot_renotify_enabled', 'false',
+     "# Renotify the player each turn while a damage-over-time effect is\n"
+     "# active on the wizard (Poisoned, Burning, Bleeding, etc.). When\n"
+     "# false (default), the apply-time announcement is the only crisis\n"
+     "# line for the DOT — the player can query active effects for\n"
+     "# remaining duration. When true, every tick fires a crisis line\n"
+     "# (\"Wizard took 1 Poison from Poisoned\") alongside other damage.\n"
+     "# Reserved for users who want continuous DOT awareness during\n"
+     "# multi-DOT pile-ons.\n"
+     "# Default: false"),
+    ('Composer', 'movement_verbose', 'false',
+     "# Verbose rendering for enemy movement abilities (Frog Hop, Dash,\n"
+     "# Blink-style spells). When false (default), movement chains\n"
+     "# render compactly: 'Horned Toad cast Frog Hop, moved to (22,22).'\n"
+     "# for a single mover, '5 Horned Toads cast Frog Hop, moved.' for\n"
+     "# multi-collapse. When true, movement chains include each caster's\n"
+     "# starting position and the full from-to pair list:\n"
+     "# '5 Horned Toads cast Frog Hop: (21,23) to (22,22), (17,10) to\n"
+     "# (20,9), ...' Useful when tracking exact enemy positions matters.\n"
+     "# Default: false (noise reduction; flip true for full spatial\n"
+     "# detail)."),
+]
+
+
+def _render_default_settings():
+    """Build the default settings.ini content from the schema, grouping
+    keys by their declared section in declaration order. New sections
+    appear in the file in the order they first appear in the schema."""
+    parts = [
+        "# Words of Power settings",
+        "# Edit this file to customize mod behavior. Restart the game after changes.",
+        "",
+    ]
+    section_order = []
+    by_section = {}
+    for section, key, default, comment in _SETTINGS_SCHEMA:
+        if section not in by_section:
+            section_order.append(section)
+            by_section[section] = []
+        by_section[section].append((key, default, comment))
+
+    for section in section_order:
+        parts.append(f"[{section}]")
+        parts.append("")
+        for key, default, comment in by_section[section]:
+            parts.append(comment)
+            parts.append(f"{key} = {default}")
+            parts.append("")
+    return "\n".join(parts)
+
+
+def _backfill_missing(path, parser):
+    """Append schema keys missing from the loaded settings.ini.
+
+    Existing user values are preserved untouched. Missing keys are appended
+    with their default value and comment block, grouped under their
+    declared section header (which may also need to be appended if the
+    user's settings.ini predates the section). Upgraders see new options
+    without having to delete settings.ini and lose their existing
+    customizations."""
+    missing_by_section = {}
+    for section, key, default, comment in _SETTINGS_SCHEMA:
+        if not parser.has_section(section) or not parser.has_option(section, key):
+            missing_by_section.setdefault(section, []).append((key, default, comment))
+    if not missing_by_section:
+        return
+
+    with open(path, 'a', encoding='utf-8') as f:
+        for section, items in missing_by_section.items():
+            section_existed = parser.has_section(section)
+            f.write("\n")
+            if not section_existed:
+                f.write(f"[{section}]\n\n")
+            for key, default, comment in items:
+                f.write(comment + "\n")
+                f.write(f"{key} = {default}\n")
+                f.write("\n")
+
+    keys = ', '.join(
+        f"[{s}].{k}" for s, items in missing_by_section.items() for k, _, _ in items
+    )
+    log(f"[Settings] Back-filled missing keys: {keys}")
+
+
+_settings_path = os.path.join(mod_dir, "settings.ini")
+_settings = _configparser.ConfigParser()
+
+if not os.path.exists(_settings_path):
+    with open(_settings_path, 'w', encoding='utf-8') as _f:
+        _f.write(_render_default_settings())
+    _settings.read(_settings_path, encoding='utf-8')
+    log("[Settings] Created default settings.ini")
+else:
+    _settings.read(_settings_path, encoding='utf-8')
+    log("[Settings] Loaded settings.ini")
+    _backfill_missing(_settings_path, _settings)
+
+class _Cfg:
+    show_coordinates = _settings.getboolean('words_of_power', 'show_coordinates', fallback=True)
+    pathfind_marked = _settings.getboolean('words_of_power', 'pathfind_marked', fallback=True)
+    journal_log_enabled = _settings.getboolean('words_of_power', 'journal_log_enabled', fallback=False)
+    digest_enabled = _settings.getboolean('words_of_power', 'digest_enabled', fallback=False)
+    # [Composer] — new-pipeline flags. Defaults match the conservative
+    # strangler-fig rollout: producers off, legacy batcher on. Flip
+    # crisis/orphan true after wiring; flip legacy off after validation.
+    crisis_enabled = _settings.getboolean('Composer', 'crisis_enabled', fallback=False)
+    orphan_enabled = _settings.getboolean('Composer', 'orphan_enabled', fallback=False)
+    equipment_enabled = _settings.getboolean('Composer', 'equipment_enabled', fallback=False)
+    legacy_batcher_combat_enabled = _settings.getboolean(
+        'Composer', 'legacy_batcher_combat_enabled', fallback=True
+    )
+    dot_renotify_enabled = _settings.getboolean('Composer', 'dot_renotify_enabled', fallback=False)
+    movement_verbose = _settings.getboolean('Composer', 'movement_verbose', fallback=False)
+
+cfg = _Cfg()
+log(f"[Settings] show_coordinates = {cfg.show_coordinates}")
+log(f"[Settings] pathfind_marked = {cfg.pathfind_marked}")
+log(f"[Settings] journal_log_enabled = {cfg.journal_log_enabled}")
+log(f"[Settings] digest_enabled = {cfg.digest_enabled}")
+log(f"[Settings] crisis_enabled = {cfg.crisis_enabled}")
+log(f"[Settings] orphan_enabled = {cfg.orphan_enabled}")
+log(f"[Settings] equipment_enabled = {cfg.equipment_enabled}")
+log(f"[Settings] legacy_batcher_combat_enabled = {cfg.legacy_batcher_combat_enabled}")
+log(f"[Settings] dot_renotify_enabled = {cfg.dot_renotify_enabled}")
+log(f"[Settings] movement_verbose = {cfg.movement_verbose}")
+
+# ============================================================================
+# TTS INTEGRATION — Tolk
+# ============================================================================
+# Tolk is a screen reader abstraction DLL that auto-detects the active screen
+# reader (NVDA, JAWS, SAPI5, Window-Eyes, SuperNova, System Access, ZoomText)
+# and provides simple C functions: Tolk_Speak, Tolk_Silence, etc.
+#
+# Falls back to direct NVDA DLL calls if Tolk.dll is not present.
+# ============================================================================
+
+import traceback as _traceback
+
+class _TolkTTS:
+    """Screen reader TTS via Tolk abstraction library."""
+
+    def __init__(self):
+        self.tolk = None
+        self.enabled = False
+
+        dll_path = os.path.join(mod_dir, "Tolk.dll")
+        if not os.path.exists(dll_path):
+            log("[Tolk] DLL not found at: " + dll_path)
+            return
+
+        try:
+            self.tolk = ctypes.cdll[dll_path]
+
+            # Configure function signatures
+            self.tolk.Tolk_Load.restype = None
+            self.tolk.Tolk_Unload.restype = None
+            self.tolk.Tolk_TrySAPI.restype = None
+            self.tolk.Tolk_TrySAPI.argtypes = [ctypes.c_bool]
+            self.tolk.Tolk_DetectScreenReader.restype = ctypes.c_wchar_p
+            self.tolk.Tolk_Speak.restype = ctypes.c_bool
+            self.tolk.Tolk_Speak.argtypes = [ctypes.c_wchar_p, ctypes.c_bool]
+            self.tolk.Tolk_Silence.restype = ctypes.c_bool
+
+            # Tolk uses LoadLibrary() with bare DLL names (e.g.
+            # "nvdaControllerClient64.dll") inside its native code.
+            # SetDllDirectoryW adds to the Windows LoadLibrary search path
+            # so Tolk can find screen reader driver DLLs in the mod folder.
+            ctypes.windll.kernel32.SetDllDirectoryW(mod_dir)
+            log("[Tolk] Set DLL search directory to mod dir")
+
+            # Enable SAPI as last-resort fallback (not preferred over
+            # real screen readers), then initialize
+            self.tolk.Tolk_TrySAPI(True)
+            self.tolk.Tolk_PreferSAPI.restype = None
+            self.tolk.Tolk_PreferSAPI.argtypes = [ctypes.c_bool]
+            self.tolk.Tolk_PreferSAPI(False)
+            self.tolk.Tolk_Load()
+
+            sr = self.tolk.Tolk_DetectScreenReader()
+            if sr:
+                self.enabled = True
+                log(f"[Tolk] Screen reader detected: {sr}")
+            else:
+                log("[Tolk] No active screen reader found")
+                log("[Tolk] Make sure a screen reader is running before starting the game")
+
+        except Exception as e:
+            log(f"[Tolk] ERROR during initialization: {e}")
+            log(_traceback.format_exc())
+
+    def speak(self, text):
+        if self.enabled:
+            try:
+                self.tolk.Tolk_Speak(text, False)
+            except Exception as e:
+                log(f"[Tolk] Error speaking: {e}")
+                log(f"[Fallback] {text}")
+        else:
+            log(f"[TTS] {text}")
+
+    def cancel(self):
+        if self.enabled:
+            try:
+                self.tolk.Tolk_Silence()
+            except Exception as e:
+                log(f"[Tolk] Error canceling speech: {e}")
+
+
+class _DirectNVDA:
+    """Fallback: direct NVDA DLL calls (pre-Tolk approach)."""
+
+    def __init__(self):
+        self.nvda = None
+        self.enabled = False
+
+        dll_path = os.path.join(mod_dir, "nvdaControllerClient64.dll")
+        if not os.path.exists(dll_path):
+            log("[NVDA] ERROR: DLL not found at: " + dll_path)
+            return
+
+        try:
+            # Initialize COM on main thread before any DLL calls
+            try:
+                ctypes.windll.ole32.CoInitializeEx(None, 0x2)
+                log("[NVDA] COM initialized on main thread (STA)")
+            except Exception as e:
+                log(f"[NVDA] COM init warning: {e}")
+
+            self.nvda = ctypes.CDLL(dll_path)
+            self.nvda.nvdaController_testIfRunning.restype = ctypes.c_long
+            result = self.nvda.nvdaController_testIfRunning()
+            if result == 0:
+                self.nvda.nvdaController_speakText.argtypes = [ctypes.c_wchar_p]
+                self.nvda.nvdaController_speakText.restype = ctypes.c_long
+                self.nvda.nvdaController_cancelSpeech.restype = ctypes.c_long
+                self.enabled = True
+                log("[NVDA] Direct DLL fallback initialized")
+            else:
+                log(f"[NVDA] NVDA not running (code {result})")
+        except Exception as e:
+            log(f"[NVDA] ERROR: {e}")
+
+    def speak(self, text):
+        if self.enabled:
+            try:
+                self.nvda.nvdaController_speakText(text)
+            except Exception as e:
+                log(f"[NVDA] Error speaking: {e}")
+        else:
+            log(f"[TTS] {text}")
+
+    def cancel(self):
+        if self.enabled:
+            try:
+                self.nvda.nvdaController_cancelSpeech()
+            except Exception as e:
+                log(f"[NVDA] Error canceling: {e}")
+
+
+# Initialize TTS — Tolk if available, direct NVDA DLL otherwise
+tts = _TolkTTS()
+if not tts.enabled:
+    log("[TTS] Tolk not available or no screen reader, trying direct NVDA DLL")
+    tts = _DirectNVDA()
+
+# All DLL calls go through async_tts (SyncTTS wrapper) for consistent history tracking.
+log(f"Words of Power v{MOD_VERSION} initialization complete")
+
+# ============================================================================
+# PHASE 0.5: Level Lifecycle Hook
+# ============================================================================
+
+log("[Init] Level lifecycle hook...")
+
+import Level
+
+_original_setup_level = Level.Level.setup_level  # RW3: setup_logging deleted → setup_level (port #1)
+log("Level lifecycle hook base captured")
+
+# ----- Phase 2: Journal capture stage (silent infrastructure, no consumers yet) -----
+import journal as _journal
+_journal.install_hooks()
+if cfg.journal_log_enabled:
+    _journal_log_path = os.path.join(mod_dir, "journal_debug.log")
+    _journal.journal.open_log(_journal_log_path)
+    log(f"[Journal] Capture hooks installed; debug log -> {_journal_log_path}")
+else:
+    log("[Journal] Capture hooks installed; debug log disabled (journal_log_enabled=false)")
+
+# ----- Phase 3: Direct-action digest composer (gated by digest_enabled) -----
+import digest as _digest
+if cfg.digest_enabled:
+    log("[Digest] Composer registered; fires at turn-end for player chains")
+else:
+    log("[Digest] Composer dormant (digest_enabled=false)")
+
+# ----- Composer pipeline: crisis + digest + equipment + orphan -----
+# The pipeline coordinates the four producers in mark-precedence order
+# (crisis → digest → equipment → orphan) and emits ONE TTS call per
+# turn boundary. Each producer is independently config-gated; disabled
+# producers are skipped. See design_orphan_composer_phrasing.md.
+import pipeline as _pipeline
+import crisis as _crisis  # noqa: F401  -- registered via the pipeline import
+import equipment as _equipment  # noqa: F401  -- registered via pipeline import
+import orphan as _orphan  # noqa: F401  -- registered via the pipeline import
+if cfg.crisis_enabled:
+    log("[Crisis] Producer registered; foregrounds player-state events")
+else:
+    log("[Crisis] Producer dormant (crisis_enabled=false)")
+if cfg.equipment_enabled:
+    log("[Equipment] Producer registered; composes player-passives narrative")
+else:
+    log("[Equipment] Producer dormant (equipment_enabled=false)")
+if cfg.orphan_enabled:
+    log("[Orphan] Producer registered; composes ambient/enemy-turn body")
+else:
+    log("[Orphan] Producer dormant (orphan_enabled=false)")
+
+# ============================================================================
+# PHASE 1-2: Event Hooks - All Combat & Game Events
+# ============================================================================
+
+log("[Init] Event triggers...")
+
+import threading
+import time
+from collections import deque
+
+class SyncTTS:
+    """Thin TTS wrapper — all DLL calls happen directly on the calling thread.
+    nvdaController_speakText is non-blocking IPC (<1ms), safe to call from
+    the main thread at 30 FPS. No worker threads, no COM apartment issues.
+
+    Rolling history buffer: last 200 speech events stored in a deque.
+    [ key = step back, ] key = step forward, Z = repeat at cursor."""
+    def __init__(self, base_tts):
+        self.base_tts = base_tts
+        self._history = deque(maxlen=200)
+        self._cursor = -1  # -1 = live (latest entry)
+
+    @property
+    def _last_spoken(self):
+        """Backward compat for any code reading _last_spoken."""
+        return self._history[-1] if self._history else ""
+
+    def speak(self, text):
+        self._history.append(text)
+        self._cursor = -1  # reset to live on new speech
+        self.base_tts.speak(text)
+
+    def cancel(self):
+        self.base_tts.cancel()
+
+    def history_back(self):
+        """Step one entry older. Cancel current speech, speak that entry."""
+        if not self._history:
+            return
+        if self._cursor == -1:
+            self._cursor = len(self._history) - 2  # skip the very latest (just heard)
+        else:
+            self._cursor -= 1
+        if self._cursor < 0:
+            self._cursor = 0
+            self.base_tts.cancel()
+            self.base_tts.speak("Start of history")
+            return
+        self.base_tts.cancel()
+        self.base_tts.speak(self._history[self._cursor])
+
+    def history_forward(self):
+        """Step one entry newer. Cancel current speech, speak that entry."""
+        if self._cursor == -1:
+            self.base_tts.cancel()
+            self.base_tts.speak("End of history")
+            return
+        self._cursor += 1
+        if self._cursor >= len(self._history):
+            self._cursor = -1
+            self.base_tts.cancel()
+            self.base_tts.speak("End of history")
+            return
+        self.base_tts.cancel()
+        self.base_tts.speak(self._history[self._cursor])
+
+    def speak_batched(self, chunks):
+        """Speak full text as one utterance, but add each chunk to history
+        individually for [/] navigation of large text blocks."""
+        for chunk in chunks:
+            self._history.append(chunk)
+        self._cursor = -1
+        self.base_tts.speak(' '.join(chunks))
+
+    def speak_chunks(self, chunks):
+        """Unified speech entry point for list[str] describers.
+        Single-element lists behave identically to speak(). Multi-element
+        lists behave identically to speak_batched(). Callers never need to
+        decide which method to use — just pass the chunks."""
+        if len(chunks) == 1:
+            self.speak(chunks[0])
+        else:
+            self.speak_batched(chunks)
+
+async_tts = SyncTTS(tts)
+async_tts.speak(f"Words of Power version {MOD_VERSION}")
+log(f"[Init] Spoke version: {MOD_VERSION}")
+
+# ============================================================================
+# SPEECH BATCHING — Priority Queue + Flush System
+# ============================================================================
+# During enemy turns, non-critical speech is held in a queue and delivered
+# at the turn boundary (is_awaiting_input transition). Critical speech
+# (player damage, death, HP) bypasses the queue and speaks immediately.
+#
+# Lifecycle per turn:
+#   1. is_awaiting_input → True:  flush() delivers queue, then turn signal
+#   2. Player acts:               start_batching() activates queue
+#   3. Events fire:               speak_queued() holds, speak_immediate() bypasses
+#   4. is_awaiting_input → True:  back to step 1
+# ============================================================================
+
+_DEDUP_MIN_RUN = 3
+
+class _FlushDeduper:
+    """Wraps a TTS backend during flush to coalesce consecutive identical speech.
+    Runs of N >= _DEDUP_MIN_RUN identical strings become one 'N times. {text}' call."""
+
+    def __init__(self, tts):
+        self._tts = tts
+        self._pending_text = None
+        self._pending_count = 0
+
+    def speak(self, text):
+        if text == self._pending_text:
+            self._pending_count += 1
+        else:
+            self._emit_pending()
+            self._pending_text = text
+            self._pending_count = 1
+
+    def _emit_pending(self):
+        if self._pending_text is None:
+            return
+        if self._pending_count >= _DEDUP_MIN_RUN:
+            log(f"[Dedup] {self._pending_count}x: {self._pending_text}")
+            self._tts.speak(f"{self._pending_count} times. {self._pending_text}")
+        else:
+            for _ in range(self._pending_count):
+                self._tts.speak(self._pending_text)
+        self._pending_text = None
+        self._pending_count = 0
+
+    def done(self):
+        self._emit_pending()
+
+class SpeechBatcher:
+    """Queues speech during enemy turns, flushes at turn boundary.
+
+    Two queues:
+    - _queue: QUEUED tier — (seq, text) tuples, delivered flat in order
+    - _collapsed: COLLAPSED tier — event dicts with metadata, grouped by
+      target unit at flush time (Phase B target-first grouping)
+
+    Thread-safe: the charge timer (threading.Timer) calls speak_queued from
+    a background thread. The lock protects all mutable state.
+    All actual NVDA DLL calls happen through async_tts.speak() which is
+    synchronous and non-blocking (<1ms IPC)."""
+
+    def __init__(self, tts_backend):
+        self._tts = tts_backend
+        self._queue = []       # list of (seq, text) tuples — QUEUED tier
+        self._collapsed = []   # list of event dicts — COLLAPSED tier
+        self._seq = 0          # monotonic sequence counter
+        self._lock = threading.Lock()
+        self._active = False   # True when batching (enemy turn in progress)
+
+    @property
+    def is_active(self):
+        """Check if batching is currently active (enemy turn in progress)."""
+        return self._active
+
+    def start_batching(self):
+        """Begin batching: queued messages will be held until flush().
+        Called when is_awaiting_input transitions False (player acted)."""
+        with self._lock:
+            self._active = True
+
+    def speak_immediate(self, text):
+        """Speak immediately, bypassing the queue. For IMMEDIATE tier."""
+        self._tts.speak(text)
+
+    def speak_queued(self, text):
+        """Queue a message if batching is active, otherwise speak immediately.
+        Handles events during the player's own turn (first turn, etc.) by
+        falling through to immediate speech when _active is False."""
+        with self._lock:
+            if self._active:
+                self._seq += 1
+                self._queue.append((self._seq, text))
+                return
+        self._tts.speak(text)
+
+    def speak_collapsed(self, event_dict):
+        """Queue a structured event for collapsed-tier target grouping at flush.
+        Falls through to immediate flat speech when not batching (first turn)."""
+        with self._lock:
+            if self._active:
+                self._seq += 1
+                event_dict['seq'] = self._seq
+                self._collapsed.append(event_dict)
+                return
+        # Not batching — speak flat text immediately
+        text = event_dict.get('text', '')
+        if text:
+            self._tts.speak(text)
+
+    def flush(self):
+        """Deliver queued + collapsed messages in priority order, then clear.
+        Called at is_awaiting_input True transition, BEFORE the turn signal.
+
+        Flush order:
+        1. QUEUED messages (flat, chronological) — player spell results, kills
+        2. COLLAPSED minion target groups (T2) — nearest in-LoS first
+        3. COLLAPSED world target groups (T3) — nearest in-LoS first
+        4. COLLAPSED enemy casts — grouped by caster×spell"""
+        with self._lock:
+            if not self._queue and not self._collapsed:
+                self._active = False
+                return
+            queued = sorted(self._queue, key=lambda x: x[0])
+            collapsed = list(self._collapsed)
+            self._queue.clear()
+            self._collapsed.clear()
+            self._active = False
+
+        dedup = _FlushDeduper(self._tts)
+
+        # Phase 1: QUEUED messages (flat, chronological)
+        for seq, text in queued:
+            dedup.speak(text)
+
+        # Phase 2: COLLAPSED events (target-grouped)
+        if collapsed:
+            _flush_collapsed_events(collapsed, dedup)
+
+        dedup.done()
+
+        q_count = len(queued)
+        c_count = len(collapsed)
+        # Only log dense turns (collapsed content = multi-actor combat)
+        if c_count > 0 or q_count > 3:
+            log(f"[Batch] {_log_ctx()} Flushed {q_count}q + {c_count}c")
+
+    def clear(self):
+        """Discard all queued messages without speaking.
+        Called on LCtrl cancel and level transitions."""
+        with self._lock:
+            dropped_q = len(self._queue)
+            dropped_c = len(self._collapsed)
+            self._queue.clear()
+            self._collapsed.clear()
+            self._active = False
+        total = dropped_q + dropped_c
+        if total:
+            log(f"[Batch] Cleared {dropped_q} queued + {dropped_c} collapsed")
+
+# ============================================================================
+# COLLAPSED TIER: Target-First Grouping (Phase B)
+# ============================================================================
+# At flush time, collapsed events are grouped by target unit. Within each
+# target group, damage entries are collapsed by (source_name, spell, dtype).
+# Groups ordered by LoS (in-sight first), then proximity (nearest first).
+# ============================================================================
+
+def _flush_collapsed_events(events, tts):
+    """Group and deliver collapsed-tier events at turn boundary.
+
+    Ordering:
+    1. Minion target groups (T2): in-LoS nearest first, then out-of-LoS
+    2. World target groups (T3): in-LoS nearest first, then out-of-LoS
+    3. Enemy casts: grouped by (caster_type, spell)
+    """
+    try:
+        # Separate by tier
+        minion_events = []
+        world_events = []
+        cast_events = []
+
+        for evt in events:
+            tier = evt.get('tier', TIER_WORLD)
+            if tier == TIER_CAST:
+                cast_events.append(evt)
+            elif tier == TIER_MINION:
+                minion_events.append(evt)
+            else:
+                world_events.append(evt)
+
+        # T2: Minion target groups
+        if minion_events:
+            groups = _build_target_groups(minion_events)
+            groups = _merge_same_shape_groups(groups)
+            _deliver_target_groups(groups, tts, "minion")
+
+        # T3: World target groups
+        if world_events:
+            groups = _build_target_groups(world_events)
+            groups = _merge_same_shape_groups(groups)
+            _deliver_target_groups(groups, tts, "world")
+
+        # Enemy casts (no target — grouped by caster×spell)
+        if cast_events:
+            _deliver_cast_groups(cast_events, tts)
+    except Exception as e:
+        log(f"[Collapsed] Error in flush: {e}")
+        # Fallback: deliver as flat text
+        for evt in events:
+            text = evt.get('text', '')
+            if text:
+                tts.speak(text)
+
+def _build_target_groups(events):
+    """Group events by target unit into target groups.
+    Returns list of group dicts sorted by LoS (in-sight first) then distance."""
+    groups = {}  # id(target_unit) -> group dict
+
+    for evt in events:
+        target = evt.get('target_unit')
+        if target is None:
+            continue  # Skip events with no target (shouldn't happen here)
+        target_id = id(target)
+
+        if target_id not in groups:
+            groups[target_id] = {
+                'target_name': evt.get('target_name', 'unknown'),
+                'target_unit': target,
+                'direction': evt.get('direction', ''),
+                'cardinal': evt.get('cardinal', ''),
+                'distance': evt.get('distance', 0),
+                'los': evt.get('los', True),
+                'events': [],
+            }
+        groups[target_id]['events'].append(evt)
+
+    # Sort: in-LoS first (False < True, so not-los=True sorts after),
+    # then by distance ascending (nearest first)
+    return sorted(groups.values(), key=lambda g: (not g['los'], g['distance']))
+
+def _deliver_target_groups(groups, tts, tier_label):
+    """Format and deliver target groups with LoS split."""
+    for group in groups:
+        # Collective (same-shape merged) groups carry pre-rendered text.
+        if '_collective_text' in group:
+            text = group['_collective_text']
+        else:
+            text = _format_target_group(group)
+        if not group['los']:
+            if '_collective_text' in group:
+                prefix = "Out of sight"
+            else:
+                cardinal = group.get('cardinal', '')
+                prefix = f"Out of sight, {cardinal}" if cardinal else "Out of sight"
+            text = f"{prefix}. {text}"
+        log(f"[Collapsed {tier_label}] {_log_ctx()} {text}")
+        tts.speak(text)
+
+def _format_target_group(group):
+    """Format a single target group into spoken text.
+
+    Format: '[Target], [direction]. [source entries]. [Target HP/killed].'
+    Out-of-LoS targets skip direction (it's in the 'Out of sight' prefix).
+    """
+    target_name = group['target_name']
+    direction = group['direction']
+    events = sorted(group['events'], key=lambda e: e.get('seq', 0))
+    target_unit = group['target_unit']
+
+    # Analyze events: group damage by (source, spell, dtype), track heals/death
+    damage_groups = {}  # (source_name, spell_name, damage_type) -> {count, total}
+    seen_damage_keys = []  # preserve chronological first-appearance order
+    heal_total = 0
+    is_dead = False
+    is_expired = False
+
+    for evt in events:
+        etype = evt.get('event_type', '')
+        if etype == 'damage':
+            key = (evt.get('source_name', ''),
+                   evt.get('spell_name', ''),
+                   evt.get('damage_type', ''))
+            if key not in damage_groups:
+                damage_groups[key] = {'count': 0, 'total': 0}
+                seen_damage_keys.append(key)
+            damage_groups[key]['count'] += 1
+            damage_groups[key]['total'] += evt.get('damage', 0)
+        elif etype == 'heal':
+            heal_total += evt.get('heal_amount', 0)
+        elif etype == 'death':
+            is_dead = True
+            is_expired = evt.get('is_expired', False)
+
+    # Build parts: header, source entries, footer
+    parts = []
+
+    # Header: target name + direction (in-LoS only; out-of-LoS skips direction)
+    coord_tag = ""
+    if cfg.show_coordinates and target_unit is not None:
+        tx = getattr(target_unit, 'x', None)
+        ty = getattr(target_unit, 'y', None)
+        if tx is not None and ty is not None:
+            coord_tag = f" ({tx},{ty})"
+    if group['los'] and direction:
+        parts.append(f"{target_name}, {direction}{coord_tag}")
+    else:
+        parts.append(f"{target_name}{coord_tag}")
+
+    # Source entries (damage collapsed by source×spell×dtype)
+    source_entries = []
+    for key in seen_damage_keys:
+        source, spell, dtype = key
+        info = damage_groups[key]
+        entry_parts = []
+        # Count + source name (pluralized if >1)
+        if info['count'] > 1:
+            entry_parts.append(f"{info['count']} {_pluralize(source)}")
+        else:
+            entry_parts.append(source)
+        # Spell name: skip if same as source, or generic melee (no tactical info)
+        show_spell = spell and spell != source and spell != "Melee Attack"
+        if show_spell:
+            entry_parts.append(spell)
+        # Damage total + type (drop dtype when spell name already contains it)
+        if show_spell and dtype and dtype.lower() in spell.lower():
+            entry_parts.append(str(info['total']))
+        else:
+            entry_parts.append(f"{info['total']} {dtype}")
+        source_entries.append(" ".join(entry_parts))
+
+    if heal_total > 0:
+        source_entries.append(f"healed {heal_total}")
+
+    if source_entries:
+        parts.append(", ".join(source_entries))
+
+    # Footer: HP snapshot or killed/expired (target name already in header)
+    if is_dead:
+        parts.append("expired" if is_expired else "killed")
+    elif target_unit is not None:
+        hp = getattr(target_unit, 'cur_hp', '?')
+        max_hp = getattr(target_unit, 'max_hp', '?')
+        if isinstance(hp, int) and hp <= 0:
+            # Target was killed (death event routed elsewhere, e.g. player kill → QUEUED)
+            parts.append("killed")
+        else:
+            parts.append(f"{hp} of {max_hp}")
+
+    return ". ".join(parts)
+
+def _deliver_cast_groups(casts, tts):
+    """Group and deliver enemy casts by (caster_name, spell_name)."""
+    groups = {}  # (caster_name, spell_name) -> count
+    order = []   # preserve first-appearance order
+    for evt in casts:
+        key = (evt.get('source_name', ''), evt.get('spell_name', ''))
+        if key not in groups:
+            groups[key] = 0
+            order.append(key)
+        groups[key] += 1
+
+    for key in order:
+        caster, spell = key
+        count = groups[key]
+        if count > 1:
+            text = f"{count} {_pluralize(caster)} cast {spell}"
+        else:
+            text = f"{caster} casts {spell}"
+        log(f"[Collapsed cast] {_log_ctx()} {text}")
+        tts.speak(text)
+
+batcher = SpeechBatcher(async_tts)
+async_tts.speak("Screen reader mod loaded")
+
+# Helper: get a safe name from any object
+def _name(obj, fallback="something"):
+    if obj is None:
+        return fallback
+    name = getattr(obj, 'name', fallback) or fallback
+    # Invert "X Spawner" → "Spawner, X" so the priority word leads in audio
+    if isinstance(name, str) and name.endswith(' Spawner'):
+        name = f"Spawner, {name[:-len(' Spawner')]}"
+    return name
+
+def read_text(value, fmt=None):
+    """Flatten RW3's (template, fmt) tuples / lists-of-tuples into a plain spoken
+    string via Level.resolve_text. Optional fmt substitutes {placeholders}: pass an
+    object's fmt_dict() for LIVE, buffed values. No-op on plain strings; safe on
+    None. RW3 returns many names/descriptions as tuples that str()/.lower()/regex
+    choke on (port §11)."""
+    if value is None:
+        return ""
+    try:
+        return Level.resolve_text(value, fmt)
+    except Exception:
+        return value if isinstance(value, str) else str(value)
+
+def _desc_text(obj):
+    """Read an object's description fully formatted for speech, substituting LIVE
+    get_stat values (damage/radius/duration/etc. with the player's passives,
+    equipment, and upgrades applied — matching the game's own tooltip) by pairing
+    its description template with fmt_dict(). Falls back gracefully without fmt_dict."""
+    if obj is None:
+        return ""
+    try:
+        desc = obj.get_description() if hasattr(obj, 'get_description') else getattr(obj, 'description', '')
+    except Exception:
+        desc = getattr(obj, 'description', '') or ''
+    fmt = None
+    if hasattr(obj, 'fmt_dict'):
+        try:
+            fmt = obj.fmt_dict()
+        except Exception:
+            fmt = None
+    return read_text(desc, fmt)
+
+# Helper: identify if a unit is the player
+def _is_player(unit):
+    return getattr(unit, 'is_player_controlled', False)
+
+# Helper: detect Soulbound buff on a unit (lich soul jar mechanic)
+def _has_soulbound(unit):
+    for b in getattr(unit, 'buffs', []):
+        if type(b).__name__ == 'Soulbound':
+            return b
+    return None
+
+# Helper: get source name (source can be Spell or Buff, both have .name and .owner)
+def _source_name(source):
+    if source is None:
+        return "unknown"
+    owner = getattr(source, 'owner', None)
+    if owner is not None:
+        return _name(owner)
+    return _name(source)
+
+def are_adjacent(a, b):
+    """Chebyshev adjacency check (distance <= 1). Accounts for unit.radius (large units)."""
+    r = getattr(a, 'radius', 0) + getattr(b, 'radius', 0)
+    return Level.distance(Level.Point(a.x, a.y), Level.Point(b.x, b.y), diag=True) <= 1 + r
+
+# Direction & spatial helpers — extracted to helpers.py for independent testing
+from helpers import (_cardinal_direction, _bearing_index, _direction_offset, _pluralize,
+                     _ray_length, _RAYCAST_DIRS,
+                     _classify_terrain, _TERRAIN_LABELS, _scan_corridor_branches,
+                     _quadrant_label, _number_deploy_dupes,
+                     _merge_same_shape_groups,
+                     _compress_path, _classify_unreachable, _walkable_neighbors)
+
+# ---- Pathfinding Via Hints ----
+_VIA_HINT_CAP = 3  # Max blocked entries per scan that get pathfinding computation
+
+# ---- Level-Load Coverage Audit ----
+# Scans every tile on level load, logs objects the mod doesn't currently handle.
+# Zero speech output — log-only diagnostic for between-session review.
+_KNOWN_PROP_TYPES = {
+    'Portal', 'HealDot', 'ManaDot', 'ChargeDot', 'SpellScroll', 'HeartDot',
+    'GoldDot', 'PlaceOfPower', 'NPC', 'Shop', 'EquipPickup', 'ItemPickup',
+    'ShrineShop', 'ShiftingShop', 'MiniShop', 'DuplicatorShop', 'AmnesiaShop',
+}
+
+def _audit_level(level, level_num):
+    """Iterate all tiles, log unhandled objects. Called once per level load."""
+    try:
+        clouds = []
+        unknown_props = []
+        water_tiles = 0
+        unusual_buffs = []
+
+        for tile in level.iter_tiles():
+            # Clouds — zero current coverage
+            if tile.cloud is not None:
+                c = tile.cloud
+                ctype = type(c).__name__
+                cname = getattr(c, 'name', ctype)
+                clouds.append(f"{cname}({ctype}) @({tile.x},{tile.y})")
+
+            # Props — check against known whitelist
+            if tile.prop is not None:
+                ptype = type(tile.prop).__name__
+                if ptype not in _KNOWN_PROP_TYPES:
+                    pname = getattr(tile.prop, 'name', ptype)
+                    unknown_props.append(f"{pname}({ptype}) @({tile.x},{tile.y})")
+
+            # Water tiles — undiscussed tile state
+            if getattr(tile, 'water', None) is not None:
+                water_tiles += 1
+
+        # Unit audit — check for unusual buffs/attributes on all units
+        for unit in level.units:
+            uname = getattr(unit, 'name', '?')
+            # Soul jar mechanic
+            if getattr(unit, 'soul_jar', None) is not None:
+                unusual_buffs.append(f"SOUL_JAR: {uname} @({unit.x},{unit.y}) jar={unit.soul_jar}")
+            # Check for buffs that might matter
+            for buff in getattr(unit, 'buffs', []):
+                bname = getattr(buff, 'name', type(buff).__name__)
+                btype = type(buff).__name__
+                # Flag buffs that create secondary objects or have unusual mechanics
+                if hasattr(buff, 'spawner') or 'jar' in btype.lower() or 'jar' in bname.lower():
+                    unusual_buffs.append(f"BUFF: {uname} has {bname}({btype}) @({unit.x},{unit.y})")
+
+        # Log results
+        if clouds:
+            log(f"[AUDIT L{level_num}] CLOUDS ({len(clouds)}): {'; '.join(clouds)}")
+        if unknown_props:
+            log(f"[AUDIT L{level_num}] UNKNOWN PROPS ({len(unknown_props)}): {'; '.join(unknown_props)}")
+        if water_tiles:
+            log(f"[AUDIT L{level_num}] WATER TILES: {water_tiles}")
+        if unusual_buffs:
+            log(f"[AUDIT L{level_num}] UNUSUAL UNITS: {'; '.join(unusual_buffs)}")
+        if not clouds and not unknown_props and not water_tiles and not unusual_buffs:
+            log(f"[AUDIT L{level_num}] Clean — no unhandled objects")
+    except Exception as e:
+        log(f"[AUDIT L{level_num}] Error: {e}")
+
+def _via_hint(level, ref_point, target_point, player):
+    """Compute ', via south' style routing hint for a blocked target.
+    Returns '' if path aligns with bearing, is unavailable, or any error."""
+    try:
+        path = level.find_path(ref_point, target_point, player, pythonize=True)
+        if not path:
+            return ""
+        step = path[0]
+        step_dx = step.x - ref_point.x
+        step_dy = step.y - ref_point.y
+        target_dx = target_point.x - ref_point.x
+        target_dy = target_point.y - ref_point.y
+        step_idx = _bearing_index(step_dx, step_dy)
+        target_idx = _bearing_index(target_dx, target_dy)
+        if step_idx is None or target_idx is None:
+            return ""
+        diff = abs(step_idx - target_idx)
+        if diff > 4:
+            diff = 8 - diff
+        if diff <= 1:
+            return ""
+        via_dir = _cardinal_direction(step_dx, step_dy)
+        return f", via {via_dir}" if via_dir else ""
+    except Exception:
+        return ""
+
+# _direction_offset imported from helpers.py above
+
+# Spatial raycast, terrain classification, corridor scanning imported from helpers.py
+
+# ---- Deploy Navigation Helpers ----
+# Quadrant overview + category cycling for deploy phase (Session 49, Bug #38).
+
+# _quadrant_label imported from helpers.py
+
+def _deploy_get_orbs(level):
+    """Memory Orbs on level. Returns [(prop, x, y), ...]."""
+    results = []
+    for tile in level.iter_tiles():
+        if tile.prop and type(tile.prop).__name__ == 'ManaDot':
+            results.append((tile.prop, tile.x, tile.y))
+    return results
+
+def _deploy_get_pickups(level):
+    """Item pickups on level (heals, charges, hearts, gold, scrolls, equipment, items).
+    Excludes Memory Orbs (separate category). Returns [(prop, x, y, name), ...]."""
+    results = []
+    for tile in level.iter_tiles():
+        prop = tile.prop
+        if prop is None:
+            continue
+        cls = type(prop).__name__
+        # Naming mirrors _classify_prop (which is scoped inside UI hooks block)
+        if cls == 'SpellScroll':
+            spell = getattr(prop, 'spell', None)
+            name = f"Scroll: {_name(spell, 'unknown')}" if spell else "Scroll"
+        elif cls == 'EquipPickup':
+            item = getattr(prop, 'item', None)
+            name = f"Equipment: {_name(item)}" if item else "Equipment"
+        elif cls == 'ItemPickup':
+            item = getattr(prop, 'item', None)
+            name = f"Item: {_name(item)}" if item else "Item"
+        elif cls == 'HeartDot':
+            bonus = getattr(prop, 'bonus', 10)
+            name = f"Ruby Heart, plus {bonus} max HP"
+        elif cls == 'HealDot':
+            name = "Full Heal"
+        elif cls == 'ChargeDot':
+            name = "Spell Recharge"
+        elif cls == 'GoldDot':
+            gold = getattr(prop, 'gold', 1)
+            name = f"Gold, {gold}"
+        else:
+            continue  # Not a pickup type
+        results.append((prop, tile.x, tile.y, name))
+    return results
+
+def _deploy_get_spawners(level):
+    """Spawner units on level. Returns [(unit, x, y), ...]."""
+    return [(u, u.x, u.y) for u in level.units
+            if getattr(u, 'is_lair', False)]
+
+# _number_deploy_dupes imported from helpers.py
+
+def _deploy_get_interactions(level):
+    """Shops, shrines, circles, NPCs on level. Returns [(prop, x, y, name), ...]."""
+    results = []
+    seen_positions = set()
+    for tile in level.iter_tiles():
+        prop = tile.prop
+        if prop is None:
+            continue
+        cls = type(prop).__name__
+        # Naming mirrors _classify_prop (which is scoped inside UI hooks block)
+        if cls == 'PlaceOfPower':
+            tag = getattr(prop, 'tag', None)
+            tag_name = getattr(tag, 'name', '') if tag else ''
+            name = f"{tag_name} Circle" if tag_name else "Circle"
+        elif cls == 'MiniShop':
+            name = "Miniaturization Shrine"
+        elif cls == 'DuplicatorShop':
+            name = "Duplication Shrine"
+        elif cls == 'AmnesiaShop':
+            name = "Amnesia Shrine"
+        elif cls in ('Shop', 'ShrineShop', 'ShiftingShop'):
+            name = _name(prop, "Shop")
+        elif cls == 'NPC':
+            name = _name(prop)
+        elif hasattr(prop, 'shop_type') or hasattr(prop, 'items'):
+            name = _name(prop, "Shop")
+        else:
+            continue
+        seen_positions.add((tile.x, tile.y))
+        results.append((prop, tile.x, tile.y, name))
+    return results
+
+# ---- Collapsed Tier Constants & Helpers ----
+# Phase B speech batching: events grouped by target unit at flush time.
+TIER_MINION = 2   # Player-team minion events (damage, heals, deaths)
+TIER_WORLD = 3    # Enemy/world events (damage, heals, deaths)
+TIER_CAST = 4     # Enemy casts (no target, grouped by caster×spell)
+
+# _pluralize imported from helpers.py
+
+def _compute_event_metadata(unit):
+    """Compute LoS, direction, distance from player to target unit.
+    Called at event time — stores position snapshot for flush-time grouping."""
+    try:
+        level = unit.level
+        player = level.player_unit
+        if not player:
+            return {'los': True, 'direction': 'nearby', 'cardinal': '',
+                    'distance': 0, 'target_x': getattr(unit, 'x', 0),
+                    'target_y': getattr(unit, 'y', 0)}
+        tx, ty = unit.x, unit.y
+        px, py = player.x, player.y
+        los = level.can_see(px, py, tx, ty)
+        dx, dy = tx - px, ty - py
+        direction = _direction_offset(dx, dy)
+        cardinal = _cardinal_direction(dx, dy)
+        distance = max(abs(dx), abs(dy))
+        return {'los': los, 'direction': direction, 'cardinal': cardinal,
+                'distance': distance, 'target_x': tx, 'target_y': ty}
+    except Exception:
+        return {'los': True, 'direction': 'nearby', 'cardinal': '',
+                'distance': 0, 'target_x': 0, 'target_y': 0}
+
+# ---- Batched HP Announcement ----
+# When player takes multiple hits in one turn, only announce HP once at the end.
+# Each damage event resets a short timer; HP is spoken when the timer fires.
+
+_pending_hp_unit = None
+
+# ---- Turn Signal ----
+# Track is_awaiting_input transitions to announce turn boundaries.
+# _turn_count: incremented each time is_awaiting_input goes False→True.
+# _turn_announced: prevents re-firing on subsequent frames of the same turn.
+# Both reset on level transition in patched_setup_level.
+_turn_count = [0]
+_turn_announced = [False]
+_last_turn_time = [0]  # time.time() of last spoken turn announcement (debounce)
+_level_complete = [False]  # Suppress post-level noise (minion heals, etc.) (#46)
+_game_ref = [None]  # Stored reference to Game instance (set in process_level_input)
+
+def _log_ctx():
+    """Return compact 'T{turn} @(x,y)' context for log lines. Falls back gracefully."""
+    try:
+        t = _turn_count[0]
+        game = _game_ref[0]
+        if game and game.p1:
+            return f"T{t} @({game.p1.x},{game.p1.y})"
+        return f"T{t}"
+    except Exception:
+        return ""
+
+# ---- Charge Warning System ----
+# Tracks which threshold breakpoints have been announced per spell this level.
+# Keys: spell name (str). Values: set of threshold names already announced.
+# Reset on every level transition in patched_setup_level.
+_charge_announced = {}
+
+def _get_charge_info(spell):
+    """Read current and max charges from a spell. Returns (cur, max) or (None, None)."""
+    max_charges = getattr(spell, 'max_charges', 0)
+    if not max_charges:
+        return None, None
+    cur = getattr(spell, 'cur_charges', max_charges)
+    try:
+        stat_max = spell.get_stat('max_charges') if hasattr(spell, 'get_stat') else max_charges
+    except Exception:
+        stat_max = max_charges
+    return cur, stat_max
+
+def _check_charge_threshold(spell):
+    """Check if a charge threshold was just crossed after a cast.
+    Returns announcement text or empty string. Fires once per threshold per spell per level."""
+    try:
+        cur, stat_max = _get_charge_info(spell)
+        if cur is None:
+            return ""
+        sname = _name(spell, "")
+        if not sname:
+            return ""
+
+        # Initialize tracking for this spell if needed
+        if sname not in _charge_announced:
+            _charge_announced[sname] = set()
+        announced = _charge_announced[sname]
+
+        # Compute thresholds
+        half = stat_max // 2
+        low = max(int(stat_max * 0.25), 2)
+
+        # First cast always fires to establish the budget for this floor.
+        # Pre-mark any thresholds already crossed so they don't re-fire.
+        if 'first' not in announced:
+            announced.add('first')
+            if stat_max >= 4 and cur <= half:
+                announced.add('half')
+            if cur <= low:
+                announced.add('low')
+            if cur <= 1:
+                announced.add('last')
+            if cur == 0:
+                announced.add('depleted')
+            return f"{sname}: {cur} of {stat_max} charges"
+
+        # Subsequent casts: check thresholds from most severe to least
+        if cur == 0 and 'depleted' not in announced:
+            announced.add('depleted')
+            return f"{sname}: depleted"
+        if cur == 1 and 'last' not in announced:
+            announced.add('last')
+            return f"{sname}: last charge"
+        if cur <= low and cur > 0 and 'low' not in announced:
+            announced.add('low')
+            return f"{sname}: charges low"
+        if stat_max >= 4 and cur <= half and 'half' not in announced:
+            announced.add('half')
+            return f"{sname}: half charges"
+        return ""
+    except Exception as e:
+        log(f"[Charges] Error in threshold check: {e}")
+        return ""
+
+def _schedule_hp_announcement(unit):
+    """Mark that HP should be announced at the next turn boundary flush.
+    Multiple hits per turn just overwrite the reference — only the final
+    HP value is spoken, after all enemies have acted. (#39)"""
+    global _pending_hp_unit
+    _pending_hp_unit = unit
+
+def _flush_hp():
+    """Compute and speak HP if a damage event flagged it. Called at turn
+    boundary AFTER batcher.flush() so HP is the last thing before turn signal."""
+    global _pending_hp_unit
+    unit = _pending_hp_unit
+    if unit is None:
+        return
+    _pending_hp_unit = None
+    hp = getattr(unit, 'cur_hp', '?')
+    max_hp = getattr(unit, 'max_hp', '?')
+    prefix = ""
+    if isinstance(hp, int) and isinstance(max_hp, int) and max_hp > 0:
+        pct = hp / max_hp
+        if pct <= 0.15:
+            prefix = "Critical. "
+        elif pct <= 0.30:
+            prefix = "Low. "
+    text = f"{prefix}HP {hp} of {max_hp}"
+    log(f"[HP] {_log_ctx()} {text}")
+    async_tts.speak(text)
+
+def _cancel_hp_announcement():
+    """Cancel pending HP announcement (e.g., on player death or speech cancel)."""
+    global _pending_hp_unit
+    _pending_hp_unit = None
+
+def _flush_cloud_arrivals():
+    """Deliver batched cloud arrival announcements at turn boundary.
+    Groups by (owner, cloud_type), computes general direction from player.
+    Called after batcher.flush() + _flush_hp() + adjacency heartbeat."""
+    global _cloud_arrivals
+    if not _cloud_arrivals:
+        return
+    arrivals = list(_cloud_arrivals)
+    _cloud_arrivals.clear()
+
+    # Get player position for direction
+    game = _game_ref[0] if _game_ref[0] else None
+    if game is None or game.p1 is None:
+        return
+    px, py = game.p1.x, game.p1.y
+
+    # Group by (owner_name, cloud_type)
+    groups = {}  # (owner_name, cloud_name) → [(x, y), ...]
+    for cname, owner, x, y in arrivals:
+        owner_name = _name(owner, "") if owner else ""
+        key = (owner_name, cname)
+        if key not in groups:
+            groups[key] = []
+        groups[key].append((x, y))
+
+    for (owner_name, cname), positions in groups.items():
+        count = len(positions)
+        # General direction: average position relative to player (rounded for clean speech)
+        avg_x = sum(p[0] for p in positions) / count
+        avg_y = sum(p[1] for p in positions) / count
+        dx = round(avg_x - px)
+        dy = round(avg_y - py)
+        direction = _direction_offset(dx, dy)
+
+        cloud_label = f"{count} {cname}{'s' if count != 1 else ''}"
+        if owner_name:
+            text = f"{owner_name} spawns {cloud_label}, {direction}"
+        else:
+            text = f"{cloud_label}, {direction}"
+        log(f"[Clouds] {_log_ctx()} {text}")
+        async_tts.speak(text)
+
+# ---- Event Handlers ----
+
+_charge_announce_timer = None
+
+# ----------------------------------------------------------------------
+# Per-handler batcher suppression (digest sub-step 10).
+#
+# When the direct-action digest is enabled and a player keypress chain
+# is active (a player-controlled, pay_costs=True cast_begin is on the
+# journal's cause stack), digest-covered handlers skip queueing speech
+# they would otherwise produce — the digest will summarize those events
+# at turn boundary. Crisis handlers (player damage taken, HP threshold,
+# wizard death) IGNORE this and always fire.
+#
+# The check is intentionally narrow: only player-keypress chains
+# (is_player + pay_costs=True + parent=None somewhere on the stack).
+# Passive auto-casts, enemy chains, and ally minion actions are NOT
+# digested, so suppressing during their causation context would silently
+# drop legitimate ambient narration.
+# ----------------------------------------------------------------------
+
+def _current_keypress_root_seq():
+    """Sequence number of the active player-keypress chain root, or None
+    if no such chain is active. Walks parent links from the live cause
+    stack via walk_to_keypress_root.
+
+    Why parent walking: when a death-handler proc (Prince of Ruin, similar
+    EventOnDeath triggers) calls level.queue_spell, the queued generator
+    iterates LATER — by which time the original keypress cast_begin has
+    been popped off the live cause stack. The cause stack at proc-event
+    time only contains the immediate cause (e.g., the EventOnDeath
+    record), whose parent links back to the cast_begin via the journal.
+
+    walk_to_keypress_root resolves the lineage in the same way the digest
+    does (via build_record_index + parent traversal), so suppression and
+    digest inclusion agree on what's in-chain. Single source of truth.
+
+    Returns None when digest is disabled so the legacy speech path is
+    unchanged in opt-out mode."""
+    if not cfg.digest_enabled:
+        return None
+    try:
+        records = _journal.journal.records
+        cause_stack = _journal.journal.cause_stack
+        if not cause_stack:
+            return None
+        idx = _digest.build_record_index(records)
+        for rec in cause_stack:
+            root = _digest.walk_to_keypress_root(rec, idx)
+            if root is not None:
+                return root.get('sequence')
+    except Exception:
+        return None
+    return None
+
+
+def _in_keypress_chain():
+    """True iff a player-keypress chain is currently active. Bool wrapper
+    around _current_keypress_root_seq — preserved for callers that don't
+    need the sequence number."""
+    return _current_keypress_root_seq() is not None
+
+
+def _digest_suppress(handler, **meta):
+    """Suppression decision point for digest-covered batcher handlers.
+
+    Returns True iff a player-keypress chain is active (caller should
+    suppress its narration — the digest will cover it). On True, also
+    emits a `digest_skip` telemetry event tagged with `handler` and any
+    metadata kwargs, plus the resolved chain root sequence number. This
+    lets post-run analysis cross-correlate suppression decisions with
+    digest_emit events and batcher prose to detect coverage gaps.
+
+    Use this in place of `_in_keypress_chain()` at any callsite that
+    early-returns on True — both the bool semantics and telemetry come
+    from the same call. The few callsites with inverted logic
+    (`if not _in_keypress_chain(): speak`) can use this too — telemetry
+    fires whenever suppression is the active decision."""
+    root_seq = _current_keypress_root_seq()
+    if root_seq is None:
+        return False
+    try:
+        _telemetry.emit('digest_skip', handler=handler, root_seq=root_seq, **meta)
+    except Exception:
+        pass
+    return True
+
+
+def on_spell_cast(event):
+    """Announce spell casts — player casts with charge tracking, enemy ability usage."""
+    global _charge_announce_timer
+    try:
+        if not _is_player(event.caster):
+            # Enemy/non-player ability usage — skip melee (covered by damage events)
+            if getattr(event.spell, 'melee', False):
+                return
+            # Digest-covered: proc-spawned casts inside a player chain
+            # appear in the digest's Cast section. Out-of-chain enemy
+            # casts (enemy turn) bypass this guard and fire normally.
+            spell_name = _name(event.spell, "")
+            caster_name = _name(event.caster, "")
+            if _digest_suppress('on_spell_cast.enemy',
+                                spell=spell_name, caster=caster_name):
+                return
+            if not spell_name or not caster_name:
+                return
+            text = f"{caster_name} casts {spell_name}"
+            # Summon casts → collapsed (grouped by caster×spell at flush)
+            is_summon = spell_name.lower().startswith('summon')
+            if is_summon:
+                log(f"[Summon Cast] {_log_ctx()} {text}")
+                batcher.speak_collapsed({
+                    'tier': TIER_CAST,
+                    'event_type': 'cast',
+                    'source_name': caster_name,
+                    'spell_name': spell_name,
+                    'text': text,
+                })
+            else:
+                log(f"[Enemy Cast] {_log_ctx()} {text}")
+                batcher.speak_collapsed({
+                    'tier': TIER_CAST,
+                    'event_type': 'cast',
+                    'source_name': caster_name,
+                    'spell_name': spell_name,
+                    'text': text,
+                })
+            return
+        text = f"Cast {_name(event.spell)}"
+        log(f"[Cast] {_log_ctx()} {text}")
+        # Digest-covered: the digest's Cast section will announce this.
+        # Charge threshold check below is NOT suppressed — player needs
+        # charge warnings regardless.
+        if not _digest_suppress('on_spell_cast.player', spell=_name(event.spell)):
+            batcher.speak_immediate(text)
+        try:
+            _telemetry.emit('cast_target',
+                            spell=_name(event.spell),
+                            tx=getattr(event, 'x', None),
+                            ty=getattr(event, 'y', None))
+        except Exception:
+            pass
+
+        # Check charge thresholds after cast — delayed so it queues after
+        # damage/death/heal events from this cast resolve first
+        spell = event.spell
+        charge_text = _check_charge_threshold(spell)
+        if charge_text:
+            if _charge_announce_timer is not None:
+                _charge_announce_timer.cancel()
+            def _announce_charges(ct=charge_text):
+                log(f"[Charges] {_log_ctx()} {ct}")
+                batcher.speak_queued(ct)
+            _charge_announce_timer = threading.Timer(0.25, _announce_charges)
+            _charge_announce_timer.daemon = True
+            _charge_announce_timer.start()
+    except Exception as e:
+        log(f"[Cast] Error: {e}")
+
+def on_damaged(event):
+    """Announce all combat damage: player in/out, ally damage, and enemy-on-enemy."""
+    try:
+        unit = event.unit
+        dmg = event.damage
+        if dmg <= 0:
+            return
+        dtype = _name(event.damage_type, "")
+        spell_name = _name(event.source, "")
+        caster = _name(getattr(event.source, 'owner', None), "")
+
+        if _is_player(unit):
+            # Player takes damage — distinguish self-hit from enemy attack
+            # HP announced separately after batch resolves
+            source_owner = getattr(event.source, 'owner', None)
+            if isinstance(event.source, Level.Buff):
+                # Status effect tick (Poison, burning, etc.) — not a player action
+                label = spell_name or "status effect"
+            elif _is_player(source_owner):
+                # Genuinely self-inflicted damage (own AoE, HP cost, etc.)
+                label = f"Self-hit, {spell_name}" if spell_name else "Self-hit"
+            elif caster and spell_name and caster != spell_name:
+                label = f"{caster}, {spell_name}"
+            else:
+                label = caster or spell_name or "unknown"
+            text = f"{label}: {dmg} {dtype} damage"
+            log(f"[Damage IN] {_log_ctx()} {text}")
+            batcher.speak_immediate(text)
+            _schedule_hp_announcement(unit)
+            try:
+                _so = getattr(event.source, 'owner', None)
+                _telemetry.emit('damage_in_detail',
+                                source=caster or spell_name or "unknown",
+                                spell=spell_name,
+                                dmg=dmg, dtype=dtype,
+                                sx=getattr(_so, 'x', None) if _so else None,
+                                sy=getattr(_so, 'y', None) if _so else None)
+            except Exception:
+                pass
+        elif _is_player(getattr(event.source, 'owner', None)):
+            # Digest-covered: damage out from the player will appear in
+            # the digest's Killed/Surviving line for the affected target.
+            if _digest_suppress('on_damage.player_source',
+                                spell=spell_name,
+                                target=_name(unit),
+                                dmg=dmg, dtype=dtype):
+                return
+            # Player/ally deals damage: "Icicle: Goblin, 6 Physical"
+            resist_tag = ""
+            resist_val = unit.resists.get(event.damage_type, 0) if hasattr(unit, 'resists') else 0
+            if resist_val >= 50:
+                resist_tag = " resisted"
+            elif resist_val < 0:
+                resist_tag = " vulnerable"
+            # Soulbound hint: when hitting a lich at minimal HP that won't die
+            soul_tag = ""
+            if _has_soulbound(unit) and getattr(unit, 'cur_hp', 99) <= 1:
+                soul_tag = ", soulbound"
+            coord_tag = f" ({unit.x},{unit.y})" if cfg.show_coordinates else ""
+            text = f"{spell_name}: {_name(unit)}{coord_tag}, {dmg} {dtype}{resist_tag}{soul_tag}"
+            log(f"[Damage OUT] {_log_ctx()} {text}")
+            batcher.speak_queued(text)
+            try:
+                _telemetry.emit('damage_out_detail',
+                                spell=spell_name,
+                                target=_name(unit),
+                                tx=getattr(unit, 'x', None),
+                                ty=getattr(unit, 'y', None),
+                                hp_after=getattr(unit, 'cur_hp', None),
+                                dmg=dmg, dtype=dtype,
+                                resisted=bool(resist_tag))
+            except Exception:
+                pass
+        else:
+            # Non-player damage: enemy hits ally, enemy hits enemy, etc.
+            # Skip buff/status ticks on non-player units (predictable, noisy)
+            if isinstance(event.source, Level.Buff):
+                return
+            # Digest-covered: in-chain non-player damage (proc cascades
+            # through enemies, etc.) appears in the digest. Out-of-chain
+            # damage on enemy turns falls through to the legacy path.
+            target_name = _name(unit)
+            if _digest_suppress('on_damage.nonplayer',
+                                spell=spell_name,
+                                target=target_name,
+                                dmg=dmg, dtype=dtype):
+                return
+            source_name = caster or spell_name or "unknown"
+            if caster:
+                fallback = f"{caster} hits {target_name}, {dmg} {dtype}"
+            else:
+                fallback = f"{target_name} hit, {dmg} {dtype}"
+            log(f"[Combat] {_log_ctx()} {fallback}")
+            # Route to collapsed tier for target-first grouping (Phase B)
+            is_minion = getattr(unit, 'team', None) == Level.TEAM_PLAYER
+            tier = TIER_MINION if is_minion else TIER_WORLD
+            meta = _compute_event_metadata(unit)
+            batcher.speak_collapsed({
+                'tier': tier,
+                'event_type': 'damage',
+                'target_unit': unit,
+                'target_name': target_name,
+                'source_name': source_name,
+                'spell_name': spell_name,
+                'damage': dmg,
+                'damage_type': dtype,
+                'text': fallback,
+                **meta,
+            })
+    except Exception as e:
+        log(f"[Damage] Error: {e}")
+
+def on_death(event):
+    """Announce deaths."""
+    try:
+        unit = event.unit
+        if _is_player(unit):
+            _cancel_hp_announcement()
+            batcher.clear()  # Don't flush stale events after death
+            text = "You died"
+            if event.damage_event and event.damage_event.source:
+                source = event.damage_event.source
+                # DOT/buff deaths: source is a Buff whose .owner is the unit it's ON
+                # (i.e. the player), not the caster.  Use the buff name directly.
+                if isinstance(source, Level.Buff):
+                    text = f"Killed by {_name(source)}"
+                else:
+                    text = f"Killed by {_source_name(source)}"
+            log(f"[Death] {_log_ctx()} {text}")
+            batcher.speak_immediate(text)
+        else:
+            # Digest-covered: deaths in the chain appear in the digest's
+            # Killed section. Out-of-chain deaths (status-tick deaths on
+            # enemy turn, ally death from passive damage) flow through.
+            name = _name(unit)
+            if _digest_suppress('on_death.nonplayer', target=name):
+                return
+            coord_tag = f" ({unit.x},{unit.y})" if cfg.show_coordinates else ""
+            if event.damage_event is None:
+                # No damage caused this death — duration expired (turns_to_death)
+                is_expired = True
+                fallback = f"{name}{coord_tag} expired"
+            else:
+                is_expired = False
+                fallback = f"{name}{coord_tag} killed"
+            log(f"[Death] {_log_ctx()} {fallback}")
+            # Player-caused kills → QUEUED for salience (adjacent to damage output)
+            killed_by_player = False
+            if event.damage_event is not None:
+                source_owner = getattr(event.damage_event.source, 'owner', None)
+                if _is_player(source_owner):
+                    killed_by_player = True
+            if killed_by_player:
+                batcher.speak_queued(fallback)
+            else:
+                # Route to collapsed tier — death terminates target group (Phase B)
+                is_minion = getattr(unit, 'team', None) == Level.TEAM_PLAYER
+                tier = TIER_MINION if is_minion else TIER_WORLD
+                meta = _compute_event_metadata(unit)
+                batcher.speak_collapsed({
+                    'tier': tier,
+                    'event_type': 'death',
+                    'target_unit': unit,
+                    'target_name': name,
+                    'is_expired': is_expired,
+                    'text': fallback,
+                    **meta,
+                })
+    except Exception as e:
+        log(f"[Death] Error: {e}")
+
+def on_healed(event):
+    """Announce healing — player and non-player units."""
+    try:
+        amount = -event.heal  # Healing is stored as negative
+        if amount <= 0:
+            return
+        if _is_player(event.unit):
+            # Digest-covered: player heals appear in the digest's Side
+            # section under Heals.
+            if _digest_suppress('on_healed.player',
+                                amount=amount,
+                                source=_name(event.source, '')):
+                return
+            source = _name(event.source, "")
+            text = f"Healed {amount}"
+            if source:
+                text = f"Healed {amount} by {source}"
+            log(f"[Heal] {_log_ctx()} {text}")
+            batcher.speak_queued(text)
+        else:
+            # Non-player healed (enemy Satyr healing allies, etc.)
+            is_minion = getattr(event.unit, 'team', None) == Level.TEAM_PLAYER
+            # Suppress minion heals after level complete — zero tactical value (#46)
+            if _level_complete[0] and is_minion:
+                return
+            # Digest-covered: in-chain heals on non-player units (proc
+            # heals, dispel-style effects) won't be re-narrated here.
+            healed_name = _name(event.unit)
+            if _digest_suppress('on_healed.nonplayer',
+                                target=healed_name, amount=amount):
+                return
+            fallback = f"{healed_name} heals {amount}"
+            log(f"[Enemy Heal] {_log_ctx()} {fallback}")
+            # Route to collapsed tier for target-first grouping (Phase B)
+            tier = TIER_MINION if is_minion else TIER_WORLD
+            meta = _compute_event_metadata(event.unit)
+            batcher.speak_collapsed({
+                'tier': tier,
+                'event_type': 'heal',
+                'target_unit': event.unit,
+                'target_name': healed_name,
+                'heal_amount': amount,
+                'text': fallback,
+                **meta,
+            })
+    except Exception as e:
+        log(f"[Heal] Error: {e}")
+
+def on_buff_apply(event):
+    """Announce buffs and debuffs applied to the player."""
+    try:
+        if not _is_player(event.unit):
+            return
+        # Digest-covered: player-targeted buffs appear in the digest's
+        # Side section under Buffs.
+        if _digest_suppress('on_buff_apply.player',
+                            buff=_name(event.buff, '')):
+            return
+        buff = event.buff
+        bname = _name(buff, "")
+        if not bname:
+            return
+        # buff_type: 1=bless, 2=curse, 0=passive, 3=item
+        btype = getattr(buff, 'buff_type', 0)
+        turns = getattr(buff, 'turns_left', 0)
+
+        if btype == 2:
+            prefix = "Cursed"
+        elif btype == 1:
+            prefix = "Blessed"
+        else:
+            prefix = "Buff"
+
+        text = f"{prefix}: {bname}"
+        if turns and turns > 0:
+            text += f", {turns} turns"
+        log(f"[Buff+] {_log_ctx()} {text}")
+        batcher.speak_queued(text)
+    except Exception as e:
+        log(f"[Buff+] Error: {e}")
+
+def on_buff_remove(event):
+    """Announce significant buff/debuff removal from the player."""
+    try:
+        if not _is_player(event.unit):
+            return
+        buff = event.buff
+        bname = _name(buff, "")
+        if not bname:
+            return
+
+        # Channel buff special handling (#37, #40)
+        if isinstance(buff, Level.ChannelBuff):
+            # buff.spell is the spell's cast method (bound method), not the spell object
+            spell_method = getattr(buff, 'spell', None)
+            spell_obj = getattr(spell_method, '__self__', spell_method)
+            spell_name = _name(spell_obj, "spell")
+            if getattr(buff, 'turns_left', 0) > 0:
+                # Removed before duration expired — player broke the channel
+                text = f"Channel broken: {spell_name}"
+            else:
+                # Duration ran out naturally
+                text = f"Channel complete: {spell_name}"
+            log(f"[Buff-] {_log_ctx()} {text}")
+            batcher.speak_queued(text)
+            return
+
+        btype = getattr(buff, 'buff_type', 0)
+        # Only announce curse removals and bless expirations
+        if btype == 2:
+            text = f"Curse ended: {bname}"
+        elif btype == 1:
+            text = f"Expired: {bname}"
+        else:
+            return
+        log(f"[Buff-] {_log_ctx()} {text}")
+        batcher.speak_queued(text)
+    except Exception as e:
+        log(f"[Buff-] Error: {e}")
+
+def on_item_pickup(event):
+    """Announce item pickups. For Memory Orbs, also announce new SP total."""
+    try:
+        item_name = _name(event.item)
+        desc = ((event.item.get_description() or '') if hasattr(event.item, 'get_description')
+                else getattr(event.item, 'description', ''))
+        text = f"Picked up {item_name}"
+        if desc and desc != "Undescribed Item":
+            text += f". {desc}"
+        # If it's a Memory Orb, append new SP total
+        if item_name == "Memory Orb":
+            player = getattr(getattr(event.item, 'level', None), 'player_unit', None)
+            if player:
+                text += f", {player.xp} SP"
+        log(f"[Item] {_log_ctx()} {text}")
+        batcher.speak_queued(text)
+    except Exception as e:
+        log(f"[Item] Error: {e}")
+
+def on_level_complete(event):
+    """Announce level completion with reroll grant and stats summary."""
+    import re as _re_lc
+    try:
+        _level_complete[0] = True
+        game = _game_ref[0]
+        rerolls = getattr(game, 'rift_rerolls', 0) if game else 0
+        header = f"Level complete. {rerolls} reroll" if rerolls else "Level complete"
+
+        # Read stats file for level summary (written by finalize_level before this event)
+        chunks = [header]
+        try:
+            if game:
+                stats_path = os.path.join('saves', str(game.run_number),
+                                          'stats.level_%d.txt' % game.level_num)
+                if os.path.exists(stats_path):
+                    with open(stats_path, 'r') as f:
+                        content = f.read().strip()
+                    if content:
+                        sections = _re_lc.split(r'\n\s*\n', content)
+                        # Skip first section (Realm/Outcome — already in header)
+                        for section in sections[1:]:
+                            collapsed = ' '.join(l.strip() for l in section.split('\n') if l.strip())
+                            if collapsed:
+                                chunks.append(collapsed)
+        except Exception:
+            pass  # Stats file missing or unreadable — header alone is fine
+
+        if len(chunks) > 1:
+            async_tts.speak_batched(chunks)
+        else:
+            batcher.speak_immediate(header)
+        log(f"[Level] {_log_ctx()} {header} ({len(chunks)} chunks)")
+        try:
+            if game:
+                _telemetry.emit('realm_complete',
+                                realm=getattr(game, 'level_num', None),
+                                total_turns=getattr(game, 'total_turns', None),
+                                rerolls_remaining=rerolls,
+                                stats_path=f"saves/{getattr(game,'run_number',None)}/"
+                                           f"stats.level_{getattr(game,'level_num',None)}.txt",
+                                finish_screenshot=f"saves/{getattr(game,'run_number',None)}/"
+                                                  f"level_{getattr(game,'level_num',None)}_finish.png")
+        except Exception:
+            pass
+    except Exception as e:
+        log(f"[Level] Error: {e}")
+
+def on_shield_removed(event):
+    """Announce when a unit's shield absorbs a hit (#44)."""
+    try:
+        unit = event.unit
+        name = _name(unit)
+        remaining = getattr(unit, 'shields', 0)
+        if _is_player(unit):
+            if remaining > 0:
+                text = f"Shield lost, {remaining} remaining"
+            else:
+                text = "Last shield lost"
+            log(f"[Shield] {_log_ctx()} {text}")
+            batcher.speak_immediate(text)
+        else:
+            # Digest-covered: shield-break events on non-player targets
+            # in chain are folded into the digest's Surviving line as
+            # "absorbed by N shields".
+            if _digest_suppress('on_shield_removed.nonplayer',
+                                target=name, remaining=remaining):
+                return
+            if remaining > 0:
+                text = f"{name} shield broken, {remaining} remaining"
+            else:
+                text = f"{name} shield broken"
+            log(f"[Shield] {_log_ctx()} {text}")
+            batcher.speak_queued(text)
+    except Exception as e:
+        log(f"[Shield] Error: {e}")
+
+# ---- Adjacency Threat Tracking (S58) ----
+# Passive melee threat awareness: announces when hostile units enter/leave adjacency.
+# Two layers: per-unit announcements (IMMEDIATE, causal) + turn-end heartbeat.
+# Vocabulary: "contact" for entry, "leaves" for exit. "melee" avoided (game term collision).
+# Config gates speech only; state tracking is unconditional.
+
+class AdjacencyTracker:
+    """Tracks hostile units adjacent to the player. Announces entries, exits, heartbeat."""
+    DESCRIPTORS = [(8, "Surrounded"), (6, "Swamped"), (3, "Pressed")]
+
+    def __init__(self, tts):
+        self._tts = tts
+        self._adjacent = set()  # unit references currently adjacent to player
+        self.config = {
+            'entries': True,      # per-unit contact announcements
+            'exits': True,        # per-unit leaves announcements
+            'heartbeat': True,    # turn-end count
+            'descriptors': True,  # pressed/swamped/surrounded labels
+        }
+
+    def reset(self):
+        """Clear state for level transition."""
+        self._adjacent.clear()
+
+    def _descriptor(self, count):
+        if not self.config['descriptors']:
+            return ""
+        for threshold, label in self.DESCRIPTORS:
+            if count >= threshold:
+                return label
+        return ""
+
+    def _format_count(self, count):
+        """Format count with optional descriptor. Returns 'Clear.' at 0."""
+        if count == 0:
+            return "Clear."
+        desc = self._descriptor(count)
+        if desc:
+            return f"{desc}, {count} adjacent."
+        return f"{count} adjacent."
+
+    def _announce_entry(self, unit_name, count, player_initiated):
+        if not self.config['entries']:
+            return
+        count_text = self._format_count(count)
+        if player_initiated:
+            text = f"You contact {unit_name}. {count_text}"
+        else:
+            text = f"{unit_name}, contact. {count_text}"
+        log(f"[Contact] {_log_ctx()} {text}")
+        self._tts.speak(text)
+
+    def _announce_exit(self, unit_name, count, player_initiated):
+        if not self.config['exits']:
+            return
+        count_text = self._format_count(count)
+        if player_initiated:
+            text = f"You leave {unit_name}. {count_text}"
+        else:
+            text = f"{unit_name} leaves. {count_text}"
+        log(f"[Contact] {_log_ctx()} {text}")
+        self._tts.speak(text)
+
+    def on_unit_moved(self, evt):
+        """EventOnMoved handler. Detects entry/exit for any unit (player or enemy)."""
+        try:
+            if _level_complete[0]:
+                return
+            game = _game_ref[0]
+            if not game or not game.p1:
+                return
+            unit = evt.unit
+            player = game.p1
+
+            if _is_player(unit):
+                self._on_player_moved(game.cur_level, player)
+                return
+
+            if not unit.is_alive():
+                return
+            if not Level.are_hostile(unit, player):
+                return
+
+            was_adj = unit in self._adjacent
+            now_adj = are_adjacent(unit, player)
+
+            if now_adj and not was_adj:
+                self._adjacent.add(unit)
+                self._announce_entry(_name(unit), len(self._adjacent), False)
+            elif was_adj and not now_adj:
+                self._adjacent.discard(unit)
+                self._announce_exit(_name(unit), len(self._adjacent), False)
+        except Exception as e:
+            log(f"[Contact] on_moved error: {e}")
+
+    def on_unit_added(self, evt):
+        """EventOnUnitAdded handler. Catches summons/spawns into adjacency."""
+        try:
+            if _level_complete[0]:
+                return
+            game = _game_ref[0]
+            if not game or not game.p1:
+                return
+            unit = evt.unit
+            player = game.p1
+            if not unit.is_alive() or not Level.are_hostile(unit, player):
+                return
+            if are_adjacent(unit, player):
+                self._adjacent.add(unit)
+                self._announce_entry(_name(unit), len(self._adjacent), False)
+        except Exception as e:
+            log(f"[Contact] on_unit_added error: {e}")
+
+    def on_unit_death(self, evt):
+        """EventOnDeath handler. Removes dead unit from adjacency set."""
+        try:
+            if _level_complete[0]:
+                return
+            unit = evt.unit
+            if unit in self._adjacent:
+                self._adjacent.discard(unit)
+                self._announce_exit(_name(unit), len(self._adjacent), False)
+        except Exception as e:
+            log(f"[Contact] on_death error: {e}")
+
+    def _on_player_moved(self, level, player):
+        """Full recompute when the player moves. Announces all changes."""
+        new_adj = set()
+        for unit in level.units:
+            if unit == player or not unit.is_alive():
+                continue
+            if Level.are_hostile(unit, player) and are_adjacent(unit, player):
+                new_adj.add(unit)
+
+        exits = self._adjacent - new_adj
+        entries = new_adj - self._adjacent
+
+        # Exits first (ring loosening), then entries (ring tightening)
+        for unit in exits:
+            self._adjacent.discard(unit)
+            self._announce_exit(_name(unit), len(self._adjacent), True)
+
+        for unit in entries:
+            self._adjacent.add(unit)
+            self._announce_entry(_name(unit), len(self._adjacent), True)
+
+    def heartbeat(self):
+        """Turn-end heartbeat. Recomputes adjacency set and speaks count if > 0."""
+        try:
+            game = _game_ref[0]
+            if not game or not game.p1:
+                return
+            if _level_complete[0]:
+                return
+            level = game.cur_level
+            player = game.p1
+
+            # Recompute from scratch — catches any missed events
+            current = set()
+            for unit in level.units:
+                if unit == player or not unit.is_alive():
+                    continue
+                if Level.are_hostile(unit, player) and are_adjacent(unit, player):
+                    current.add(unit)
+            self._adjacent = current
+
+            count = len(self._adjacent)
+            if count == 0 or not self.config['heartbeat']:
+                return
+            text = self._format_count(count)
+            log(f"[Contact heartbeat] {_log_ctx()} {text}")
+            self._tts.speak(text)
+        except Exception as e:
+            log(f"[Contact] heartbeat error: {e}")
+
+adjacency_tracker = AdjacencyTracker(async_tts)
+
+# Pickle-safe wrappers: the game pickles Game→Level→event_manager→_handlers during save.
+# Module-level functions serialize by name reference. Bound methods would serialize the
+# instance (AdjacencyTracker→SyncTTS→ctypes.CDLL → PicklingError). These wrappers avoid that.
+def _on_moved_adjacency(evt):
+    adjacency_tracker.on_unit_moved(evt)
+
+def _on_unit_added_adjacency(evt):
+    adjacency_tracker.on_unit_added(evt)
+
+def _on_death_adjacency(evt):
+    adjacency_tracker.on_unit_death(evt)
+
+# ---- Enters Line-of-Sight Tracking (S82) ----
+# Announces when hostile units cross from outside to inside the player's field of view.
+# Hybrid: Layer 1 = per-unit EventOnMoved (enemy turns), Layer 2 = full diff (player moves).
+
+_ENTERS_LOS_COLLAPSE_THRESHOLD = 4
+
+class LoSTracker:
+    """Tracks hostile units visible to the player. Announces LoS transitions."""
+
+    def __init__(self, tts):
+        self._tts = tts
+        self._visible = set()  # unit references currently in player LoS
+        self._seeded = False
+
+    def reset(self):
+        self._visible.clear()
+        self._seeded = False
+
+    def seed(self, level, player):
+        """Populate initial visible set silently on level entry."""
+        self._visible.clear()
+        for unit in level.units:
+            if unit == player or not unit.is_alive():
+                continue
+            if Level.are_hostile(unit, player) and level.can_see(player.x, player.y, unit.x, unit.y):
+                self._visible.add(unit)
+        self._seeded = True
+        log(f"[LoS] Seeded {len(self._visible)} visible enemies")
+
+    def _announce_entries(self, entries, player_initiated):
+        if not entries:
+            return
+        if len(entries) >= _ENTERS_LOS_COLLAPSE_THRESHOLD:
+            text = f"{len(entries)} enemies enter view"
+            log(f"[LoS] {_log_ctx()} {text} (collapsed)")
+            batcher.speak_immediate(text)
+            return
+        for unit in sorted(entries, key=lambda u: max(abs(u.x - _game_ref[0].p1.x), abs(u.y - _game_ref[0].p1.y))):
+            dx = unit.x - _game_ref[0].p1.x
+            dy = unit.y - _game_ref[0].p1.y
+            offset = _direction_offset(dx, dy)
+            text = f"{_name(unit)} appears, {offset}"
+            log(f"[LoS] {_log_ctx()} {text}")
+            batcher.speak_immediate(text)
+
+    def on_unit_moved(self, evt):
+        """Layer 1: per-unit check on enemy movement."""
+        try:
+            if _level_complete[0] or not self._seeded:
+                return
+            game = _game_ref[0]
+            if not game or not game.p1:
+                return
+            unit = evt.unit
+            if _is_player(unit):
+                self._on_player_moved(game.cur_level, game.p1)
+                return
+            if not unit.is_alive() or not Level.are_hostile(unit, game.p1):
+                return
+            player = game.p1
+            now_visible = game.cur_level.can_see(player.x, player.y, unit.x, unit.y)
+            was_visible = unit in self._visible
+            if now_visible and not was_visible:
+                self._visible.add(unit)
+                self._announce_entries([unit], False)
+            elif not now_visible and was_visible:
+                self._visible.discard(unit)
+        except Exception as e:
+            log(f"[LoS] on_moved error: {e}")
+
+    def _on_player_moved(self, level, player):
+        """Layer 2: full diff when the player moves."""
+        new_visible = set()
+        for unit in level.units:
+            if unit == player or not unit.is_alive():
+                continue
+            if Level.are_hostile(unit, player) and level.can_see(player.x, player.y, unit.x, unit.y):
+                new_visible.add(unit)
+        entries = new_visible - self._visible
+        self._visible = new_visible
+        self._announce_entries(list(entries), True)
+
+    def on_unit_added(self, evt):
+        """Catch spawns/summons that appear directly in LoS."""
+        try:
+            if _level_complete[0] or not self._seeded:
+                return
+            game = _game_ref[0]
+            if not game or not game.p1:
+                return
+            unit = evt.unit
+            if _is_player(unit):
+                return
+            if not unit.is_alive() or not Level.are_hostile(unit, game.p1):
+                return
+            # Skip spell-based summons — already announced via on_spell_cast
+            source = getattr(unit, 'source', None)
+            if source is not None and isinstance(source, Level.Spell):
+                self._visible.add(unit)
+                return
+            player = game.p1
+            if game.cur_level.can_see(player.x, player.y, unit.x, unit.y):
+                self._visible.add(unit)
+        except Exception as e:
+            log(f"[LoS] on_unit_added error: {e}")
+
+    def on_unit_death(self, evt):
+        """Remove dead units from tracking set."""
+        self._visible.discard(evt.unit)
+
+los_tracker = LoSTracker(async_tts)
+
+def _on_moved_los(evt):
+    los_tracker.on_unit_moved(evt)
+
+def _on_unit_added_los(evt):
+    los_tracker.on_unit_added(evt)
+
+def _on_death_los(evt):
+    los_tracker.on_unit_death(evt)
+
+# Pickle-safe wrapper: Buff-based spawn announcement (boss minions, etc.)
+def _on_unit_added_spawn(evt):
+    """Announce non-spell spawns (buff-based summons like boss minion generation).
+    Spell-based summons are already announced via on_spell_cast; skip those."""
+    try:
+        unit = evt.unit
+        if _level_complete[0]:
+            return
+        game = _game_ref[0]
+        if game is None or game.p1 is None:
+            return
+        # Skip player
+        if unit is game.p1:
+            return
+        # Skip spell-based summons (already announced via on_spell_cast)
+        source = getattr(unit, 'source', None)
+        if source is not None and isinstance(source, Level.Spell):
+            return
+        # Skip Soul Jars (handled by dedicated handler)
+        uname = getattr(unit, 'name', '')
+        if 'Soul Jar' in uname:
+            return
+        # Digest-covered (added 2026-05-03 with the Spawned section).
+        # In-chain spawns (allies + hostiles) appear in the digest's
+        # Spawned line. The hard rule "spawns always announce" is
+        # preserved because the digest emits in chain and this handler
+        # emits out of chain.
+        if _digest_suppress('on_unit_added.spawn', name=uname):
+            return
+        # Out-of-chain spawn — announce regardless of team. The legacy
+        # logic skipped allies on the assumption that "ally summons are
+        # covered by spell cast" (Cast Summon Wolf implies Wolf appears).
+        # That assumption breaks for non-player ally spawns: a friendly
+        # Slimy Vampire's "Slimy" buff produces Blood Slimes during the
+        # enemy turn — no player cast covers them, but they're new
+        # tactical entities the player needs to know about. Announce
+        # all out-of-chain spawns; ally spawns get an "Ally " prefix
+        # matching the digest's Spawned section convention.
+        is_ally = not Level.are_hostile(unit, game.p1)
+        prefix = "Ally " if is_ally else ""
+        dx = unit.x - game.p1.x
+        dy = unit.y - game.p1.y
+        offset = _direction_offset(dx, dy)
+        text = f"{prefix}{uname} spawned, {offset}"
+        log(f"[Spawn] {_log_ctx()} {text} @({unit.x},{unit.y})")
+        batcher.speak_collapsed({
+            'tier': TIER_WORLD,
+            'event_type': 'spawn',
+            'source_name': uname,
+            'spell_name': '',
+            'text': text,
+        })
+    except Exception as e:
+        log(f"[Spawn] Error: {e}")
+
+# Pickle-safe wrapper: Soul Jar creation detection
+def _on_unit_added_souljar(evt):
+    """Announce when a Soul Jar unit is summoned (lich mechanic).
+    IMMEDIATE tier — mission-critical new information."""
+    try:
+        unit = evt.unit
+        uname = getattr(unit, 'name', '')
+        if 'Soul Jar' not in uname:
+            return
+        game = _game_ref[0] if _game_ref[0] else None
+        if game is None or game.p1 is None:
+            return
+        dx = unit.x - game.p1.x
+        dy = unit.y - game.p1.y
+        offset = _direction_offset(dx, dy)
+        text = f"Soul Jar created, {offset}"
+        log(f"[Soul Jar] {_log_ctx()} {text} @({unit.x},{unit.y})")
+        batcher.speak_immediate(text)
+    except Exception as e:
+        log(f"[Soul Jar] Error: {e}")
+
+# ---- Trigger Registration ----
+
+def on_pre_damaged(event):
+    """No-op trigger whose ONLY job is to make RW3 emit EventOnPreDamaged.
+
+    RW3's deal_damage gates the pre-damage event on
+    `has_handlers(EventOnPreDamaged, unit)` (Level.py:4037) — it does NOT fire
+    unless something is registered for it. The journal captures the event via its
+    raise_event wrapper (not via this trigger), and the digest reads its spoken
+    damage number from the PreDamaged record's `damage_post_resist`
+    (journal.py:292 / digest.py:423). Without this registration the event never
+    fires for ordinary hits, so the digest has no post-resist value and every spell
+    attack drops to "no damage." Registering a global trigger flips has_handlers
+    true for all units (Level.py:243); the handler body is intentionally empty and
+    changes no game state. Do not remove."""
+    pass
+
+
+def register_triggers(event_manager):
+    """Register all event triggers on the given event manager (once only).
+    Uses direct handler-in-list check to prevent duplicates.
+    NOTE: EventHandler stores global triggers in _handlers[event_type][None], NOT
+    global_triggers (that's Buff). In RW3 _handlers is a plain dict ({} on a fresh
+    handler), so read it defensively — a missing key means nothing is registered yet."""
+    # Guard: EventHandler may not have _handlers during save-load (on_loaded path)
+    if not hasattr(event_manager, '_handlers'):
+        log(f"[Screen Reader] EventManager {id(event_manager)} has no _handlers yet, deferring trigger registration")
+        return
+    # RW3's fresh EventHandler._handlers is {} (no key until first registration),
+    # so .get() defensively rather than indexing (which KeyErrors on a new level).
+    _evt_map = event_manager._handlers.get(Level.EventOnSpellCast)
+    existing = list(_evt_map.get(None, ())) if _evt_map else []
+    if on_spell_cast in existing:
+        log(f"[Screen Reader] Triggers already present on EventManager {id(event_manager)}, "
+            f"skipping (had {len(existing)} SpellCast triggers)")
+        return
+    log(f"[Screen Reader] Registering triggers on EventManager {id(event_manager)} "
+        f"(had {len(existing)} SpellCast triggers)")
+    event_manager.register_global_trigger(Level.EventOnSpellCast, on_spell_cast)
+    # No-op, but REQUIRED: makes RW3 actually fire EventOnPreDamaged (gated on
+    # has_handlers, Level.py:4037) so the digest gets post-resist damage. Without it
+    # every spell attack reads "no damage." See on_pre_damaged docstring.
+    event_manager.register_global_trigger(Level.EventOnPreDamaged, on_pre_damaged)
+    event_manager.register_global_trigger(Level.EventOnDamaged, on_damaged)
+    event_manager.register_global_trigger(Level.EventOnDeath, on_death)
+    event_manager.register_global_trigger(Level.EventOnHealed, on_healed)
+    event_manager.register_global_trigger(Level.EventOnBuffApply, on_buff_apply)
+    event_manager.register_global_trigger(Level.EventOnBuffRemove, on_buff_remove)
+    event_manager.register_global_trigger(Level.EventOnItemPickup, on_item_pickup)
+    event_manager.register_global_trigger(Level.EventOnLevelComplete, on_level_complete)
+    event_manager.register_global_trigger(Level.EventOnShieldRemoved, on_shield_removed)
+    # Adjacency threat tracking (S58) — use pickle-safe wrappers, not bound methods
+    event_manager.register_global_trigger(Level.EventOnMoved, _on_moved_adjacency)
+    event_manager.register_global_trigger(Level.EventOnUnitAdded, _on_unit_added_adjacency)
+    event_manager.register_global_trigger(Level.EventOnDeath, _on_death_adjacency)
+    # Enters-LoS tracking (S82) — pickle-safe wrappers
+    event_manager.register_global_trigger(Level.EventOnMoved, _on_moved_los)
+    event_manager.register_global_trigger(Level.EventOnUnitAdded, _on_unit_added_los)
+    event_manager.register_global_trigger(Level.EventOnDeath, _on_death_los)
+    # Soul Jar creation detection (S59 — Bug #47)
+    event_manager.register_global_trigger(Level.EventOnUnitAdded, _on_unit_added_souljar)
+    # Buff-based spawn announcement (S65 — boss minions, etc.)
+    event_manager.register_global_trigger(Level.EventOnUnitAdded, _on_unit_added_spawn)
+    log("[Screen Reader] Triggers registered: SpellCast, Damaged, Death, Healed, BuffApply, "
+        "BuffRemove, ItemPickup, LevelComplete, ShieldRemoved, Moved, UnitAdded (adjacency+souljar+spawn+los)")
+
+# Update lifecycle hook to register triggers on every level transition
+def patched_setup_level(self, level_num):
+    """Level lifecycle hook: re-registers all triggers on each new level.
+    RW3 dropped the logdir param (setup_logging → setup_level, port #1)."""
+    _original_setup_level(self, level_num)
+    player = getattr(self, 'player_unit', None)
+    pos = f" @({player.x},{player.y})" if player else ""
+    log(f"[Screen Reader] Level {level_num} loaded{pos} - EventManager {id(self.event_manager)}")
+    register_triggers(self.event_manager)
+    _journal.journal.reset(level_num)
+    # Reset per-level state for new floor
+    _charge_announced.clear()
+    _cancel_hp_announcement()
+    batcher.clear()
+    _turn_count[0] = 0
+    _turn_announced[0] = False
+    _level_complete[0] = False
+    adjacency_tracker.reset()
+    los_tracker.reset()
+    if getattr(self, 'player_unit', None):
+        los_tracker.seed(self, self.player_unit)
+    _cloud_arrivals.clear()
+    # Movement direction state reset (defined later, but these are module-level mutable lists)
+    try:
+        _last_move_dir[0] = None
+        _last_blocked_dir[0] = None
+        _last_terrain_class[0] = None
+    except NameError:
+        pass  # First load — movement hook not installed yet
+    async_tts.speak(f"Level {level_num}")
+    _audit_level(self, level_num)
+
+Level.Level.setup_level = patched_setup_level
+
+# --- Load lifecycle: re-register triggers AFTER RW3 wipes event managers ---
+# On load, Game.on_loaded calls setup_level (above — our normal re-registration
+# point) and THEN rebuild_event_managers(), which replaces every level's
+# event_manager with a fresh empty EventHandler() (Game.py:195/220), discarding
+# the triggers setup_level just registered. So on the load path we must
+# re-register AFTER the rebuild. setup_level still covers normal (non-load)
+# level transitions, where no rebuild happens.
+# (Parked: levels other than the active one that are rebuilt on load re-acquire
+# triggers when they next become active via setup_level; confirm during the
+# combat-narration validation pass.)
+import Game as _Game_module
+_original_on_loaded = _Game_module.Game.on_loaded
+
+def patched_on_loaded(self, filename):
+    _original_on_loaded(self, filename)
+    lvl = getattr(self, 'cur_level', None)
+    em = getattr(lvl, 'event_manager', None) if lvl is not None else None
+    if em is not None:
+        register_triggers(em)
+        log(f"[Screen Reader] Post-load trigger re-registration on EventManager {id(em)}")
+
+_Game_module.Game.on_loaded = patched_on_loaded
+
+log("Event triggers configured")
+
+# ============================================================================
+# CLOUD ARRIVAL TRACKING — Patch add_obj to intercept cloud placement
+# ============================================================================
+# Accumulates cloud additions during a turn. Flushed at turn boundary by
+# _flush_cloud_arrivals() alongside batcher.flush(). Grouped by owner+type.
+# ============================================================================
+
+_cloud_arrivals = []
+
+_original_add_obj = Level.Level.add_obj
+
+def patched_add_obj(self, obj, x, y):
+    _original_add_obj(self, obj, x, y)
+    try:
+        if isinstance(obj, Level.Cloud):
+            owner = getattr(obj, 'owner', None)
+            cname = getattr(obj, 'name', type(obj).__name__)
+            _cloud_arrivals.append((cname, owner, x, y))
+    except Exception:
+        pass  # Never break game's add_obj
+
+Level.Level.add_obj = patched_add_obj
+
+log("Cloud arrival tracking installed")
+
+# ============================================================================
+# BUFF EXPIRATION WARNING + COOLDOWN READY NOTIFICATION
+# ============================================================================
+# Buff expiry: after advance_buffs(), warn on player buffs with 1 turn left.
+# Cooldown ready: before pre_advance() drops cooldowns at 1, announce them.
+# Both patch Level.Unit methods — filter to wizard only (not summoned allies).
+# ============================================================================
+
+_original_advance_buffs = Level.Unit.advance_buffs
+
+def patched_advance_buffs(self):
+    _original_advance_buffs(self)
+    try:
+        if getattr(getattr(self, 'level', None), 'player_unit', None) is not self:
+            return
+        seen = set()
+        for buff in self.buffs:
+            if getattr(buff, 'turns_left', 0) != 1:
+                continue
+            btype = getattr(buff, 'buff_type', 0)
+            if btype not in (1, 2):
+                continue
+            bname = _name(buff, "")
+            if not bname or bname in seen:
+                continue
+            seen.add(bname)
+            text = f"{bname} fading" if btype == 1 else f"{bname} ending"
+            log(f"[Buff Expiry] {_log_ctx()} {text}")
+            batcher.speak_queued(text)
+    except Exception as e:
+        log(f"[Buff Expiry] Error: {e}")
+
+Level.Unit.advance_buffs = patched_advance_buffs
+
+_original_pre_advance = Level.Unit.pre_advance
+
+def patched_pre_advance(self):
+    ready_spells = []
+    if getattr(getattr(self, 'level', None), 'player_unit', None) is self:
+        ready_spells = [spell for spell, cd in self.cool_downs.items() if cd == 1]
+    _original_pre_advance(self)
+    try:
+        for spell in ready_spells:
+            text = f"{_name(spell)} ready"
+            log(f"[Cooldown] {_log_ctx()} {text}")
+            batcher.speak_queued(text)
+    except Exception as e:
+        log(f"[Cooldown] Error: {e}")
+
+Level.Unit.pre_advance = patched_pre_advance
+
+log("Buff expiration + cooldown ready hooks installed")
+
+# ============================================================================
+# CAST FAILURE HELPERS
+# ============================================================================
+
+def _get_cost_failure_reason(spell):
+    """Determine specific reason why can_pay_costs() failed."""
+    caster = getattr(spell, 'caster', None)
+    if caster is None:
+        return "cannot cast"
+    if caster.is_stunned():
+        return "stunned"
+    if caster.is_silenced() and not getattr(spell, 'melee', False):
+        return "silenced"
+    cd = caster.cool_downs.get(spell, 0)
+    if cd > 0:
+        return f"on cooldown, {cd} turns"
+    if getattr(spell, 'max_charges', 0) and getattr(spell, 'cur_charges', 0) <= 0:
+        return "no charges"
+    try:
+        hp_cost = spell.get_stat('hp_cost') if hasattr(spell, 'get_stat') else 0
+        if hp_cost and hp_cost >= caster.cur_hp:
+            return "not enough HP"
+    except Exception:
+        pass
+    return "cannot cast"
+
+def _get_cast_failure_reason(spell, x, y):
+    """Determine specific reason why can_cast() failed at target (x, y)."""
+    caster = getattr(spell, 'caster', None)
+    if caster is None:
+        return "cannot cast"
+    level = caster.level
+    dx = abs(caster.x - x)
+    dy = abs(caster.y - y)
+    if not getattr(spell, 'can_target_self', True) and dx == 0 and dy == 0:
+        return "can't target self"
+    if getattr(spell, 'must_target_walkable', False) and not level.can_walk(x, y):
+        return "not walkable"
+    if caster.is_blind() and max(dx, dy) > 1 + getattr(caster, 'radius', 0):
+        return "blinded"
+    melee = getattr(spell, 'melee', False)
+    try:
+        r = spell.get_stat('range') + (getattr(caster, 'radius', 0) if melee else 0)
+    except Exception:
+        r = getattr(spell, 'range', 0)
+    if melee:
+        if max(dx, dy) > (1 + getattr(caster, 'radius', 0)):
+            return "out of range"
+    else:
+        if dx * dx + dy * dy > r * r:
+            return "out of range"
+    u = level.get_unit_at(x, y)
+    if not getattr(spell, 'can_target_empty', True) and not u:
+        return "no target"
+    if getattr(spell, 'must_target_empty', False) and u:
+        return "tile occupied"
+    try:
+        if spell.get_stat('requires_los'):
+            if not level.can_see(caster.x, caster.y, x, y, light_walls=getattr(spell, 'cast_on_walls', False)):
+                return "no line of sight"
+    except Exception:
+        pass
+    # Poison blocks healing potion use (GH#13)
+    try:
+        if any(getattr(b, 'name', '') == 'Poison' for b in getattr(caster, 'buffs', [])):
+            return "poisoned"
+    except Exception:
+        pass
+    return "cannot cast"
+
+# ============================================================================
+# UI HOOKS: Spell Selection Announcements
+# ============================================================================
+# PyGameView.choose_spell() is called by both numrow keys and spell list.
+# PyGameView.abort_cur_spell() is called when deselecting (Escape/right-click).
+# ============================================================================
+
+log("[Init] UI hooks...")
+
+# The game runs as __main__, so "import RiftWizard2" would trigger a second
+# full module load. Instead, get the actual running module from sys.modules.
+_main = sys.modules.get('__main__')
+_PyGameView = getattr(_main, 'PyGameView', None)
+
+if _PyGameView is None:
+    # Fallback: search all loaded modules for PyGameView
+    for _mod in sys.modules.values():
+        _PyGameView = getattr(_mod, 'PyGameView', None)
+        if _PyGameView is not None:
+            break
+
+# ============================================================================
+# KEYBIND MIGRATION: Screen-Reader-Friendly Defaults
+# ============================================================================
+# PgUp/PgDn conflict with NVDA's numpad passthrough. On first load, rebind
+# tooltip cycling to Backslash (prev) / Backspace (next) and disable Fast
+# Forward (was Backspace). PgUp/PgDn kept as secondary bindings for sighted
+# users. Players can rebind via the in-game rebind screen at any time.
+# ============================================================================
+
+import pygame as _pg_keybind
+_keybinds_migrated = _settings.getboolean('words_of_power', 'keybinds_migrated', fallback=False)
+
+if _main is not None:
+    _default_kb = getattr(_main, 'default_key_binds', None)
+    _KB_PREV = getattr(_main, 'KEY_BIND_PREV_EXAMINE_TARGET', None)
+    _KB_NEXT = getattr(_main, 'KEY_BIND_NEXT_EXAMINE_TARGET', None)
+    _KB_FF = getattr(_main, 'KEY_BIND_FF', None)
+
+    if _default_kb is not None and _KB_PREV is not None:
+        # Always set screen-reader-friendly defaults (affects fresh installs
+        # and any new PyGameView instances).
+        _default_kb[_KB_PREV] = [_pg_keybind.K_BACKSLASH, _pg_keybind.K_PAGEUP]
+        _default_kb[_KB_NEXT] = [_pg_keybind.K_BACKSPACE, _pg_keybind.K_PAGEDOWN]
+        if _KB_FF is not None:
+            _default_kb[_KB_FF] = [None, None]  # Backspace repurposed for tooltip cycling
+        log("[Keybinds] Patched default_key_binds: tooltip prev=Backslash, next=Backspace, FF=unbound")
+
+if not _keybinds_migrated:
+    # First load — will also patch the live instance and announce.
+    # Write the flag so subsequent loads don't repeat.
+    if not _settings.has_section('words_of_power'):
+        _settings.add_section('words_of_power')
+    _settings.set('words_of_power', 'keybinds_migrated', 'true')
+    try:
+        with open(_settings_path, 'w', encoding='utf-8') as _f:
+            _settings.write(_f)
+        log("[Keybinds] Migration flag saved to settings.ini")
+    except Exception as _e:
+        log(f"[Keybinds] Could not save settings.ini: {_e}")
+
+# Flag checked later in patched_process_level_input to patch the live instance
+# and speak the one-time announcement.
+_keybinds_instance_patched = [False]
+
+# ============================================================================
+
+if _PyGameView is not None:
+    # Startup guard: verify all methods we patch still exist
+    _expected_methods = [
+        'choose_spell', 'abort_cur_spell', 'cast_cur_spell',
+        'cycle_tab_targets', 'try_examine_tile',
+        'shop_selection_adjust', 'shop_page_adjust',
+        'open_shop', 'process_shop_input',
+        'toggle_shop_scoped_filter', 'toggle_shop_global_filter',
+        'cycle_shop_filter_category',
+        'open_char_sheet', 'adjust_char_sheet_selection',
+        'toggle_char_sheet_column',
+        'process_level_input', 'try_move', 'deploy',
+        'move_examine_target', 'adjust_list_pos',
+    ]
+    for _method_name in _expected_methods:
+        if not hasattr(_PyGameView, _method_name):
+            log(f"[WARNING] PyGameView.{_method_name} not found — game may have updated. Patch will be skipped.")
+
+    _original_choose_spell = _PyGameView.choose_spell
+    _original_abort_spell = _PyGameView.abort_cur_spell
+    _original_cast_cur_spell = _PyGameView.cast_cur_spell
+
+    def patched_choose_spell(self, spell):
+        """Announce spell selection with range and specific failure reason."""
+        # During deploy, number keys are hijacked for category cycling — suppress native spell select
+        if getattr(self.game, 'deploying', False):
+            return
+        # LookSpell (V key) — not a real spell selection, skip combat announcement
+        if type(spell).__name__ == 'LookSpell':
+            _original_choose_spell(self, spell)
+            async_tts.speak("Look mode")
+            log("[Select] Look mode")
+            return
+        # Walk spell — movement/rift selection, not a combat spell (#29)
+        if _name(spell).lower() == 'walk':
+            _original_choose_spell(self, spell)
+            async_tts.speak("Walk mode")
+            log("[Select] Walk mode")
+            return
+        # Item spell (ALT+number) — announce as item with description
+        item_obj = getattr(spell, 'item', None)
+        if item_obj:
+            _original_choose_spell(self, spell)
+            try:
+                name = _name(spell)
+                qty = getattr(item_obj, 'quantity', 1)
+                desc = getattr(item_obj, 'description', '')
+                parts = [f"Item: {name}"]
+                if qty > 1:
+                    parts.append(f"{qty} remaining")
+                if desc and desc != "Undescribed Item":
+                    parts.append(desc)
+                text = ". ".join(parts)
+                async_tts.speak(text)
+                log(f"[Select Item] {text}")
+            except Exception as e:
+                log(f"[Select Item] Error: {e}")
+            return
+        cost_ok = spell.can_pay_costs()
+        reason = "" if cost_ok else _get_cost_failure_reason(spell)
+        _original_choose_spell(self, spell)
+        try:
+            name = _name(spell)
+            # Build range suffix
+            range_text = ""
+            melee = getattr(spell, 'melee', False)
+            if melee:
+                range_text = "Melee"
+            else:
+                try:
+                    rng = spell.get_stat('range') if hasattr(spell, 'get_stat') else getattr(spell, 'range', 0)
+                except Exception:
+                    rng = getattr(spell, 'range', 0)
+                if rng:
+                    range_text = f"Range {rng}"
+            # AoE profile: radius + shape keyword
+            aoe_text = ""
+            try:
+                radius = spell.get_stat('radius') if hasattr(spell, 'get_stat') else getattr(spell, 'radius', 0)
+            except Exception:
+                radius = getattr(spell, 'radius', 0)
+            if radius and radius > 0:
+                aoe_text = f"{radius} radius"
+            else:
+                # Check description for beam/cone
+                raw_desc = ""
+                if hasattr(spell, 'get_description'):
+                    try:
+                        raw_desc = read_text(spell.get_description()).lower()
+                    except Exception:
+                        pass
+                if 'beam' in raw_desc or 'line' in raw_desc:
+                    aoe_text = "beam"
+                elif 'cone' in raw_desc:
+                    aoe_text = "cone"
+            if not cost_ok:
+                parts = [name]
+                if range_text:
+                    parts.append(range_text)
+                if aoe_text:
+                    parts.append(aoe_text)
+                text = f"{', '.join(parts)}: {reason}"
+                async_tts.speak(text)
+                log(f"[Select] {text}")
+            else:
+                parts = [name]
+                if range_text:
+                    parts.append(range_text)
+                if aoe_text:
+                    parts.append(aoe_text)
+                text = ". ".join(parts) if len(parts) > 1 else name
+                async_tts.speak(text)
+                log(f"[Select] {text}")
+        except Exception as e:
+            log(f"[Select] Error: {e}")
+
+    def patched_abort_spell(self):
+        """Announce spell deselection."""
+        _original_abort_spell(self)
+        # Reset AoE tracking and dedup state on spell cancel
+        _aoe_announced_state[0] = False
+        _last_examine_xy[0] = None
+        try:
+            async_tts.speak("Cancelled")
+            log("[Select] Cancelled")
+        except Exception as e:
+            log(f"[Select] Error: {e}")
+
+    _PyGameView.choose_spell = patched_choose_spell
+    _PyGameView.abort_cur_spell = patched_abort_spell
+    log("  Spell select/cancel hooks installed")
+
+    # ---- Cast Failure Feedback ----
+
+    def patched_cast_cur_spell(self):
+        """Announce specific reason when a spell cast fails at confirmation."""
+        spell = self.cur_spell
+        target = self.cur_spell_target
+        will_fail = False
+        reason = ""
+        if spell and target:
+            try:
+                if not spell.can_cast(target.x, target.y):
+                    will_fail = True
+                    reason = _get_cast_failure_reason(spell, target.x, target.y)
+            except Exception:
+                pass
+        _original_cast_cur_spell(self)
+        if will_fail and reason:
+            text = f"{_name(spell)}: {reason}"
+            log(f"[Cast Fail] {_log_ctx()} {text}")
+            async_tts.speak(text)
+
+    _PyGameView.cast_cur_spell = patched_cast_cur_spell
+    log("  Cast failure feedback hook installed")
+
+    # ---- Shop Navigation Hooks ----
+
+    # Attribute names used in spell tooltips (from RiftWizard2.py tt_attrs)
+    _tt_attrs = [
+        'damage', 'minion_health', 'minion_damage', 'minion_duration',
+        'minion_range', 'duration', 'radius', 'num_summons', 'num_targets',
+        'shields', 'shot_cooldown', 'strikechance', 'cooldown',
+        'cascade_range', 'max_channel',
+    ]
+
+    def _fmt_attr(a):
+        """Format an attribute name for speech: 'minion_damage' -> 'Minion Damage'."""
+        return ' '.join(w.capitalize() for w in a.replace('_', ' ').split())
+
+    def _format_bonus_lines(obj):
+        """Extract bonus dictionary lines from an Equipment, Spell, or Upgrade object."""
+        lines = []
+        for tag, bonuses in getattr(obj, 'tag_bonuses_pct', {}).items():
+            tag_n = _name(tag)
+            for attr, val in bonuses.items():
+                if val:
+                    lines.append(f"{tag_n} spells gain {int(val)}% {_fmt_attr(attr)}")
+        for tag, bonuses in getattr(obj, 'tag_bonuses', {}).items():
+            tag_n = _name(tag)
+            for attr, val in bonuses.items():
+                if val:
+                    lines.append(f"{tag_n} spells gain {val} {_fmt_attr(attr)}")
+        for spell_class, bonuses in getattr(obj, 'spell_bonuses_pct', {}).items():
+            try:
+                spell_n = spell_class().name
+            except Exception:
+                spell_n = str(spell_class)
+            for attr, val in bonuses.items():
+                if val:
+                    lines.append(f"{spell_n} gains {int(val)}% {_fmt_attr(attr)}")
+        for spell_class, bonuses in getattr(obj, 'spell_bonuses', {}).items():
+            try:
+                spell_n = spell_class().name
+            except Exception:
+                spell_n = str(spell_class)
+            for attr, val in bonuses.items():
+                if val:
+                    lines.append(f"{spell_n} gains {val} {_fmt_attr(attr)}")
+        for attr, val in getattr(obj, 'global_bonuses_pct', {}).items():
+            if val:
+                if val >= 0:
+                    lines.append(f"All spells gain {int(val)}% {_fmt_attr(attr)}")
+                else:
+                    lines.append(f"All spells lose {int(val)}% {_fmt_attr(attr)}")
+        for attr, val in getattr(obj, 'global_bonuses', {}).items():
+            if val:
+                if val >= 0:
+                    lines.append(f"All spells gain {val} {_fmt_attr(attr)}")
+                else:
+                    lines.append(f"All spells lose {val} {_fmt_attr(attr)}")
+        for tag, val in getattr(obj, 'resists', {}).items():
+            if val:
+                lines.append(f"{val}% {_name(tag)} resist")
+        return lines
+
+    # _clean_desc imported from helpers.py; wrapped so RW3 (template, fmt) tuple/list
+    # descriptions are flattened to a string before cleaning (port §11 / read_text).
+    from helpers import _clean_desc as _clean_desc_raw
+    def _clean_desc(desc):
+        return _clean_desc_raw(read_text(desc))
+
+    def _describe_spell(spell):
+        """Build a full spoken description of a spell, matching the examine panel."""
+        parts = []
+
+        # Name
+        parts.append(_name(spell))
+
+        # Tags
+        tags = getattr(spell, 'tags', [])
+        if tags:
+            tag_names = [_name(t) for t in tags]
+            parts.append(", ".join(tag_names))
+
+        # Level
+        level = getattr(spell, 'level', 0)
+        if level:
+            parts.append(f"Level {level}")
+
+        # Range and AoE shape
+        melee = getattr(spell, 'melee', False)
+        radius = 0
+        if hasattr(spell, 'get_stat'):
+            try:
+                radius = spell.get_stat('radius')
+            except Exception:
+                radius = getattr(spell, 'radius', 0)
+        else:
+            radius = getattr(spell, 'radius', 0)
+
+        # Detect AoE shape from description keywords
+        raw_desc = ""
+        if hasattr(spell, 'get_description'):
+            raw_desc = read_text(spell.get_description()).lower()
+        elif hasattr(spell, 'description'):
+            raw_desc = read_text(spell.description).lower()
+
+        if 'beam' in raw_desc or 'line' in raw_desc:
+            shape = "beam"
+        elif 'cone' in raw_desc:
+            shape = "cone"
+        elif 'burst' in raw_desc or (radius and radius > 0):
+            shape = "burst"
+        elif getattr(spell, 'range', 0) == 0:
+            shape = "self"
+        else:
+            shape = "single target"
+
+        if melee:
+            r_text = "Melee"
+        else:
+            if hasattr(spell, 'get_stat'):
+                try:
+                    rng = spell.get_stat('range')
+                except Exception:
+                    rng = getattr(spell, 'range', 0)
+            else:
+                rng = getattr(spell, 'range', 0)
+            los = getattr(spell, 'requires_los', True)
+            r_text = f"Range {rng}" if rng else ""
+            if rng and not los:
+                r_text += ", ignores line of sight"
+
+        # Combine range + shape + radius into one clear line
+        shape_parts = []
+        if r_text:
+            shape_parts.append(r_text)
+        if shape == "beam":
+            shape_parts.append("beam")
+        elif shape == "cone":
+            if radius:
+                shape_parts.append(f"{radius} tile cone")
+            else:
+                shape_parts.append("cone")
+        elif shape == "burst":
+            shape_parts.append(f"{radius} tile burst" if radius else "burst")
+        elif shape == "self":
+            shape_parts.append("self target")
+        else:
+            shape_parts.append("single target")
+
+        if shape_parts:
+            parts.append(", ".join(shape_parts))
+
+        # Quick cast
+        try:
+            if hasattr(spell, 'get_stat') and spell.get_stat('quick_cast'):
+                parts.append("Quick cast")
+        except Exception:
+            pass
+
+        # Charges
+        max_charges = getattr(spell, 'max_charges', 0)
+        if max_charges:
+            cur = getattr(spell, 'cur_charges', max_charges)
+            try:
+                stat_max = spell.get_stat('max_charges') if hasattr(spell, 'get_stat') else max_charges
+            except Exception:
+                stat_max = max_charges
+            parts.append(f"Charges {cur} of {stat_max}")
+
+        # HP cost
+        if hasattr(spell, 'get_stat'):
+            try:
+                hp_cost = spell.get_stat('hp_cost')
+                if hp_cost:
+                    parts.append(f"HP cost {hp_cost}")
+            except Exception:
+                pass
+
+        # Equipment/buff bonus dictionaries
+        bonus_lines = _format_bonus_lines(spell)
+        if bonus_lines:
+            parts.append(". ".join(bonus_lines))
+
+        # Description text — formatted with live get_stat values via fmt_dict
+        # (damage/radius/etc. reflect the player's passives + equipment, matching
+        # the game's own tooltip).
+        desc = _desc_text(spell)
+        if desc:
+            parts.append(_clean_desc(desc))
+
+        # Attributes (damage, radius, duration, etc.)
+        attrs = []
+        for attr in _tt_attrs:
+            val = getattr(spell, attr, None) if not hasattr(spell, 'get_stat') else None
+            if hasattr(spell, 'get_stat'):
+                try:
+                    val = spell.get_stat(attr)
+                except Exception:
+                    val = getattr(spell, attr, None)
+            if val:
+                attr_label = ' '.join(w.capitalize() for w in attr.replace('_', ' ').split())
+                attrs.append(f"{val} {attr_label}")
+        if attrs:
+            parts.append("Attributes: " + ", ".join(attrs))
+
+        # Upgrades
+        upgrades = getattr(spell, 'spell_upgrades', [])
+        if upgrades:
+            upg_names = [f"{getattr(u, 'level', '?')}: {_name(u)}" for u in upgrades]
+            parts.append("Upgrades: " + ", ".join(upg_names))
+
+        return ". ".join(parts)
+
+    _original_shop_sel_adjust = _PyGameView.shop_selection_adjust
+    _original_shop_page_adjust = _PyGameView.shop_page_adjust
+    _original_open_shop = _PyGameView.open_shop
+
+    def _shop_item_cost(view, target):
+        """Get cost info for a shop item, handling different currency types."""
+        game = getattr(view, 'game', None)
+        if game is None:
+            return ""
+        try:
+            # Level shops (SHOP_TYPE_SHOP) use shop-specific currencies
+            if getattr(view, 'shop_type', -1) == getattr(_main, 'SHOP_TYPE_SHOP', 3):
+                shop = getattr(game.cur_level, 'cur_shop', None) if game.cur_level else None
+                if shop:
+                    currency = getattr(shop, 'currency', 0)
+                    if currency == Level.CURRENCY_PICK:
+                        return ""  # Free pick-one shops — no cost to announce
+                    elif currency == Level.CURRENCY_MAX_HP:
+                        item_cost = getattr(target, 'cost', 0)
+                        affordable = shop.can_shop(game.p1, target)
+                        suffix = "" if affordable else ", cannot afford"
+                        return f"Cost {item_cost} max HP{suffix}"
+                    else:
+                        # CURRENCY_GOLD or unknown
+                        item_cost = getattr(target, 'cost', 0)
+                        affordable = shop.can_shop(game.p1, target)
+                        suffix = "" if affordable else ", cannot afford"
+                        return f"Cost {item_cost} gold{suffix}"
+            # SP-based shops (SPELLS, UPGRADES, SPELL_UPGRADES)
+            cost = game.get_upgrade_cost(target)
+            affordable = game.can_buy_upgrade(target)
+            owned = game.has_upgrade(target)
+            if owned:
+                # In Learn Spell shop, owned spells open upgrades on confirm
+                if getattr(view, 'shop_type', -1) == _SHOP_TYPE_SPELLS:
+                    return "Owned, enter to view upgrades"
+                return "Owned"
+            if not affordable and isinstance(target, Level.Upgrade) and getattr(target, 'prereq', None):
+                if game.spell_is_upgraded(target.prereq):
+                    return "Locked, 1 upgrade per spell"
+            suffix = "" if affordable else ", cannot afford"
+            return f"Cost {cost} SP{suffix}"
+        except Exception:
+            return ""
+
+    _last_shop_target = [None]
+
+    def _describe_bestiary_entry(target):
+        """Describe a bestiary monster entry, respecting slain/unslain visibility.
+        Unslain monsters are hidden by the game — we match that behavior."""
+        name = _name(target)
+        if _SteamAdapter and not _SteamAdapter.has_slain(name):
+            return "Unknown monster"
+        # Slain — full Tier 2 unit description (same as D-key detail)
+        return _describe_unit(target)
+
+    # ---- Crafting readout helpers (RW3 equipment-crafting / component system) ----
+
+    def _tag_count_text(tags):
+        """Compress a flat list of tags into grouped speech: [Fire, Any, Any] ->
+        'Fire, 2 Any'. Preserves first-seen order."""
+        counts = []
+        index = {}
+        for t in tags:
+            n = _name(t)
+            if n in index:
+                counts[index[n]][1] += 1
+            else:
+                index[n] = len(counts)
+                counts.append([n, 1])
+        return ", ".join(f"{c} {n}" if c > 1 else n for n, c in counts)
+
+    def _tag_diff(before, after):
+        """Multiset difference: tags present in `before` but not matched in `after`.
+        Used to name which recipe requirements a toggle just met (before-after) or
+        reopened (after-before)."""
+        rem = list(after)
+        out = []
+        for t in before:
+            if t in rem:
+                rem.remove(t)
+            else:
+                out.append(t)
+        return out
+
+    def _describe_craft_blueprint(view, eq):
+        """Blueprint-list row: name, slot, craft-state (craftable / owned / missing
+        tags), recipe, and the equipment's effect."""
+        game = getattr(view, 'game', None)
+        craft_eq = view.get_shop_craft_blueprint(eq) if hasattr(view, 'get_shop_craft_blueprint') else eq
+        name = _name(eq)
+        slot = _SLOT_NAMES.get(getattr(eq, 'slot', -1), "Equipment")
+        parts = [f"{name}, {slot}"]
+        try:
+            if game and game.can_craft_equipment(craft_eq):
+                parts.append("craftable")
+            elif game and game.p1.has_equipment(eq):
+                parts.append("owned")
+            else:
+                missing = game.get_missing_crafting_requirements(craft_eq) if game else []
+                parts.append("need " + _tag_count_text(missing) if missing else "locked")
+        except Exception:
+            pass
+        try:
+            recipe_tags = view.flatten_recipe(craft_eq.recipe)
+            if recipe_tags:
+                parts.append("recipe " + _tag_count_text(recipe_tags))
+        except Exception:
+            pass
+        bonus_lines = _format_bonus_lines(eq)
+        if bonus_lines:
+            parts.append(". ".join(bonus_lines))
+        desc = _clean_desc(_desc_text(eq))
+        if desc:
+            parts.append(desc)
+        return ". ".join(parts)
+
+    def _describe_component(view, comp):
+        """Component-selection row: selected state, name, tags, rarity, effect."""
+        parts = []
+        if comp in getattr(view, 'shop_craft_component_ingredients', []):
+            parts.append("Selected")
+        parts.append(_name(comp))
+        tags = getattr(comp, 'tags', [])
+        if tags:
+            parts.append(", ".join(_name(t) for t in tags))
+        if getattr(comp, 'is_rare', False):
+            parts.append("rare")
+        desc = _clean_desc(_desc_text(comp))
+        if desc:
+            parts.append(desc)
+        return ". ".join(parts)
+
+    def _speak_craft_item(view):
+        """Review key (I): the equipment being built and what it does."""
+        eq = getattr(view, 'shop_craft_equipment', None)
+        if eq is None:
+            async_tts.speak("No item")
+            return
+        name = _name(eq)
+        slot = _SLOT_NAMES.get(getattr(eq, 'slot', -1), "Equipment")
+        parts = [f"Building {name}, {slot}"]
+        bonus_lines = _format_bonus_lines(eq)
+        if bonus_lines:
+            parts.append(". ".join(bonus_lines))
+        desc = _clean_desc(_desc_text(eq))
+        if desc:
+            parts.append(desc)
+        text = ". ".join(parts)
+        async_tts.speak(text)
+        log(f"[Craft] Item: {text}")
+
+    def _speak_craft_progress(view):
+        """Review key (R): recipe progress — filled of total, plus remaining tags."""
+        eq = getattr(view, 'shop_craft_equipment', None)
+        if eq is None:
+            async_tts.speak("No recipe")
+            return
+        remaining = list(getattr(view, 'shop_craft_remaining_tags', []))
+        try:
+            total = sum(amt for _, amt in eq.recipe)
+        except Exception:
+            total = 0
+        filled = total - len(remaining)
+        if remaining:
+            text = f"{_name(eq)}. Recipe {filled} of {total} filled. Need {_tag_count_text(remaining)}"
+        else:
+            text = f"{_name(eq)}. Recipe complete, {total} of {total}. Ready to craft"
+        async_tts.speak(text)
+        log(f"[Craft] Progress: {text}")
+
+    def patched_shop_selection_adjust(self, inc):
+        """Announce shop/bestiary item when navigating."""
+        _original_shop_sel_adjust(self, inc)
+        try:
+            target = self._examine_target
+            if target is not None and target is not _last_shop_target[0]:
+                _last_shop_target[0] = target
+                st = getattr(self, 'shop_type', -1)
+                if st == _SHOP_TYPE_BESTIARY:
+                    # Bestiary: unit description, no cost
+                    text = _describe_bestiary_entry(target)
+                elif st == _SHOP_TYPE_CRAFTING:
+                    text = _describe_craft_blueprint(self, target)
+                elif st == _SHOP_TYPE_COMPONENT_SELECTION:
+                    text = _describe_component(self, target)
+                else:
+                    cost = _shop_item_cost(self, target)
+                    desc = _describe_spell(target)
+                    text = f"{cost}. {desc}" if cost else desc
+                async_tts.speak(text)
+                log(f"[Shop] {text}")
+        except Exception as e:
+            log(f"[Shop] Error: {e}")
+
+    def patched_shop_page_adjust(self, inc):
+        """Announce page change with first item description."""
+        _last_shop_target[0] = None
+        _original_shop_page_adjust(self, inc)
+        try:
+            target = self._examine_target
+            page = getattr(self, 'shop_page', 0) + 1
+            if target is not None:
+                st = getattr(self, 'shop_type', -1)
+                if st == _SHOP_TYPE_BESTIARY:
+                    desc = _describe_bestiary_entry(target)
+                    text = f"Page {page}. {desc}"
+                elif st == _SHOP_TYPE_CRAFTING:
+                    text = f"Page {page}. {_describe_craft_blueprint(self, target)}"
+                elif st == _SHOP_TYPE_COMPONENT_SELECTION:
+                    text = f"Page {page}. {_describe_component(self, target)}"
+                else:
+                    cost = _shop_item_cost(self, target)
+                    desc = _describe_spell(target)
+                    text = f"Page {page}. {cost}. {desc}" if cost else f"Page {page}. {desc}"
+            else:
+                text = f"Page {page}, empty"
+            async_tts.speak(text)
+            log(f"[Shop] {text}")
+        except Exception as e:
+            log(f"[Shop] Error: {e}")
+
+    def patched_open_shop(self, shop_type, spell=None, equipment=None):
+        """Announce entering shop/bestiary/upgrade/crafting screen with header."""
+        _last_shop_target[0] = None
+        _original_open_shop(self, shop_type, spell=spell, equipment=equipment)
+        try:
+            target = self._examine_target
+            game = getattr(self, 'game', None)
+
+            if shop_type == _SHOP_TYPE_BESTIARY:
+                # Bestiary: slain count header + first entry
+                num_slain = _SteamAdapter.get_num_slain() if _SteamAdapter else 0
+                total = len(self.get_shop_options())
+                header = f"Bestiary, {num_slain} of {total} slain"
+                desc = _describe_bestiary_entry(target) if target else None
+                text = f"{header}. {desc}" if desc else header
+
+            elif shop_type == _SHOP_TYPE_SPELL_UPGRADES:
+                # Spell upgrade picker: "Upgrade [SpellName], N SP available"
+                spell_name = (_name(getattr(self, 'shop_upgrade_spell', None))
+                              if hasattr(self, 'shop_upgrade_spell') else "Spell")
+                sp_total = getattr(game.p1, 'xp', 0) if game and game.p1 else 0
+                header = f"Upgrade {spell_name}, {sp_total} SP available"
+                if target is not None:
+                    cost = _shop_item_cost(self, target)
+                    desc = _describe_spell(target)
+                    text = f"{header}. {cost}. {desc}" if cost else f"{header}. {desc}"
+                else:
+                    text = header
+
+            elif shop_type == _SHOP_TYPE_SHOP:
+                # Level shop: use the shop prop's name (Amnesia Shrine, Shoe Box, etc.)
+                shop_prop = getattr(game.cur_level, 'cur_shop', None) if game and game.cur_level else None
+                shop_name = getattr(shop_prop, 'name', 'Shop') if shop_prop else 'Shop'
+                shop_desc = getattr(shop_prop, 'description', '') if shop_prop else ''
+                header = shop_name
+                if shop_desc and shop_desc.strip():
+                    header += f". {shop_desc.strip()}"
+                if target is not None:
+                    cost = _shop_item_cost(self, target)
+                    desc = _describe_spell(target)
+                    text = f"{header}. {cost}. {desc}" if cost else f"{header}. {desc}"
+                else:
+                    text = header
+
+            elif shop_type == _SHOP_TYPE_CRAFTING:
+                # Craft Equipment: blueprint list
+                total = len(self.get_shop_options())
+                header = f"Craft Equipment, {total} blueprints"
+                if target is not None:
+                    text = f"{header}. {_describe_craft_blueprint(self, target)}"
+                else:
+                    text = f"{header}, empty"
+
+            elif shop_type == _SHOP_TYPE_COMPONENT_SELECTION:
+                # Component selection: pick ingredients for the chosen blueprint
+                eq = getattr(self, 'shop_craft_equipment', None)
+                eq_name = _name(eq) if eq is not None else "item"
+                remaining = list(getattr(self, 'shop_craft_remaining_tags', []))
+                header = (f"Select components for {eq_name}. Need {_tag_count_text(remaining)}"
+                          if remaining else f"Select components for {eq_name}")
+                if target is not None:
+                    text = f"{header}. {_describe_component(self, target)}"
+                else:
+                    text = f"{header}. No usable components"
+
+            else:
+                # SPELLS: "Learn Spell, N SP available"
+                sp_total = getattr(game.p1, 'xp', 0) if game and game.p1 else 0
+                header = f"Learn Spell, {sp_total} SP available"
+                if target is not None:
+                    cost = _shop_item_cost(self, target)
+                    desc = _describe_spell(target)
+                    text = f"{header}. {cost}. {desc}" if cost else f"{header}. {desc}"
+                else:
+                    text = f"{header}, empty"
+
+            async_tts.speak(text)
+            log(f"[Shop] Opened: {text}")
+            try:
+                _sp = getattr(game.p1, 'xp', None) if game and game.p1 else None
+                _shop_type_name = {
+                    _SHOP_TYPE_BESTIARY: 'bestiary',
+                    _SHOP_TYPE_SPELL_UPGRADES: 'spell_upgrades',
+                    _SHOP_TYPE_SHOP: 'level_shop',
+                    _SHOP_TYPE_CRAFTING: 'crafting',
+                    _SHOP_TYPE_COMPONENT_SELECTION: 'component_selection',
+                }.get(shop_type, 'learn_spell')
+                _telemetry.emit('shop_open', shop_type=_shop_type_name, sp=_sp)
+            except Exception:
+                pass
+        except Exception as e:
+            log(f"[Shop] Error: {e}")
+
+    _original_try_buy = _PyGameView.try_buy_shop_selection
+    _suppress_char_sheet_for_purchase = [False]
+
+    def patched_try_buy_shop_selection(self, prompt=True):
+        """Open buy prompt (confirm dialog). Purchase announcement is in confirm_buy hook."""
+        target = self._examine_target
+        target_name = _name(target) if target else None
+        st = getattr(self, 'shop_type', -1)
+
+        # Component selection: Confirm toggles a component in/out — narrate the diff.
+        if st == _SHOP_TYPE_COMPONENT_SELECTION:
+            comp = target
+            before = list(getattr(self, 'shop_craft_remaining_tags', []))
+            was_in = comp in getattr(self, 'shop_craft_component_ingredients', [])
+            _original_try_buy(self, prompt)
+            try:
+                after = list(getattr(self, 'shop_craft_remaining_tags', []))
+                now_in = comp in getattr(self, 'shop_craft_component_ingredients', [])
+                if now_in and not was_in:
+                    met = _tag_diff(before, after)
+                    msg = f"Added {_name(comp)}"
+                    if met:
+                        msg += f". {_tag_count_text(met)} filled"
+                    if not after:
+                        msg += ". Recipe complete, ready to craft"
+                    async_tts.speak(msg)
+                elif was_in and not now_in:
+                    reopened = _tag_diff(after, before)
+                    msg = f"Removed {_name(comp)}"
+                    if reopened:
+                        msg += f". {_tag_count_text(reopened)} needed again"
+                    async_tts.speak(msg)
+                else:
+                    async_tts.speak(f"Cannot use {_name(comp)}")
+                log(f"[Craft] Toggle: {_name(comp)}")
+            except Exception as e:
+                log(f"[Craft] Toggle announce error: {e}")
+            return
+
+        # Crafting blueprint: Confirm either crafts (-> component selection, announced
+        # by the open_shop hook) or wishlists a non-craftable blueprint.
+        game = getattr(self, 'game', None)
+        if st == _SHOP_TYPE_CRAFTING and isinstance(target, Level.Equipment):
+            craftable = False
+            try:
+                craft_item = (self.get_shop_craft_blueprint(target)
+                              if hasattr(self, 'get_shop_craft_blueprint') else target)
+                craftable = bool(game and game.can_craft_equipment(craft_item))
+            except Exception:
+                pass
+            _original_try_buy(self, prompt)
+            if not craftable:
+                # Wishlisted (full wishlist surface is a later pass).
+                try:
+                    async_tts.speak(f"Wishlisted {_name(target)}")
+                    log(f"[Craft] Wishlisted {_name(target)}")
+                except Exception:
+                    pass
+            return
+
+        # Check if this is an owned spell (will open upgrades, not buy)
+        is_owned_spell = (game and target in getattr(game.p1, 'spells', []))
+
+        if not is_owned_spell and target_name:
+            _suppress_char_sheet_for_purchase[0] = True
+
+        _original_try_buy(self, prompt)
+
+        try:
+            _suppress_char_sheet_for_purchase[0] = False
+            if is_owned_spell:
+                # Opened upgrades view — patched_open_shop handles announcement
+                return
+        except Exception as e:
+            _suppress_char_sheet_for_purchase[0] = False
+            log(f"[Shop] Buy announce error: {e}")
+
+    _original_confirm_buy = _PyGameView.confirm_buy
+
+    def patched_confirm_buy(self):
+        """Announce purchase after player confirms the buy dialog."""
+        purchased = getattr(self, 'chosen_purchase', None)
+        purchase_name = _name(purchased) if purchased else None
+        _suppress_char_sheet_for_purchase[0] = True
+
+        _original_confirm_buy(self)
+
+        _suppress_char_sheet_for_purchase[0] = False
+        try:
+            if purchase_name:
+                if isinstance(purchased, Level.Equipment):
+                    text = f"Equipped {purchase_name}"
+                elif isinstance(purchased, Level.Spell):
+                    text = f"Learned {purchase_name}"
+                else:
+                    text = f"Purchased {purchase_name}"
+                async_tts.speak(text)
+                # Log with SP cost for session reconstruction
+                cost = ""
+                try:
+                    cost = f" ({self.game.get_upgrade_cost(purchased)} SP)"
+                except Exception:
+                    pass
+                log(f"[Shop] {text}{cost}")
+                try:
+                    _sp_after = getattr(self.game.p1, 'xp', None) if self.game and self.game.p1 else None
+                    _cost_val = None
+                    try:
+                        _cost_val = self.game.get_upgrade_cost(purchased)
+                    except Exception:
+                        pass
+                    _telemetry.emit('shop_buy',
+                                    item=purchase_name,
+                                    kind=('equipment' if isinstance(purchased, Level.Equipment)
+                                          else 'spell' if isinstance(purchased, Level.Spell)
+                                          else 'other'),
+                                    cost=_cost_val,
+                                    sp_after=_sp_after)
+                except Exception:
+                    pass
+                # Speak char sheet overview after purchase
+                try:
+                    _speak_char_sheet_overview(self)
+                except Exception:
+                    pass
+        except Exception as e:
+            log(f"[Shop] Confirm buy announce error: {e}")
+
+    _PyGameView.shop_selection_adjust = patched_shop_selection_adjust
+    _PyGameView.shop_page_adjust = patched_shop_page_adjust
+    _PyGameView.open_shop = patched_open_shop
+    _PyGameView.try_buy_shop_selection = patched_try_buy_shop_selection
+    _PyGameView.confirm_buy = patched_confirm_buy
+    log("  Shop navigation hooks installed")
+
+    # ---- Shop Filter Hooks (RW3: category-scoped + global filters) ----
+
+    _SHOP_TYPE_SPELLS = getattr(_main, 'SHOP_TYPE_SPELLS', 0)
+    _SHOP_TYPE_CRAFTING = getattr(_main, 'SHOP_TYPE_CRAFTING', 1)
+    _SHOP_TYPE_SPELL_UPGRADES = getattr(_main, 'SHOP_TYPE_SPELL_UPGRADES', 2)
+    _SHOP_TYPE_SHOP = getattr(_main, 'SHOP_TYPE_SHOP', 3)
+    _SHOP_TYPE_BESTIARY = getattr(_main, 'SHOP_TYPE_BESTIARY', 4)
+    _SHOP_TYPE_COMPONENT_SELECTION = getattr(_main, 'SHOP_TYPE_COMPONENT_SELECTION', 5)
+    _shop_filter_category_names = getattr(_main, 'shop_filter_category_names', {})
+    _shop_global_filter_names = getattr(_main, 'shop_global_filter_names', {})
+
+    _SteamAdapter = getattr(_main, 'SteamAdapter', None)
+    if _SteamAdapter is None:
+        try:
+            import SteamAdapter as _SteamAdapter
+        except ImportError:
+            _SteamAdapter = None
+
+    # RW3 routes letter/click toggles through the scoped/global workers (not the
+    # thin toggle_shop_filter dispatcher), so we hook those; cycle handles Tab.
+    _original_toggle_scoped = getattr(_PyGameView, 'toggle_shop_scoped_filter', None)
+    _original_toggle_global = getattr(_PyGameView, 'toggle_shop_global_filter', None)
+    _original_cycle_category = getattr(_PyGameView, 'cycle_shop_filter_category', None)
+    _original_process_shop_input = _PyGameView.process_shop_input
+
+    def _filter_result_count(view):
+        try:
+            count = len(view.get_shop_options())
+        except Exception:
+            return ""
+        return "No results" if count == 0 else f"{count} results"
+
+    def _active_filter_labels(view, category):
+        labels = []
+        try:
+            for v in view.get_shop_filter_values(category):
+                if view.is_shop_filter_value_active(category, v):
+                    labels.append(read_text(view.get_shop_filter_value_label(category, v)))
+        except Exception:
+            pass
+        return labels
+
+    def patched_toggle_shop_scoped_filter(self, category, value):
+        """Announce a tag/attr filter toggle: value, on/off, result count."""
+        _original_toggle_scoped(self, category, value)
+        try:
+            label = read_text(self.get_shop_filter_value_label(category, value))
+            state = "on" if self.is_shop_filter_value_active(category, value) else "off"
+            text = f"{label} {state}. {_filter_result_count(self)}"
+            async_tts.speak(text)
+            log(f"[Shop Filter] {text}")
+        except Exception as e:
+            log(f"[Shop Filter] Error: {e}")
+
+    def patched_toggle_shop_global_filter(self, filter_id):
+        """Announce a global filter toggle (Can Afford / Never Purchased / Never Victory)."""
+        result = _original_toggle_global(self, filter_id)
+        try:
+            name = _shop_global_filter_names.get(filter_id, str(filter_id))
+            state = "on" if self.is_shop_global_filter_active(filter_id) else "off"
+            text = f"{name} {state}. {_filter_result_count(self)}"
+            async_tts.speak(text)
+            log(f"[Shop Filter] {text}")
+        except Exception as e:
+            log(f"[Shop Filter] Error: {e}")
+        return result
+
+    def patched_cycle_shop_filter_category(self):
+        """Announce the filter category Tab cycles to, plus any active values in it."""
+        result = _original_cycle_category(self)
+        try:
+            if result:
+                cat = getattr(self, 'shop_filter_category', None)
+                cat_name = _shop_filter_category_names.get(cat, str(cat))
+                active = _active_filter_labels(self, cat)
+                suffix = (". Active: " + ", ".join(active)) if active else ""
+                async_tts.speak(f"{cat_name} filter{suffix}")
+        except Exception as e:
+            log(f"[Shop Filter] Cycle error: {e}")
+        return result
+
+    def _speak_shop_filter_guide(view):
+        """Comma: read the full filter page — current category's values, hotkeys,
+        on/off state, and the Shift-modifier shadow category (Recipe / Bonus)."""
+        try:
+            cat = getattr(view, 'shop_filter_category', None)
+            if cat is None:
+                return
+            cat_name = _shop_filter_category_names.get(cat, str(cat))
+            parts = [f"{cat_name} filter"]
+            active = _active_filter_labels(view, cat)
+            if active:
+                parts.append("Active: " + ", ".join(active))
+            entries = []
+            for v in view.get_shop_filter_values(cat):
+                key = view.get_shop_filter_value_key(cat, v)
+                if not key:
+                    continue
+                label = read_text(view.get_shop_filter_value_label(cat, v))
+                on = " on" if view.is_shop_filter_value_active(cat, v) else ""
+                entries.append(f"{label} {key.upper()}{on}")
+            if entries:
+                parts.append(", ".join(entries))
+            shadow = view.get_shop_filter_modifier_category(cat)
+            if shadow:
+                parts.append(f"Hold Shift for {_shop_filter_category_names.get(shadow, str(shadow))}")
+            text = ". ".join(parts)
+            async_tts.speak(text)
+            log(f"[Shop Guide] {text}")
+        except Exception as e:
+            log(f"[Shop Guide] Error: {e}")
+
+    def patched_process_shop_input(self):
+        """Mod review keys layered on shop input: comma = full filter page (spell +
+        crafting); I = item being built, R = recipe progress (component selection).
+        All gated off while the search box has focus (so typing isn't eaten)."""
+        st = getattr(self, 'shop_type', -1)
+        if not getattr(self, 'search_focused', False):
+            import pygame
+            for evt in self.events:
+                if evt.type != pygame.KEYDOWN:
+                    continue
+                if evt.key == pygame.K_COMMA and st in (_SHOP_TYPE_SPELLS, _SHOP_TYPE_CRAFTING):
+                    _speak_shop_filter_guide(self)
+                    break
+                if st == _SHOP_TYPE_COMPONENT_SELECTION:
+                    if evt.key == pygame.K_i:
+                        _speak_craft_item(self)
+                        break
+                    if evt.key == pygame.K_r:
+                        _speak_craft_progress(self)
+                        break
+        _original_process_shop_input(self)
+
+    if _original_toggle_scoped:
+        _PyGameView.toggle_shop_scoped_filter = patched_toggle_shop_scoped_filter
+    if _original_toggle_global:
+        _PyGameView.toggle_shop_global_filter = patched_toggle_shop_global_filter
+    if _original_cycle_category:
+        _PyGameView.cycle_shop_filter_category = patched_cycle_shop_filter_category
+    _PyGameView.process_shop_input = patched_process_shop_input
+    log("  Shop filter hooks installed (RW3 scoped/global/cycle + comma guide + I/R)")
+
+    # ---- Character Sheet Hooks ----
+
+    # RW3 equipment slots (Level.py:1428-1432): SLOT_TRINKET=0, HELMET=1, ARMOR=2, BOOTS=3, WEAPON=4
+    _SLOT_NAMES = {0: "Trinket", 1: "Helmet", 2: "Armor", 3: "Boots", 4: "Weapon"}
+    _LEARN_SPELL = getattr(_main, 'LEARN_SPELL_TARGET', None)
+    _LEARN_SKILL = getattr(_main, 'LEARN_SKILL_TARGET', None)
+
+    def _describe_examine_target(view):
+        """Return speech text for the current examine_target in the character sheet."""
+        target = view.examine_target
+        if target is None or target is False:
+            return "Nothing selected"
+
+        # "Learn new spell" / "Learn new skill" placeholder items
+        if target is _LEARN_SPELL:
+            return "Learn New Spell. Press Enter to open spell shop"
+        if target is _LEARN_SKILL:
+            return "Learn New Skill. Press Enter to open skill shop"
+
+        # Player spell — use full _describe_spell (same as shop)
+        if isinstance(target, Level.Spell) and target in view.game.p1.spells:
+            return _describe_spell(target)
+
+        # Equipment — full description with bonuses
+        if isinstance(target, Level.Equipment):
+            name = _name(target)
+            slot = _SLOT_NAMES.get(getattr(target, 'slot', -1), "Equipment")
+            parts = [f"{slot}: {name}"]
+            bonus_lines = _format_bonus_lines(target)
+            if bonus_lines:
+                parts.append(". ".join(bonus_lines))
+            desc = _desc_text(target)
+            if desc:
+                parts.append(_clean_desc(desc))
+            return ". ".join(parts)
+
+        # Skill (passive buff without prereq) or spell upgrade (has prereq)
+        if isinstance(target, Level.Upgrade):
+            name = _name(target)
+            prereq = getattr(target, 'prereq', None)
+            if prereq:
+                # Spell upgrade — include description and level
+                parts = [f"Upgrade: {name} for {_name(prereq)}"]
+                level = getattr(target, 'level', 0)
+                if level:
+                    parts.append(f"Level {level}")
+                bonus_lines = _format_bonus_lines(target)
+                if bonus_lines:
+                    parts.append(". ".join(bonus_lines))
+                desc = ''
+                try:
+                    desc = target.get_description() or ''
+                except Exception:
+                    desc = getattr(target, 'description', '') or ''
+                if desc:
+                    parts.append(_clean_desc(desc))
+                return ". ".join(parts)
+            else:
+                # Skill — full description
+                parts = [f"Skill: {name}"]
+                level = getattr(target, 'level', 0)
+                if level:
+                    parts.append(f"Level {level}")
+                bonus_lines = _format_bonus_lines(target)
+                if bonus_lines:
+                    parts.append(". ".join(bonus_lines))
+                desc = ''
+                try:
+                    desc = target.get_description() or ''
+                except Exception:
+                    desc = getattr(target, 'description', '') or ''
+                if desc:
+                    parts.append(_clean_desc(desc))
+                return ". ".join(parts)
+
+        # Buff (generic — shouldn't normally appear but handle gracefully)
+        if isinstance(target, Level.Buff):
+            name = _name(target)
+            return f"Buff: {name}"
+
+        # Fallback for any TooltipExamineTarget or unknown
+        desc = getattr(target, 'description', '')
+        if desc:
+            return _clean_desc(desc)
+        return str(target)
+
+    def _char_sheet_section_name(view):
+        """Return which section the current examine_target belongs to."""
+        target = view.examine_target
+        if target is _LEARN_SPELL:
+            return "Spells"
+        if target is _LEARN_SKILL:
+            return "Skills"
+        if isinstance(target, Level.Spell) and target in view.game.p1.spells:
+            return "Spells"
+        if isinstance(target, Level.Upgrade) and getattr(target, 'prereq', None) in view.game.p1.spells:
+            return "Spells"
+        if isinstance(target, Level.Equipment):
+            return "Equipment"
+        skills = getattr(view.game.p1, 'get_skills', lambda: [])()  # RW3: get_skills removed from char sheet
+        if target in skills:
+            return "Skills"
+        return "Spells"
+
+    _original_open_char_sheet = _PyGameView.open_char_sheet
+
+    def _speak_char_sheet_overview(view):
+        """Build and speak the character sheet overview text."""
+        parts = ["Character sheet"]
+        # RW3: held components live on p1.component_tags (the spendable tag bank that
+        # crafting consumes — Game.py:501). The base game shows components only in the
+        # mouse-hover character panel with no keyboard nav, so we voice the tag bank
+        # here. (Per-component keyboard browsing is a future bespoke-nav pass.)
+        ctags = getattr(view.game.p1, 'component_tags', None)
+        if ctags:
+            tag_strs = [f"{num} {_name(tag)}" for tag, num in ctags.items() if num > 0]
+            if tag_strs:
+                parts.append("Components: " + ", ".join(tag_strs))
+        section = _char_sheet_section_name(view)
+        desc = _describe_examine_target(view)
+        parts.append(f"{section}. {desc}")
+        text = ". ".join(parts)
+        async_tts.speak(text)
+        log(f"[CharSheet] Open: {text}")
+
+    def patched_open_char_sheet(self):
+        """Announce character sheet opening with overview."""
+        _original_open_char_sheet(self)
+        if _suppress_char_sheet_for_purchase[0]:
+            # Purchase hook will speak in the right order
+            return
+        try:
+            _speak_char_sheet_overview(self)
+        except Exception as e:
+            log(f"[CharSheet] Open error: {e}")
+
+    _original_adjust_char_sheet = _PyGameView.adjust_char_sheet_selection
+
+    def patched_adjust_char_sheet_selection(self, diff, column=None):
+        """Voice navigation within character sheet section (UP/DOWN). RW3 added the
+        `column` arg (port #4: adjust_char_sheet_selection(diff) -> (diff, column))."""
+        if column is None:
+            column = getattr(self, 'char_sheet_column', 0)
+        _original_adjust_char_sheet(self, diff, column)
+        try:
+            text = _describe_examine_target(self)
+            async_tts.speak(text)
+            log(f"[CharSheet] Nav: {text}")
+        except Exception as e:
+            log(f"[CharSheet] Nav error: {e}")
+
+    _original_toggle_char_sheet = _PyGameView.toggle_char_sheet_column  # RW3 rename (port #2)
+
+    def patched_toggle_char_sheet_column(self, diff):
+        """Voice section switch in character sheet (LEFT/RIGHT)."""
+        _original_toggle_char_sheet(self, diff)
+        try:
+            section = _char_sheet_section_name(self)
+            desc = _describe_examine_target(self)
+            text = f"{section}. {desc}"
+            async_tts.speak(text)
+            log(f"[CharSheet] Section: {text}")
+        except Exception as e:
+            log(f"[CharSheet] Section error: {e}")
+
+    _original_process_char_sheet_input = _PyGameView.process_char_sheet_input
+
+    def patched_process_char_sheet_input(self):
+        """Wrapped for state transition detection (centralized hook handles announcement)."""
+        _original_process_char_sheet_input(self)
+
+    _PyGameView.open_char_sheet = patched_open_char_sheet
+    _PyGameView.adjust_char_sheet_selection = patched_adjust_char_sheet_selection
+    _PyGameView.toggle_char_sheet_column = patched_toggle_char_sheet_column
+    _PyGameView.process_char_sheet_input = patched_process_char_sheet_input
+    log("  Character sheet hooks installed")
+
+    # ---- PgUp/PgDn Tooltip Cycling Hook ----
+    # The game's examine panel supports extra tooltips (spell upgrades, summoned
+    # units, equipment details) accessed via PgUp/PgDn (move_examine_target).
+    # Without this hook, cycling through extras is completely silent.
+
+    _original_move_examine_target = _PyGameView.move_examine_target
+
+    def _describe_examine_tooltip(view):
+        """Describe the current examine_target for PgUp/PgDn tooltip cycling.
+        Handles units (summoned creatures), spells, upgrades, and equipment."""
+        target = view.examine_target
+        if target is None:
+            return None
+        # Page counter: "2 of 5"
+        num_extras = len(view._examine_extras)
+        idx = view._examine_index
+        counter = f"{idx + 1} of {num_extras + 1}"
+        # Unit (summoned creature stat block)
+        if isinstance(target, Level.Unit):
+            return f"{counter}. {_describe_unit(target)}"
+        # Spell (full spell description)
+        if isinstance(target, Level.Spell):
+            return f"{counter}. {_describe_spell(target)}"
+        # Upgrade (spell upgrade with prereq)
+        if isinstance(target, Level.Upgrade):
+            name = _name(target)
+            prereq = getattr(target, 'prereq', None)
+            parts = []
+            if prereq:
+                parts.append(f"Upgrade: {name} for {_name(prereq)}")
+            else:
+                parts.append(f"Skill: {name}")
+            lvl = getattr(target, 'level', 0)
+            if lvl:
+                parts.append(f"Level {lvl}")
+            desc = _desc_text(target)
+            if desc:
+                parts.append(_clean_desc(desc))
+            return f"{counter}. " + ". ".join(parts)
+        # Equipment
+        if isinstance(target, Level.Equipment):
+            name = _name(target)
+            slot = _SLOT_NAMES.get(getattr(target, 'slot', -1), "Equipment")
+            parts = [f"{slot}: {name}"]
+            bonus_lines = _format_bonus_lines(target)
+            if bonus_lines:
+                parts.append(". ".join(bonus_lines))
+            desc = _desc_text(target)
+            if desc:
+                parts.append(_clean_desc(desc))
+            return f"{counter}. " + ". ".join(parts)
+        # Component (RW3: former consumable Items are now Components)
+        if isinstance(target, getattr(Level, 'Component', ())):
+            parts = [_name(target)]
+            desc = _desc_text(target)
+            if desc and desc != "Undescribed Item":
+                parts.append(_clean_desc(desc))
+            return f"{counter}. " + ". ".join(parts)
+        # Prospective-equipment list (RW3 crafting preview: the gear this rift's
+        # components could craft). EquipmentList has no .name → would read "something".
+        if isinstance(target, getattr(Level, 'EquipmentList', ())):
+            eq_names = [_name(e) for e in getattr(target, 'equipments', [])]
+            if eq_names:
+                return f"{counter}. Craftable from these components: " + ", ".join(eq_names)
+            return f"{counter}. Craftable equipment: none"
+
+        # Rift portal — contents live in level_gen_params, not a .name; without this
+        # it falls to the _name fallback and reads "something". Mirrors the main
+        # examine path (_describe_target) so tooltip cycling matches look/walk mode.
+        if hasattr(target, 'level_gen_params'):
+            return f"{counter}. {_describe_portal(target, view)}"
+        # Fallback
+        return f"{counter}. {_name(target)}"
+
+    def patched_move_examine_target(self, movedir):
+        """Voice tooltip content when PgUp/PgDn cycles through extra examine targets."""
+        prev_index = self._examine_index
+        _original_move_examine_target(self, movedir)
+        if self._examine_index == prev_index:
+            return  # Didn't actually change (at boundary)
+        try:
+            text = _describe_examine_tooltip(self)
+            if text:
+                async_tts.speak(text)
+                log(f"[Tooltip] PgDn: {text[:80]}")
+        except Exception as e:
+            log(f"[Tooltip] Error: {e}")
+
+    _PyGameView.move_examine_target = patched_move_examine_target
+    log("  PgUp/PgDn tooltip cycling hook installed")
+
+    # ---- Spell Reorder Hook (Shift+Up/Down in Character Sheet) ----
+
+    _original_adjust_spell_pos = _PyGameView.adjust_list_pos  # RW3 rename; reorders spells OR equipment (port #3)
+
+    def patched_adjust_spell_pos(self, amt):
+        """Voice confirmation when spell position is changed in character sheet.
+        Reports the spell that was displaced: 'Moved above X' or 'Moved below X'."""
+        target = self.examine_target
+        spells = self.game.p1.spells if self.game else []
+        old_index = spells.index(target) if target in spells else -1
+        _original_adjust_spell_pos(self, amt)
+        new_index = spells.index(target) if target in spells else -1
+        if new_index == old_index or new_index < 0:
+            return  # Didn't move (at boundary or not a spell)
+        try:
+            # The displaced spell is now at our old position
+            displaced = spells[old_index] if 0 <= old_index < len(spells) else None
+            if displaced and amt < 0:
+                text = f"Moved above {_name(displaced)}"
+            elif displaced and amt > 0:
+                text = f"Moved below {_name(displaced)}"
+            else:
+                text = "Moved"
+            async_tts.speak(text)
+            log(f"[CharSheet] Reorder: {_name(target)} {text}")
+        except Exception as e:
+            log(f"[CharSheet] Reorder error: {e}")
+
+    _PyGameView.adjust_list_pos = patched_adjust_spell_pos
+    log("  Spell reorder feedback hook installed")
+
+    # ---- Target Selection Hooks ----
+
+    _original_cycle_tab = _PyGameView.cycle_tab_targets
+
+    def _describe_tile(view, point):
+        """Describe the contents of a tile for Look mode cursor announcements.
+        Returns a string like 'Fire Imp. HP 12 of 12. ...' or 'Wall' or 'Floor'."""
+        try:
+            level = view.game.cur_level
+            if level is None:
+                return "Unknown"
+            x, y = point.x, point.y
+            if not level.is_point_in_bounds(Level.Point(x, y)):
+                return "Out of bounds"
+
+            tile = level.tiles[x][y]
+            parts = []
+
+            # Unit on tile
+            unit = tile.unit
+            if unit:
+                if _is_player(unit):
+                    # Brief self-description — full details via F key
+                    hp = getattr(unit, 'cur_hp', 0)
+                    max_hp = getattr(unit, 'max_hp', 0)
+                    parts.append(f"Wizard. {hp} of {max_hp} HP")
+                else:
+                    parts.append(_describe_unit_tier1(unit))
+
+            # Prop on tile (portal, shrine, item on floor)
+            if tile.prop:
+                if hasattr(tile.prop, 'level_gen_params'):
+                    parts.append(_describe_portal(tile.prop, view))
+                else:
+                    parts.append(_name(tile.prop))
+
+            # Cloud on tile (fire cloud, poison cloud, etc.)
+            if tile.cloud:
+                cloud_name = _name(tile.cloud, "Cloud")
+                dur = getattr(tile.cloud, 'duration', 0)
+                if dur and dur > 0:
+                    parts.append(f"{cloud_name}, {dur} turns")
+                else:
+                    parts.append(cloud_name)
+
+            # Terrain type — always announce for wall/chasm; announce floor when
+            # otherwise hidden (cloud occluding empty floor) or when nothing else
+            # was said. Without this, "Storm Cloud, 5 turns" gives no clue whether
+            # the cloud sits on floor (walkable) or wall (blocked).
+            if tile.is_wall():
+                parts.append("Wall")
+            elif tile.is_chasm:
+                parts.append("Chasm")
+            elif not unit and not tile.prop:
+                parts.append("Floor")
+
+            return ". ".join(parts)
+        except Exception as e:
+            log(f"[Look] Tile describe error: {e}")
+            return "Unknown"
+
+    def _describe_tile_brief(view, point):
+        """Brief tile description for spell targeting cursor: unit name, or terrain type.
+        Lighter than _describe_tile (Look mode) for rapid scanning during targeting."""
+        try:
+            level = view.game.cur_level
+            if level is None:
+                return "Unknown"
+            x, y = point.x, point.y
+            if not level.is_point_in_bounds(Level.Point(x, y)):
+                return "Out of bounds"
+            tile = level.tiles[x][y]
+            # Unit: just name + HP
+            unit = tile.unit
+            if unit:
+                hp = getattr(unit, 'cur_hp', None)
+                max_hp = getattr(unit, 'max_hp', None)
+                parts = [_name(unit)]
+                if hp is not None and max_hp is not None:
+                    parts.append(f"{hp} of {max_hp} HP")
+                on_death = _get_on_death_text(unit)
+                if on_death:
+                    parts.append(on_death)
+                return ". ".join(parts)
+            # Prop
+            if tile.prop:
+                return _name(tile.prop)
+            # Cloud
+            if tile.cloud:
+                return _name(tile.cloud, "Cloud")
+            # Terrain
+            if tile.is_wall():
+                return "Wall"
+            if tile.is_chasm:
+                return "Chasm"
+            return "Floor"
+        except Exception as e:
+            log(f"[Target Tile] Describe error: {e}")
+            return "Unknown"
+
+    def _describe_portal_chunks(portal, view):
+        """Build a list of speech chunks for a rift portal's contents.
+        Each categorical segment (header, enemies, items, shrine) is a separate
+        chunk so callers can use speak_batched for [/] navigation."""
+        gen_params = getattr(portal, 'level_gen_params', None)
+        if gen_params is None:
+            return ["Rift"]
+
+        # Header: "Rift" or "Rift. Locked"
+        header_parts = ["Rift"]
+        # Check if contents are hidden (level not cleared yet)
+        game = getattr(view, 'game', None)
+        if game and (game.next_level or not getattr(game, 'has_granted_xp', True)):
+            header_parts.append("Contents unknown")
+            return [". ".join(header_parts)]
+
+        if getattr(portal, 'locked', False):
+            header_parts.append("Locked")
+
+        chunks = [". ".join(header_parts)]
+
+        # Enemies
+        enemies = []
+        if getattr(gen_params, 'primary_spawn', None):
+            try:
+                unit = gen_params.primary_spawn()
+                enemies.append(unit.name)
+            except Exception:
+                pass
+        if getattr(gen_params, 'secondary_spawn', None) and gen_params.secondary_spawn != gen_params.primary_spawn:
+            try:
+                unit = gen_params.secondary_spawn()
+                enemies.append(unit.name)
+            except Exception:
+                pass
+
+        drawn_bosses = set()
+        for b in getattr(gen_params, 'bosses', []):
+            if b.name not in drawn_bosses:
+                drawn_bosses.add(b.name)
+                if getattr(b, 'is_boss', False):
+                    enemies.append(f"Boss: {b.name}")
+                else:
+                    enemies.append(b.name)
+
+        if enemies:
+            chunks.append("Contents: " + ", ".join(enemies))
+
+        # Components (RW3 crafting ingredients — the rift's real reward; the game's
+        # Portal reads gen_params.components, not .items)
+        comp_names = [_name(c) for c in getattr(gen_params, 'components', [])]
+        if comp_names:
+            chunks.append("Components: " + ", ".join(comp_names))
+
+        # Items and Memory Orbs
+        item_names = [_name(item) for item in getattr(gen_params, 'items', [])]
+        num_xp = getattr(gen_params, 'num_xp', 0)
+        if num_xp:
+            item_names.append(f"{num_xp} Memory Orb{'s' if num_xp > 1 else ''}")
+        if item_names:
+            chunks.append("Items: " + ", ".join(item_names))
+
+        # Shrine
+        shrine = getattr(gen_params, 'shrine', None)
+        if shrine:
+            shrine_text = _name(shrine)
+            if hasattr(shrine, 'items') and shrine.items:
+                shrine_items = [_name(item) for item in shrine.items]
+                shrine_text += ": " + ", ".join(shrine_items)
+            chunks.append(shrine_text)
+
+        return chunks
+
+    def _describe_portal(portal, view):
+        """Build a spoken description of a rift portal's contents (flat string)."""
+        return ". ".join(_describe_portal_chunks(portal, view))
+
+    def _describe_unit(unit):
+        """Build a comprehensive spoken description of a unit, matching the visual examine panel."""
+        parts = []
+
+        # Name + Friendly status
+        name = _name(unit)
+        if getattr(unit, 'team', None) == Level.TEAM_PLAYER and not _is_player(unit):
+            parts.append(f"{name}, Friendly")
+        else:
+            parts.append(name)
+
+        # Turns to death (summoned creatures)
+        ttd = getattr(unit, 'turns_to_death', None)
+        if ttd:
+            parts.append(f"{ttd} turns left")
+
+        # Soulbound (lich soul jar mechanic — cannot die while jar exists)
+        if _has_soulbound(unit):
+            parts.append("Soulbound")
+
+        # HP
+        hp = getattr(unit, 'cur_hp', None)
+        max_hp = getattr(unit, 'max_hp', None)
+        if hp is not None and max_hp is not None:
+            parts.append(f"{hp} of {max_hp} HP")
+
+        # Shields
+        shields = getattr(unit, 'shields', 0)
+        if shields:
+            parts.append(f"{shields} shield{'s' if shields != 1 else ''}")
+
+        # Clarity (debuff immunity)
+        clarity = getattr(unit, 'clarity', 0)
+        if clarity:
+            parts.append(f"{clarity} clarity")
+
+        # Tags (Fire, Ice, Undead, Demon, etc.)
+        tags = getattr(unit, 'tags', [])
+        if tags:
+            tag_names = [getattr(t, 'name', str(t)) for t in tags]
+            parts.append(", ".join(tag_names))
+
+        # Spells/Abilities
+        spells = getattr(unit, 'spells', [])
+        if spells:
+            spell_descs = []
+            for spell in spells:
+                s_parts = [_name(spell)]
+
+                # Damage amount and type
+                if hasattr(spell, 'damage'):
+                    dmg = spell.get_stat('damage') if hasattr(spell, 'get_stat') else getattr(spell, 'damage', 0)
+                    dtype = getattr(spell, 'damage_type', None)
+                    if isinstance(dtype, Level.Tag):
+                        s_parts.append(f"{dmg} {dtype.name} damage")
+                    elif isinstance(dtype, list):
+                        random = getattr(spell, 'damage_type_random', False)
+                        connector = ' or ' if random else ' and '
+                        type_str = connector.join([t.name for t in dtype])
+                        s_parts.append(f"{dmg} {type_str} damage")
+                    else:
+                        s_parts.append(f"{dmg} damage")
+
+                # Range (only if > 1.5, matching game display)
+                rng = spell.get_stat('range') if hasattr(spell, 'get_stat') else getattr(spell, 'range', 0)
+                if rng > 1.5:
+                    s_parts.append(f"range {rng}")
+
+                # Radius
+                if hasattr(spell, 'radius'):
+                    rad = spell.get_stat('radius') if hasattr(spell, 'get_stat') else getattr(spell, 'radius', 0)
+                    if rad > 0:
+                        s_parts.append(f"{rad} radius")
+
+                # HP cost
+                if hasattr(spell, 'hp_cost'):
+                    hp_cost = spell.get_stat('hp_cost') if hasattr(spell, 'get_stat') else getattr(spell, 'hp_cost', 0)
+                    if hp_cost > 0:
+                        s_parts.append(f"{hp_cost} HP cost")
+
+                # Cooldown with remaining turns
+                cd = 0
+                try:
+                    if hasattr(spell, 'get_stat'):
+                        statholder = getattr(spell, 'statholder', None)
+                        if statholder and statholder != getattr(spell, 'owner', None):
+                            cd = getattr(spell, 'cool_down', 0)
+                        else:
+                            cd = spell.get_stat('cool_down')
+                    else:
+                        cd = getattr(spell, 'cool_down', 0)
+                except Exception:
+                    cd = getattr(spell, 'cool_down', 0)
+
+                if cd > 0:
+                    rem_cd = 0
+                    caster = getattr(spell, 'caster', None)
+                    if caster:
+                        rem_cd = caster.cool_downs.get(spell, 0)
+                    if rem_cd:
+                        s_parts.append(f"{cd} turn cooldown, {rem_cd} remaining")
+                    else:
+                        s_parts.append(f"{cd} turn cooldown")
+
+                # Description (strip markup tags)
+                desc = getattr(spell, 'description', None) or ""
+                if not desc and hasattr(spell, 'get_description'):
+                    desc = spell.get_description()
+                if desc:
+                    s_parts.append(_clean_desc(desc))
+
+                spell_descs.append(", ".join(s_parts))
+
+            parts.append("Abilities: " + "; ".join(spell_descs))
+
+        # Movement traits
+        traits = []
+        if getattr(unit, 'flying', False):
+            traits.append("Flying")
+        if getattr(unit, 'stationary', False):
+            traits.append("Immobile")
+        if getattr(unit, 'burrowing', False):
+            traits.append("Burrowing")
+        if traits:
+            parts.append(", ".join(traits))
+
+        # Damage resistances (sorted high to low, matching game display)
+        resists = getattr(unit, 'resists', {})
+        if resists:
+            resist_entries = [(t, resists[t]) for t in resists if resists[t] != 0]
+            resist_entries.sort(key=lambda x: -x[1])
+            if resist_entries:
+                resist_strs = [f"{val}% {getattr(t, 'name', str(t))}" for t, val in resist_entries]
+                parts.append("Resists: " + ", ".join(resist_strs))
+
+        # Passive buffs (permanent abilities with tooltips)
+        # Include BUFF_TYPE_PASSIVE (0) and permanent BLESS buffs (type 1, turns_left 0)
+        # — permanent BLESS includes on-death effects like DeathExplosion
+        buffs = getattr(unit, 'buffs', [])
+        if hasattr(unit, 'level'):
+            passives = [b for b in buffs
+                        if getattr(b, 'buff_type', -1) == 0
+                        or (getattr(b, 'buff_type', -1) == 1 and getattr(b, 'turns_left', -1) == 0)]
+        else:
+            passives = list(buffs)
+
+        passive_descs = []
+        for buff in passives:
+            tooltip = buff.get_tooltip() if hasattr(buff, 'get_tooltip') else None
+            if tooltip:
+                passive_descs.append(tooltip)
+        if passive_descs:
+            parts.append("Passives: " + "; ".join(passive_descs))
+
+        # Status effects (temporary bless/curse with stacks and duration)
+        # Exclude permanent BLESS buffs (type 1, turns_left 0) — those are in passives above
+        if hasattr(unit, 'level'):
+            status_effects = [b for b in buffs
+                              if (getattr(b, 'buff_type', -1) == 2)
+                              or (getattr(b, 'buff_type', -1) == 1 and getattr(b, 'turns_left', -1) != 0)]
+        else:
+            status_effects = []
+
+        if status_effects:
+            counts = {}
+            for effect in status_effects:
+                ename = _name(effect, "")
+                if not ename:
+                    continue
+                if ename not in counts:
+                    counts[ename] = [0, 0]
+                counts[ename][0] += 1
+                counts[ename][1] = max(counts[ename][1], getattr(effect, 'turns_left', 0))
+
+            status_strs = []
+            for bname, (stacks, duration) in counts.items():
+                s = bname
+                if stacks > 1:
+                    s += f" x{stacks}"
+                if duration:
+                    s += f" ({duration} turns)"
+                status_strs.append(s)
+
+            if status_strs:
+                parts.append("Status: " + ", ".join(status_strs))
+
+        return ". ".join(parts)
+
+    def _get_on_death_text(unit):
+        """Extract on-death effect descriptions from a unit's buffs.
+        Returns a short string like 'On death: 9 Fire damage to adjacent' or '' if none."""
+        descs = []
+        for buff in getattr(unit, 'buffs', []):
+            triggers = getattr(buff, 'owner_triggers', {})
+            if Level.EventOnDeath not in triggers:
+                continue
+            tooltip = buff.get_tooltip() if hasattr(buff, 'get_tooltip') else None
+            if not tooltip:
+                tooltip = getattr(buff, 'description', None)
+            if not tooltip:
+                continue
+            # Strip leading "On death, " if present — we add our own prefix
+            stripped = tooltip
+            if stripped.lower().startswith("on death, "):
+                stripped = stripped[len("on death, "):]
+            elif stripped.lower().startswith("on reaching 0 hp, "):
+                stripped = stripped[len("on reaching 0 hp, "):]
+            descs.append(stripped)
+        if not descs:
+            return ""
+        return "On death: " + "; ".join(descs)
+
+    def _describe_unit_tier1(unit):
+        """Streamlined unit description for Look mode and spell targeting (Tier 1).
+        Format: Name → HP → SH → non-zero resists → status effects → ability names → on-death.
+        Press D for full detail (Tier 2)."""
+        parts = []
+
+        # Name + Friendly status
+        name = _name(unit)
+        if getattr(unit, 'team', None) == Level.TEAM_PLAYER and not _is_player(unit):
+            parts.append(f"{name}, Friendly")
+        else:
+            parts.append(name)
+
+        # Turns to death (summoned creatures)
+        ttd = getattr(unit, 'turns_to_death', None)
+        if ttd:
+            parts.append(f"{ttd} turns left")
+
+        # Soulbound (lich soul jar mechanic)
+        if _has_soulbound(unit):
+            parts.append("Soulbound")
+
+        # HP
+        hp = getattr(unit, 'cur_hp', None)
+        max_hp = getattr(unit, 'max_hp', None)
+        if hp is not None and max_hp is not None:
+            parts.append(f"{hp} of {max_hp} HP")
+
+        # Shields
+        shields = getattr(unit, 'shields', 0)
+        if shields:
+            parts.append(f"{shields} SH")
+
+        # Non-zero resistances (compact, no "Resists:" prefix)
+        resists = getattr(unit, 'resists', {})
+        if resists:
+            resist_entries = [(t, resists[t]) for t in resists if resists[t] != 0]
+            resist_entries.sort(key=lambda x: -x[1])
+            if resist_entries:
+                resist_strs = [f"{val}% {getattr(t, 'name', str(t))}" for t, val in resist_entries]
+                parts.append(", ".join(resist_strs))
+
+        # Status effects (active bless/curse — compact with stacks and abbreviated duration)
+        buffs = getattr(unit, 'buffs', [])
+        if hasattr(unit, 'level'):
+            status_effects = [b for b in buffs if getattr(b, 'buff_type', -1) in [1, 2]]
+        else:
+            status_effects = []
+        if status_effects:
+            counts = {}
+            for effect in status_effects:
+                ename = _name(effect, "")
+                if not ename:
+                    continue
+                if ename not in counts:
+                    counts[ename] = [0, 0]
+                counts[ename][0] += 1
+                counts[ename][1] = max(counts[ename][1], getattr(effect, 'turns_left', 0))
+            status_strs = []
+            for bname, (stacks, duration) in counts.items():
+                s = bname
+                if stacks > 1:
+                    s += f" x{stacks}"
+                if duration:
+                    s += f" ({duration}t)"
+                status_strs.append(s)
+            if status_strs:
+                parts.append(", ".join(status_strs))
+
+        # Ability names only (no descriptions, damage, range, etc.)
+        spells = getattr(unit, 'spells', [])
+        if spells:
+            spell_names = [_name(s) for s in spells]
+            parts.append(", ".join(spell_names))
+
+        # On-death effects (critical tactical info)
+        on_death = _get_on_death_text(unit)
+        if on_death:
+            parts.append(on_death)
+
+        return ". ".join(parts)
+
+    def _check_aoe_warning(view):
+        """Check what units are in the current spell's AoE.
+        Returns (range_warning, aoe_info) tuple — both may be empty strings.
+        range_warning ("Out of range. ") goes first.
+        aoe_info ("Within AoE. You, 3 enemies.") goes before tile/target details.
+        Reports enemies, allies, and player in blast zone (#17).
+        Only warns for true AoE spells (radius > 0, beams, cones) — not single-target spells."""
+        try:
+            spell = getattr(view, 'cur_spell', None)
+            target = getattr(view, 'cur_spell_target', None)
+            if spell is None or target is None:
+                return ("", "")
+            # Skip walk/movement spells
+            if _name(spell).lower() == 'walk':
+                return ("", "")
+            # Determine if this spell is truly AoE.
+            # Check the spell's BASE radius (intrinsic to the spell), not get_stat,
+            # because global radius modifiers (e.g., Aether Wisp) stack onto every
+            # spell including non-AoE ones like Blink/Teleport. Those modifiers are
+            # cosmetic on translocation spells — the radius ring renders, but no
+            # damage/effect propagates to impacted tiles. Reporting "Within AoE
+            # 1 enemy" for Blink when the cursor sits on a unit is misleading.
+            base_radius = getattr(spell, 'radius', 0) or 0
+            is_aoe = base_radius > 0
+            if not is_aoe:
+                # Check for beam/cone/burst in description
+                desc = ""
+                if hasattr(spell, 'get_description'):
+                    try:
+                        desc = read_text(spell.get_description()).lower()
+                    except Exception:
+                        pass
+                elif hasattr(spell, 'description'):
+                    desc = read_text(spell.description).lower()
+                if any(kw in desc for kw in ('beam', 'line', 'cone', 'burst', 'all enemies', 'all units')):
+                    is_aoe = True
+            if not is_aoe:
+                return ("", "")
+            player = getattr(getattr(view, 'game', None), 'p1', None)
+            if player is None:
+                return ("", "")
+            if not hasattr(spell, 'get_impacted_tiles'):
+                return ("", "")
+            impacted = spell.get_impacted_tiles(target.x, target.y)
+            level = view.game.cur_level
+            player_hit = False
+            enemies = 0
+            allies = 0
+            for p in impacted:
+                if not level.is_point_in_bounds(Level.Point(p.x, p.y)):
+                    continue
+                if p.x == player.x and p.y == player.y:
+                    player_hit = True
+                    continue
+                unit = level.tiles[p.x][p.y].unit
+                if unit and getattr(unit, 'cur_hp', 0) > 0:
+                    if _is_player(unit):
+                        player_hit = True
+                    elif getattr(unit, 'team', None) == Level.TEAM_PLAYER:
+                        allies += 1
+                    else:
+                        enemies += 1
+            if not player_hit and enemies == 0 and allies == 0:
+                return ("", "")
+            details = []
+            if player_hit:
+                details.append("You")
+            if enemies > 0:
+                details.append(f"{enemies} {'enemy' if enemies == 1 else 'enemies'}")
+            if allies > 0:
+                details.append(f"{allies} {'ally' if allies == 1 else 'allies'}")
+            # Range gate: check if target tile is within casting range
+            range_warning = ""
+            caster = getattr(spell, 'caster', None)
+            if caster is not None:
+                dx = abs(caster.x - target.x)
+                dy = abs(caster.y - target.y)
+                melee = getattr(spell, 'melee', False)
+                try:
+                    r = spell.get_stat('range') + (getattr(caster, 'radius', 0) if melee else 0)
+                except Exception:
+                    r = getattr(spell, 'range', 0)
+                if melee:
+                    if max(dx, dy) > (1 + getattr(caster, 'radius', 0)):
+                        range_warning = "Out of range. "
+                else:
+                    if dx * dx + dy * dy > r * r:
+                        range_warning = "Out of range. "
+            aoe_info = f"Within AoE {', '.join(details)}."
+            return (range_warning, aoe_info)
+        except Exception as e:
+            log(f"[AoE Check] Error: {e}")
+            return ("", "")
+
+    def _describe_target(view):
+        """Get a spoken description of the current target."""
+        target = view._examine_target
+        if target is None:
+            return "No target"
+        # If it's a unit (has HP), give full examine panel description
+        hp = getattr(target, 'cur_hp', None)
+        max_hp = getattr(target, 'max_hp', None)
+        if hp is not None and max_hp is not None:
+            return _describe_unit_tier1(target)
+        # If it's a portal/rift, describe its contents
+        if hasattr(target, 'level_gen_params'):
+            return _describe_portal(target, view)
+        # If examine_target is a spell (no HP), there's no unit under cursor
+        if hasattr(target, 'cur_charges') or hasattr(target, 'max_charges'):
+            return "No target"
+        return _name(target)
+
+    def patched_cycle_tab(self):
+        """Announce target when TAB cycling, with position counter and AoE warning."""
+        _original_cycle_tab(self)
+        # Reset AoE and dedup state so subsequent cursor movement can re-trigger
+        _aoe_announced_state[0] = False
+        _last_examine_xy[0] = None
+        try:
+            text = _describe_target(self)
+            # Add position counter: "2 of 5"
+            tab_targets = getattr(self, 'tab_targets', [])
+            if tab_targets:
+                current = self.deploy_target or self.cur_spell_target
+                if current in tab_targets:
+                    idx = tab_targets.index(current) + 1
+                    text = f"{idx} of {len(tab_targets)}. {text}"
+            # AoE: range warning first, then AoE details, then target
+            range_warn, aoe_info = _check_aoe_warning(self)
+            text = f"{range_warn}{aoe_info} {text}".strip() if (range_warn or aoe_info) else text
+            async_tts.speak(text)
+            log(f"[Target] {text}")
+        except Exception as e:
+            log(f"[Target] Error: {e}")
+
+    _PyGameView.cycle_tab_targets = patched_cycle_tab
+    log("  Target cycling hook installed")
+
+    # ---- Manual Cursor Movement: AoE Self-Hit Warning + Look Mode ----
+    # Arrow keys / mouse move the reticle via try_examine_tile.
+    # We hook it to warn when the player enters their own spell's AoE,
+    # and to announce tile contents when in Look mode (V key).
+    # DEDUP: The game calls try_examine_tile twice per frame (once for
+    # keyboard, once for mouse at lines 2451 and 2471 of RiftWizard2.py).
+    # We skip duplicate calls to the same point to avoid double-speech.
+    # All announcements happen synchronously on the main thread — no timer
+    # threads reading game state, which caused hard crashes.
+
+    _original_try_examine_tile = _PyGameView.try_examine_tile
+    _aoe_announced_state = [False]  # what we last told the user about AoE
+    _last_examine_xy = [None]  # (x, y) of last announced tile — for dedup
+
+    def _announce_look_tile(view, point):
+        """Announce full tile contents in Look mode (V key). Main thread only.
+        Portal tiles use speak_batched so each segment is navigable via [/]."""
+        try:
+            level = view.game.cur_level
+            tile = level.tiles[point.x][point.y] if level else None
+            has_portal = tile and tile.prop and hasattr(tile.prop, 'level_gen_params')
+            if has_portal:
+                chunks = _describe_portal_chunks(tile.prop, view)
+                if cfg.show_coordinates:
+                    chunks[0] = f"{chunks[0]} ({point.x},{point.y})"
+                try:
+                    _telemetry.emit('look', cx=point.x, cy=point.y, portal=True,
+                                    msg=chunks[0] if chunks else "")
+                except Exception:
+                    pass
+                log(f"[Look] ({point.x},{point.y}) portal: {len(chunks)} chunks")
+                async_tts.speak_batched(chunks)
+            else:
+                text = _describe_tile(view, point)
+                if cfg.show_coordinates:
+                    text = f"{text} ({point.x},{point.y})"
+                try:
+                    _telemetry.emit('look', cx=point.x, cy=point.y, msg=text)
+                except Exception:
+                    pass
+                log(f"[Look] ({point.x},{point.y}) {text}")
+                async_tts.speak(text)
+        except Exception as e:
+            log(f"[Look] Error: {e}")
+
+    def _announce_target_tile(view, point):
+        """Announce brief tile + AoE warning during spell targeting. Main thread only."""
+        try:
+            spell = getattr(view, 'cur_spell', None)
+            if spell is None:
+                return
+            if _name(spell).lower() == 'walk':
+                return
+            tile_text = _describe_tile_brief(view, point)
+            if cfg.show_coordinates:
+                tile_text = f"{tile_text} ({point.x},{point.y})"
+            range_warn, aoe_info = _check_aoe_warning(view)
+            text = f"{range_warn}{aoe_info} {tile_text}".strip() if (range_warn or aoe_info) else tile_text
+            try:
+                _telemetry.emit('target_tile', cx=point.x, cy=point.y,
+                                spell=_name(spell), msg=text)
+            except Exception:
+                pass
+            log(f"[Target Tile] {text}")
+            async_tts.speak(text)
+        except Exception as e:
+            log(f"[Target Tile] Error: {e}")
+
+    _deploy_tile_suppress = [False]  # Suppress tile announce during cycle jump
+
+    def _announce_deploy_tile(view, point):
+        """Announce tile contents at deploy cursor position. Main thread only."""
+        if _deploy_tile_suppress[0]:
+            _deploy_tile_suppress[0] = False
+            return
+        try:
+            level = view.game.next_level
+            if level is None:
+                return
+            x, y = point.x, point.y
+            if not level.is_point_in_bounds(Level.Point(x, y)):
+                return
+
+            tile = level.tiles[x][y]
+            parts = []
+
+            unit = level.get_unit_at(x, y)
+            if unit:
+                parts.append(_describe_unit_tier1(unit))
+
+            if tile.prop:
+                parts.append(_name(tile.prop))
+
+            if tile.is_wall():
+                parts.append("wall")
+            elif tile.is_chasm:
+                parts.append("chasm")
+
+            if parts:
+                text = ", ".join(parts)
+            else:
+                valid = level.can_stand(x, y, view.game.p1)
+                text = "clear" if valid else "blocked"
+
+            if cfg.show_coordinates:
+                text = f"{text} ({x},{y})"
+
+            try:
+                _telemetry.emit('deploy_tile', cx=x, cy=y, msg=text)
+            except Exception:
+                pass
+            log(f"[Deploy] {text}")
+            async_tts.speak(text)
+        except Exception as e:
+            log(f"[Deploy] Tile error: {e}")
+
+    def patched_try_examine_tile(self, point):
+        """Hook cursor movement for Look mode, spell targeting, deploy tile feedback.
+        Uses point deduplication instead of timer threads — the game calls this
+        twice per frame with the same point (keyboard + mouse). We skip the duplicate."""
+        _original_try_examine_tile(self, point)
+        try:
+            xy = (point.x, point.y)
+            if xy == _last_examine_xy[0]:
+                return  # Same tile as last call — skip duplicate
+            _last_examine_xy[0] = xy
+
+            if getattr(self.game, 'deploying', False):
+                _announce_deploy_tile(self, point)
+            else:
+                spell = getattr(self, 'cur_spell', None)
+                if spell is not None and type(spell).__name__ == 'LookSpell':
+                    _announce_look_tile(self, point)
+                elif spell is not None:
+                    _announce_target_tile(self, point)
+        except Exception as e:
+            log(f"[Cursor] Error: {e}")
+
+    _PyGameView.try_examine_tile = patched_try_examine_tile
+    log("  Cursor AoE warning + Look mode + spell targeting tile hook installed")
+
+    # ---- Custom Hotkeys: Vitals (F), Enemy Scan (E), Charges (Q) ----
+    # These hook process_level_input to intercept KEYDOWN events for our keys.
+    # Our keys (E, F, Q) have no handler in normal (non-cheat) gameplay, so passing
+    # them through to the original method is safe — they'll be ignored.
+
+    import pygame
+
+    _original_process_level_input = _PyGameView.process_level_input
+
+    def _query_vitals(view):
+        """Speak player vitals: HP, shields, SP, active buffs/debuffs."""
+        try:
+            game = getattr(view, 'game', None)
+            if game is None:
+                return
+            player = game.p1
+            if player is None:
+                return
+
+            parts = []
+
+            # HP
+            hp = getattr(player, 'cur_hp', 0)
+            max_hp = getattr(player, 'max_hp', 0)
+            parts.append(f"HP {hp} of {max_hp}")
+
+            # Shields
+            shields = getattr(player, 'shields', 0)
+            if shields:
+                parts.append(f"{shields} shield{'s' if shields != 1 else ''}")
+
+            # SP
+            sp = getattr(player, 'xp', 0)
+            parts.append(f"{sp} SP")
+
+            # Active buffs and debuffs (skip passive buff_type=0)
+            buffs = getattr(player, 'buffs', [])
+            status_parts = []
+            for buff in buffs:
+                btype = getattr(buff, 'buff_type', 0)
+                if btype not in (1, 2):
+                    continue
+                bname = _name(buff, "")
+                if not bname:
+                    continue
+                turns = getattr(buff, 'turns_left', 0)
+                prefix = "Cursed" if btype == 2 else ""
+                entry = f"{prefix} {bname}".strip() if prefix else bname
+                if turns and turns > 0:
+                    entry += f" {turns} turns"
+                status_parts.append(entry)
+            if status_parts:
+                parts.append("Status: " + ", ".join(status_parts))
+
+            text = ". ".join(parts)
+            log(f"[Vitals] {text}")
+            async_tts.speak(text)
+        except Exception as e:
+            log(f"[Vitals] Error: {e}")
+
+    def _query_ally_overview(view):
+        """Shift+F: Buffered list of all allies with HP."""
+        try:
+            game = getattr(view, 'game', None)
+            if game is None:
+                return
+            player = game.p1
+            if player is None:
+                return
+            level = game.cur_level
+            if level is None:
+                return
+            allies = []
+            for unit in level.units:
+                if getattr(unit, 'team', None) == Level.TEAM_PLAYER and not _is_player(unit):
+                    allies.append(unit)
+            if not allies:
+                async_tts.speak("No allies")
+                log("[Allies] No allies")
+                return
+            ref = Level.Point(player.x, player.y)
+            allies.sort(key=lambda u: Level.distance(ref, Level.Point(u.x, u.y), diag=True))
+            chunks = [f"{len(allies)} all{'y' if len(allies) == 1 else 'ies'}"]
+            for unit in allies:
+                hp = getattr(unit, 'cur_hp', 0)
+                max_hp = getattr(unit, 'max_hp', 0)
+                chunks.append(f"{_name(unit)}, {hp} of {max_hp}")
+            log(f"[Allies] Overview: {'. '.join(chunks)}")
+            async_tts.speak_batched(chunks)
+        except Exception as e:
+            log(f"[Allies] Overview error: {e}")
+
+    def _get_scan_reference(view):
+        """Return (ref_point, scan_level, qualifier) for the current game state.
+        qualifier is None (normal/deploy), "destination" (teleport),
+        "target" (non-teleport spell), or "cursor" (look mode).
+        """
+        game = view.game
+        # Deploy: cursor-relative on next level, no qualifier (context is obvious)
+        if getattr(game, 'deploying', False) and game.next_level and getattr(view, 'deploy_target', None):
+            return (view.deploy_target, game.next_level, None)
+        spell = getattr(view, 'cur_spell', None)
+        target = getattr(view, 'cur_spell_target', None)
+        if spell and target:
+            # Look mode — LookSpell pseudo-spell
+            if type(spell).__name__ == 'LookSpell':
+                return (target, game.cur_level, "cursor")
+            # Translocation spell — arriving at target
+            if Level.Tags.Translocation in getattr(spell, 'tags', []):
+                return (target, game.cur_level, "destination")
+            # Other spell targeting
+            return (target, game.cur_level, "target")
+        # Normal play
+        player = game.p1
+        return (Level.Point(player.x, player.y), game.cur_level, None)
+
+    def _query_enemies(view, scan_level=None, ref_point=None, qualifier=None, reverse=False):
+        """Cycle through enemies one per keypress, nearest-first."""
+        try:
+            game = getattr(view, 'game', None)
+            if game is None:
+                return
+            player = game.p1
+            if player is None:
+                return
+            level = scan_level or game.cur_level
+            if level is None:
+                return
+            if ref_point is None:
+                ref_point = Level.Point(player.x, player.y)
+            _qp = f"From {qualifier}. " if qualifier else ""
+
+            rebuilt = _enemy_scanner.needs_rebuild(ref_point)
+            if rebuilt:
+                enemies = []
+                for unit in level.units:
+                    if Level.are_hostile(player, unit):
+                        dist = Level.distance(ref_point, Level.Point(unit.x, unit.y), diag=True)
+                        enemies.append((unit, dist))
+                enemies.sort(key=lambda x: x[1])
+                _enemy_scanner.set_list(enemies, ref_point)
+
+            if not _enemy_scanner.items:
+                text = f"{_qp}No enemies"
+                log(f"[Enemies] {_log_ctx()} {_qp}No enemies")
+                async_tts.speak(text)
+                return
+
+            result = _enemy_scanner.advance(reverse, rebuilt)
+            if result is None:
+                return
+            idx, total, show_count = result
+            count_str = f"{total} enem{'y' if total == 1 else 'ies'}"
+
+            unit, dist = _enemy_scanner.items[idx]
+            _last_scanned_target[0] = unit
+            try:
+                visible = level.can_see(ref_point.x, ref_point.y, unit.x, unit.y)
+            except Exception:
+                visible = True
+            los_tag = "" if visible else ", blocked"
+            dx = unit.x - ref_point.x
+            dy = unit.y - ref_point.y
+            offset = _direction_offset(dx, dy)
+            via_tag = ""
+            if los_tag:
+                via_tag = _via_hint(level, ref_point,
+                                    Level.Point(unit.x, unit.y), player)
+            soul_tag = ", soulbound" if _has_soulbound(unit) else ""
+            mark_tag = ", marked" if _is_marked(unit) else ""
+            coord_tag = f" ({unit.x},{unit.y})" if cfg.show_coordinates else ""
+            entry = f"{_name(unit)}, {offset}{los_tag}{via_tag}{soul_tag}{mark_tag}{coord_tag}"
+            position = f"{idx + 1} of {total}"
+            log_entry = f"{_name(unit)} @({unit.x},{unit.y}), {offset}{los_tag}{via_tag}{soul_tag}{mark_tag}"
+
+            if show_count:
+                text = f"{_qp}{count_str}. {entry}. {position}"
+                log(f"[Enemies] {_log_ctx()} {_qp}{count_str}. {log_entry}. {position}")
+            else:
+                text = f"{_qp}{entry}. {position}"
+                log(f"[Enemies] {_log_ctx()} {_qp}{log_entry}. {position}")
+            try:
+                _telemetry.emit('enemy_scan_detail',
+                                name=_name(unit),
+                                ex=unit.x, ey=unit.y,
+                                hp=getattr(unit, 'cur_hp', None),
+                                hp_max=getattr(unit, 'max_hp', None),
+                                visible=bool(visible),
+                                idx=idx + 1, total=total)
+            except Exception:
+                pass
+
+            async_tts.speak(text)
+        except Exception as e:
+            log(f"[Enemies] Error: {e}")
+
+    def _query_allies(view, scan_level=None, ref_point=None, qualifier=None, reverse=False):
+        """Cycle through allied units one per keypress, nearest-first."""
+        try:
+            game = getattr(view, 'game', None)
+            if game is None:
+                return
+            player = game.p1
+            if player is None:
+                return
+            level = scan_level or game.cur_level
+            if level is None:
+                return
+            if ref_point is None:
+                ref_point = Level.Point(player.x, player.y)
+            _qp = f"From {qualifier}. " if qualifier else ""
+
+            rebuilt = _ally_scanner.needs_rebuild(ref_point)
+            if rebuilt:
+                allies = []
+                for unit in level.units:
+                    if getattr(unit, 'team', None) == Level.TEAM_PLAYER and not _is_player(unit):
+                        dist = Level.distance(ref_point, Level.Point(unit.x, unit.y), diag=True)
+                        allies.append((unit, dist))
+                allies.sort(key=lambda x: x[1])
+                _ally_scanner.set_list(allies, ref_point)
+
+            if not _ally_scanner.items:
+                text = f"{_qp}No allies"
+                log(f"[Allies] {_log_ctx()} {_qp}No allies")
+                async_tts.speak(text)
+                return
+
+            result = _ally_scanner.advance(reverse, rebuilt)
+            if result is None:
+                return
+            idx, total, show_count = result
+            count_str = f"{total} all{'y' if total == 1 else 'ies'}"
+
+            unit, dist = _ally_scanner.items[idx]
+            _last_scanned_target[0] = unit
+            try:
+                visible = level.can_see(ref_point.x, ref_point.y, unit.x, unit.y)
+            except Exception:
+                visible = True
+            los_tag = "" if visible else ", blocked"
+            dx = unit.x - ref_point.x
+            dy = unit.y - ref_point.y
+            offset = _direction_offset(dx, dy)
+            via_tag = ""
+            if los_tag:
+                via_tag = _via_hint(level, ref_point,
+                                    Level.Point(unit.x, unit.y), player)
+            mark_tag = ", marked" if _is_marked(unit) else ""
+            coord_tag = f" ({unit.x},{unit.y})" if cfg.show_coordinates else ""
+            entry = f"{_name(unit)}, {offset}{los_tag}{via_tag}{mark_tag}{coord_tag}"
+            position = f"{idx + 1} of {total}"
+            log_entry = f"{_name(unit)} @({unit.x},{unit.y}), {offset}{los_tag}{via_tag}{mark_tag}"
+
+            if show_count:
+                text = f"{_qp}{count_str}. {entry}. {position}"
+                log(f"[Allies] {_log_ctx()} {_qp}{count_str}. {log_entry}. {position}")
+            else:
+                text = f"{_qp}{entry}. {position}"
+                log(f"[Allies] {_log_ctx()} {_qp}{log_entry}. {position}")
+
+            async_tts.speak(text)
+        except Exception as e:
+            log(f"[Allies] Error: {e}")
+
+    def _query_spawners(view, scan_level=None, ref_point=None, qualifier=None, reverse=False):
+        """Cycle through spawners one per keypress, nearest-first."""
+        try:
+            game = getattr(view, 'game', None)
+            if game is None:
+                return
+            player = game.p1
+            if player is None:
+                return
+            level = scan_level or game.cur_level
+            if level is None:
+                return
+            if ref_point is None:
+                ref_point = Level.Point(player.x, player.y)
+            _qp = f"From {qualifier}. " if qualifier else ""
+
+            rebuilt = _spawner_scanner.needs_rebuild(ref_point)
+            if rebuilt:
+                spawners = []
+                for unit in level.units:
+                    if Level.are_hostile(player, unit) and getattr(unit, 'is_lair', False):
+                        dist = Level.distance(ref_point, Level.Point(unit.x, unit.y), diag=True)
+                        spawners.append((unit, dist))
+                spawners.sort(key=lambda x: x[1])
+                _spawner_scanner.set_list(spawners, ref_point)
+
+            if not _spawner_scanner.items:
+                text = f"{_qp}No spawners"
+                log(f"[Spawners] {_log_ctx()} {_qp}No spawners")
+                async_tts.speak(text)
+                return
+
+            result = _spawner_scanner.advance(reverse, rebuilt)
+            if result is None:
+                return
+            idx, total, show_count = result
+            count_str = f"{total} spawner{'s' if total != 1 else ''}"
+
+            unit, dist = _spawner_scanner.items[idx]
+            _last_scanned_target[0] = unit
+            try:
+                visible = level.can_see(ref_point.x, ref_point.y, unit.x, unit.y)
+            except Exception:
+                visible = True
+            los_tag = "" if visible else ", blocked"
+            dx = unit.x - ref_point.x
+            dy = unit.y - ref_point.y
+            offset = _direction_offset(dx, dy)
+            via_tag = ""
+            if los_tag:
+                via_tag = _via_hint(level, ref_point,
+                                    Level.Point(unit.x, unit.y), player)
+            mark_tag = ", marked" if _is_marked(unit) else ""
+            coord_tag = f" ({unit.x},{unit.y})" if cfg.show_coordinates else ""
+            entry = f"{_name(unit)}, {offset}{los_tag}{via_tag}{mark_tag}{coord_tag}"
+            position = f"{idx + 1} of {total}"
+            log_entry = f"{_name(unit)} @({unit.x},{unit.y}), {offset}{los_tag}{via_tag}{mark_tag}"
+
+            if show_count:
+                text = f"{_qp}{count_str}. {entry}. {position}"
+                log(f"[Spawners] {_log_ctx()} {_qp}{count_str}. {log_entry}. {position}")
+            else:
+                text = f"{_qp}{entry}. {position}"
+                log(f"[Spawners] {_log_ctx()} {_qp}{log_entry}. {position}")
+
+            async_tts.speak(text)
+        except Exception as e:
+            log(f"[Spawners] Error: {e}")
+
+    # Pickup priority tiers (lower = announced first):
+    #   0 = Unique finds: equipment, scrolls, items — rare, build-defining
+    #   1 = Resources: Memory Orbs (SP), Gold, Spell Recharge — economy/sustain
+    #   2 = Stat boosts: Ruby Hearts (permanent HP), Heal Dots — nice but less urgent
+    _PICKUP_UNIQUE = 0
+    _PICKUP_RESOURCE = 1
+    _PICKUP_STAT = 2
+
+    def _classify_prop(prop):
+        """Classify a tile prop into a category and readable name.
+        Returns (category, priority, name) where category is 'landmark' or 'pickup', or None to skip.
+        Priority only matters for pickups (lower = announced first)."""
+        cls = type(prop).__name__
+        # Landmarks: strategic navigation points
+        if hasattr(prop, 'level_gen_params'):
+            if getattr(prop, 'locked', False):
+                return None
+            return ('landmark', 0, "Rift")
+        if cls == 'PlaceOfPower':
+            tag = getattr(prop, 'tag', None)
+            tag_name = getattr(tag, 'name', '') if tag else ''
+            return ('landmark', 0, f"{tag_name} Circle" if tag_name else _name(prop))
+        # Shops/Shrines (check specific subclasses via class name — avoids import issues)
+        if cls in ('ShrineShop', 'ShiftingShop'):
+            return ('landmark', 0, _name(prop))
+        if cls == 'MiniShop':
+            return ('landmark', 0, "Miniaturization Shrine")
+        if cls == 'DuplicatorShop':
+            return ('landmark', 0, "Duplication Shrine")
+        if cls == 'AmnesiaShop':
+            return ('landmark', 0, "Amnesia Shrine")
+        if cls == 'Shop' or hasattr(prop, 'shop_type') or hasattr(prop, 'items'):
+            # Generic shop fallback. Includes amorphously-named Shop instances
+            # whose .name doesn't contain "shop"/"shrine" — chests, boxes,
+            # scrolls (e.g. Scroll of Spells), Arcane Library, etc.
+            return ('landmark', 0, _name(prop, "Shop"))
+        # Pickups — Tier 0: unique finds (build-defining, don't miss these)
+        if cls == 'SpellScroll':
+            spell = getattr(prop, 'spell', None)
+            sname = _name(spell, "unknown") if spell else "unknown"
+            return ('pickup', _PICKUP_UNIQUE, f"Scroll: {sname}")
+        if cls == 'EquipPickup':
+            item = getattr(prop, 'item', None)
+            return ('pickup', _PICKUP_UNIQUE, f"Equipment: {_name(item)}" if item else "Equipment")
+        if cls == 'ItemPickup':
+            item = getattr(prop, 'item', None)
+            return ('pickup', _PICKUP_UNIQUE, f"Item: {_name(item)}" if item else "Item")
+        # Pickups — Tier 1: resources (economy, sustain, recharges)
+        if cls == 'ManaDot':
+            return ('pickup', _PICKUP_RESOURCE, "Memory Orb")
+        if cls == 'GoldDot':
+            gold = getattr(prop, 'gold', 1)
+            return ('pickup', _PICKUP_RESOURCE, f"Gold, {gold}")
+        if cls == 'ChargeDot':
+            return ('pickup', _PICKUP_RESOURCE, "Spell Recharge")
+        # Pickups — Tier 2: stat boosts and heals
+        if cls == 'HeartDot':
+            bonus = getattr(prop, 'bonus', 10)
+            return ('pickup', _PICKUP_STAT, f"Ruby Heart, plus {bonus} max HP")
+        if cls == 'HealDot':
+            return ('pickup', _PICKUP_STAT, "Heal")
+        return None
+
+    def _landmark_cat_label(name):
+        """Short category label for count header breakdown."""
+        if name.startswith("Scroll:"): return "scroll"
+        if name.startswith("Equipment:"): return "equipment"
+        if name.startswith("Item:"): return "item"
+        if name == "Memory Orb": return "orb"
+        if name.startswith("Gold"): return "gold"
+        if name == "Spell Recharge": return "recharge"
+        if name.startswith("Ruby Heart"): return "heart"
+        if name == "Heal": return "heal"
+        if name == "Rift": return "rift"
+        if "Circle" in name: return "circle"
+        if "Shrine" in name: return "shrine"
+        return "shop"
+
+    def _query_landmarks(view, scan_level=None, ref_point=None, qualifier=None, reverse=False):
+        """Cycle through landmarks/pickups one per keypress, nearest-first."""
+        try:
+            game = getattr(view, 'game', None)
+            if game is None:
+                return
+            player = game.p1
+            if player is None:
+                return
+            level = scan_level or game.cur_level
+            if level is None:
+                return
+            if ref_point is None:
+                ref_point = Level.Point(player.x, player.y)
+            _qp = f"From {qualifier}. " if qualifier else ""
+
+            rebuilt = _landmark_scanner.needs_rebuild(ref_point)
+            if rebuilt:
+                items = []  # (name, dist, offset, tx, ty)
+                for tile in level.iter_tiles():
+                    prop = tile.prop
+                    if prop is None:
+                        continue
+                    result = _classify_prop(prop)
+                    if result is None:
+                        continue
+                    category, priority, name = result
+                    dx = tile.x - ref_point.x
+                    dy = tile.y - ref_point.y
+                    dist = max(abs(dx), abs(dy))  # Chebyshev
+                    offset = _direction_offset(dx, dy)
+                    items.append((name, dist, offset, tile.x, tile.y))
+                items.sort(key=lambda x: x[1])
+                _landmark_scanner.set_list(items, ref_point)
+
+            if not _landmark_scanner.items:
+                text = f"{_qp}Nothing found"
+                log(f"[Landmarks] {_log_ctx()} {_qp}Nothing found")
+                async_tts.speak(text)
+                return
+
+            # Category-aware count header
+            from collections import Counter
+            cat_counts = Counter(_landmark_cat_label(n) for n, *_ in _landmark_scanner.items)
+            cat_parts = [f"{c} {lab}{'s' if c > 1 else ''}" for lab, c in cat_counts.items()]
+            total = len(_landmark_scanner.items)
+            count_str = f"{total} item{'s' if total != 1 else ''}. {', '.join(cat_parts)}"
+
+            result = _landmark_scanner.advance(reverse, rebuilt)
+            if result is None:
+                return
+            idx, total, show_count = result
+
+            name, dist, offset, tx, ty = _landmark_scanner.items[idx]
+            _last_scanned_target[0] = (name, tx, ty)
+            # Build entry description
+            try:
+                visible = level.can_see(ref_point.x, ref_point.y, tx, ty)
+            except Exception:
+                visible = True
+            los_tag = "" if visible else ", blocked"
+            via_tag = ""
+            if los_tag:
+                via_tag = _via_hint(level, ref_point,
+                                    Level.Point(tx, ty), player)
+            mark_tag = ", marked" if _is_marked((name, tx, ty)) else ""
+            coord_tag = f" ({tx},{ty})" if cfg.show_coordinates else ""
+            entry = f"{name}, {offset}{los_tag}{via_tag}{mark_tag}{coord_tag}"
+            position = f"{idx + 1} of {total}"
+            log_entry = f"{name} @({tx},{ty}), {offset}{los_tag}{via_tag}{mark_tag}"
+
+            if show_count:
+                text = f"{_qp}{count_str}. {entry}. {position}"
+                log(f"[Landmarks] {_log_ctx()} {_qp}{count_str}. {log_entry}. {position}")
+            else:
+                text = f"{_qp}{entry}. {position}"
+                log(f"[Landmarks] {_log_ctx()} {_qp}{log_entry}. {position}")
+
+            async_tts.speak(text)
+        except Exception as e:
+            log(f"[Landmarks] Error: {e}")
+
+    def _query_hazards(view, scan_level=None, ref_point=None, qualifier=None):
+        """Speak environmental hazards: spider webs (individual) + cloud counts (aggregate).
+        Bound to X key. Separate from Q-key landmarks to avoid overloading that scan."""
+        try:
+            game = getattr(view, 'game', None)
+            if game is None:
+                return
+            player = game.p1
+            level = scan_level or game.cur_level
+            if level is None:
+                return
+            if ref_point is None:
+                if player is None:
+                    return
+                ref_point = Level.Point(player.x, player.y)
+            _qp = f"From {qualifier}. " if qualifier else ""
+
+            webs = []       # (dist, offset, x, y) — individual entries
+            cloud_counts = {}  # cloud_name → count — aggregate
+
+            for cloud in getattr(level, 'clouds', []):
+                ctype = type(cloud).__name__
+                if ctype == 'SpiderWeb':
+                    dx = cloud.x - ref_point.x
+                    dy = cloud.y - ref_point.y
+                    dist = max(abs(dx), abs(dy))
+                    offset = _direction_offset(dx, dy)
+                    webs.append((dist, offset, cloud.x, cloud.y))
+                else:
+                    cname = getattr(cloud, 'name', ctype)
+                    cloud_counts[cname] = cloud_counts.get(cname, 0) + 1
+
+            if not webs and not cloud_counts:
+                text = f"{_qp}No hazards"
+                log(f"[Hazards] {_log_ctx()} {_qp}No hazards")
+                async_tts.speak(text)
+                return
+
+            parts = []
+            log_parts = []
+
+            # Summary counts
+            counts = []
+            if webs:
+                counts.append(f"{len(webs)} Spider Web{'s' if len(webs) != 1 else ''}")
+            total_clouds = sum(cloud_counts.values())
+            if total_clouds:
+                counts.append(f"{total_clouds} cloud{'s' if total_clouds != 1 else ''}")
+            parts.append(", ".join(counts))
+            log_parts.append(", ".join(counts))
+
+            # Spider webs — individual with distance/direction (nearest first)
+            webs.sort(key=lambda x: x[0])
+            for dist, offset, wx, wy in webs:
+                parts.append(f"Spider Web, {offset}")
+                log_parts.append(f"Spider Web @({wx},{wy}), {offset}")
+
+            # Dynamic clouds — aggregate counts by type
+            for cname, count in sorted(cloud_counts.items()):
+                parts.append(f"{count} {cname}{'s' if count != 1 else ''}")
+                log_parts.append(f"{count} {cname}")
+
+            text = f"{_qp}{'. '.join(parts)}"
+            log(f"[Hazards] {_log_ctx()} {_qp}{'. '.join(log_parts)}")
+            async_tts.speak(text)
+        except Exception as e:
+            log(f"[Hazards] Error: {e}")
+
+    def _query_charges(view):
+        """Speak current charges of the selected spell (on-demand)."""
+        try:
+            spell = getattr(view, 'cur_spell', None)
+            if spell is None:
+                # No spell selected — check all player spells for a quick summary
+                game = getattr(view, 'game', None)
+                if game is None or game.p1 is None:
+                    return
+                spells = getattr(game.p1, 'spells', [])
+                if not spells:
+                    async_tts.speak("No spells")
+                    log(f"[Charges] {_log_ctx()} No spells")
+                    return
+                parts = []
+                for s in spells:
+                    cur, stat_max = _get_charge_info(s)
+                    if cur is not None:
+                        parts.append(f"{_name(s)}: {cur} of {stat_max}")
+                if parts:
+                    text = ". ".join(parts)
+                else:
+                    text = "No charge spells"
+                log(f"[Charges] {_log_ctx()} {text}")
+                async_tts.speak(text)
+                return
+
+            cur, stat_max = _get_charge_info(spell)
+            if cur is None:
+                text = f"{_name(spell)}: no charges"
+                log(f"[Charges] {_log_ctx()} {text}")
+                async_tts.speak(text)
+                return
+
+            text = f"{_name(spell)}: {cur} of {stat_max} charges"
+            log(f"[Charges] {_log_ctx()} {text}")
+            async_tts.speak(text)
+        except Exception as e:
+            log(f"[Charges] Error: {e}")
+
+    def _describe_cloud_detail(cloud):
+        """Full detail description of a cloud object."""
+        parts = [_name(cloud, "Cloud")]
+        desc = ''
+        try:
+            desc = cloud.get_description() or ''
+        except Exception:
+            desc = getattr(cloud, 'description', '') or ''
+        if desc:
+            parts.append(_clean_desc(desc))
+        else:
+            dur = getattr(cloud, 'duration', 0)
+            if dur and dur > 0:
+                parts.append(f"{dur} turns remaining")
+        return ". ".join(parts)
+
+    def _describe_prop_detail(prop, view):
+        """Full detail description of a prop (shop, shrine, pickup, etc.)."""
+        # Portal — use existing portal describer
+        if hasattr(prop, 'level_gen_params'):
+            return _describe_portal(prop, view)
+        # Shop/Shrine — name, description, item list
+        if hasattr(prop, 'items') and hasattr(prop, 'name'):
+            parts = [_name(prop)]
+            desc = getattr(prop, 'description', '') or ''
+            if desc:
+                parts.append(_clean_desc(desc))
+            items = getattr(prop, 'items', [])
+            if items:
+                item_names = [_name(item) for item in items]
+                parts.append("Items: " + ", ".join(item_names))
+            return ". ".join(parts)
+        # EquipPickup — describe the equipment inside
+        if hasattr(prop, 'item') and isinstance(prop, Level.Prop):
+            item = prop.item
+            parts = [_name(item)]
+            if isinstance(item, Level.Equipment):
+                slot = _SLOT_NAMES.get(getattr(item, 'slot', -1), "Equipment")
+                parts[0] = f"{slot}: {_name(item)}"
+                bonus_lines = _format_bonus_lines(item)
+                if bonus_lines:
+                    parts.append(". ".join(bonus_lines))
+            desc = ''
+            try:
+                desc = item.get_description() or ''
+            except Exception:
+                desc = getattr(item, 'description', '') or ''
+            if desc:
+                parts.append(_clean_desc(desc))
+            return ". ".join(parts)
+        # SpellScroll — describe the spell
+        if hasattr(prop, 'spell'):
+            return _describe_spell(prop.spell)
+        # Generic prop (ManaDot, HealDot, HeartDot, ChargeDot, GoldDot, PlaceOfPower, etc.)
+        parts = [_name(prop)]
+        desc = ''
+        try:
+            desc = prop.get_description() or ''
+        except Exception:
+            desc = getattr(prop, 'description', '') or ''
+        if desc:
+            parts.append(_clean_desc(desc))
+        return ". ".join(parts)
+
+    def _query_detail(view):
+        """D key: Speak full detail of whatever is under the cursor.
+        Works in all modes: normal, spell targeting, look mode, deploy."""
+        try:
+            game = view.game
+            if game is None:
+                return
+
+            # Determine cursor point and level
+            deploying = getattr(game, 'deploying', False)
+            point = None
+            level = None
+
+            if deploying:
+                point = getattr(view, 'deploy_target', None)
+                level = game.next_level
+            else:
+                # Spell targeting or look mode
+                point = getattr(view, 'cur_spell_target', None)
+                level = game.cur_level
+
+            # Fallback: player position
+            if point is None and game.p1:
+                point = Level.Point(game.p1.x, game.p1.y)
+                level = game.cur_level
+
+            if point is None or level is None:
+                async_tts.speak("Nothing to examine")
+                log("[Detail] No cursor position")
+                return
+
+            if not level.is_point_in_bounds(point):
+                async_tts.speak("Out of bounds")
+                return
+
+            tile = level.tiles[point.x][point.y]
+            parts = []
+
+            # Unit on tile (including player)
+            if tile.unit:
+                if _is_player(tile.unit):
+                    parts.append(_describe_unit(tile.unit))
+                else:
+                    parts.append(_describe_unit(tile.unit))
+
+            # Prop on tile — portals get chunked speech for [/] navigation
+            has_portal = tile.prop and hasattr(tile.prop, 'level_gen_params')
+            if tile.prop:
+                if has_portal:
+                    parts.extend(_describe_portal_chunks(tile.prop, view))
+                else:
+                    parts.append(_describe_prop_detail(tile.prop, view))
+
+            # Cloud on tile
+            if tile.cloud:
+                parts.append(_describe_cloud_detail(tile.cloud))
+
+            # Terrain (only if nothing else, or wall/chasm always)
+            if tile.is_wall():
+                parts.append("Wall")
+            elif tile.is_chasm:
+                parts.append("Chasm")
+            elif not parts:
+                parts.append("Floor")
+
+            if has_portal and len(parts) > 1:
+                log(f"[Detail] ({point.x},{point.y}) portal: {len(parts)} chunks")
+                async_tts.speak_batched(parts)
+            else:
+                text = ". ".join(parts)
+                log(f"[Detail] ({point.x},{point.y}) {text}")
+                async_tts.speak(text)
+        except Exception as e:
+            log(f"[Detail] Error: {e}")
+
+    def _query_path_to_cursor(view):
+        """P key: announce the compressed path from player to whatever is under the
+        look-mode cursor. Discriminates between walkable destinations (terrain, props,
+        allies — path arrives on tile) and non-ally units (path resolves to cheapest
+        walkable adjacent neighbor, since the unit tile is impassable).
+
+        Skipped during deploy (cross-level pathing makes no sense). When the level has
+        no active cursor (e.g. normal play mode), tells the player so."""
+        try:
+            game = view.game
+            if game is None or game.p1 is None:
+                return
+            if getattr(game, 'deploying', False):
+                async_tts.speak("Pathfinding not available during deploy")
+                log("[Path] P pressed during deploy")
+                return
+            point = getattr(view, 'cur_spell_target', None)
+            if point is None:
+                async_tts.speak("No cursor target")
+                log("[Path] P pressed with no cursor")
+                return
+            level = game.cur_level
+            if level is None or not level.is_point_in_bounds(point):
+                async_tts.speak("Out of bounds")
+                log("[Path] Cursor out of bounds")
+                return
+
+            player = game.p1
+            target_xy = (point.x, point.y)
+            player_xy = (player.x, player.y)
+
+            if target_xy == player_xy:
+                async_tts.speak("Already at target.")
+                log(f"[Path] Player on target ({point.x},{point.y})")
+                return
+
+            dx = point.x - player.x
+            dy = point.y - player.y
+            if abs(dx) <= 1 and abs(dy) <= 1:
+                direction = _cardinal_direction(dx, dy)
+                text = f"Target adjacent, {direction}."
+                async_tts.speak(text)
+                log(f"[Path] {text}")
+                return
+
+            tile = level.tiles[point.x][point.y]
+            target_unit = tile.unit
+            unit_target = (target_unit is not None
+                           and not _is_player(target_unit)
+                           and Level.are_hostile(player, target_unit))
+
+            start = Level.Point(player.x, player.y)
+
+            if unit_target:
+                # Resolve to cheapest walkable adjacent neighbor of the unit tile.
+                neighbors = _walkable_neighbors(level, target_xy)
+                best_path = None
+                best_len = None
+                for nx, ny in neighbors:
+                    p = level.find_path(start, Level.Point(nx, ny), player, pythonize=True)
+                    if p and (best_len is None or len(p) < best_len):
+                        best_len = len(p)
+                        best_path = p
+                if best_path is None:
+                    async_tts.speak("No route from here, may open up.")
+                    log(f"[Path] No path to any neighbor of unit at ({point.x},{point.y})")
+                    return
+                full_seq = [start] + list(best_path)
+                text = _compress_path(full_seq, target_kind='unit')
+                async_tts.speak(text)
+                log(f"[Path] Unit at ({point.x},{point.y}): {text}")
+                return
+
+            # Walkable destination (terrain, prop, ally).
+            if not tile.can_walk:
+                async_tts.speak("Target on impassable tile.")
+                log(f"[Path] Impassable target at ({point.x},{point.y})")
+                return
+
+            path = level.find_path(start, Level.Point(point.x, point.y), player, pythonize=True)
+            if not path:
+                token = _classify_unreachable(level, target_xy)
+                msg = ("Target on impassable tile." if token == 'impassable'
+                       else "No route from here, may open up.")
+                async_tts.speak(msg)
+                log(f"[Path] Unreachable ({token}) at ({point.x},{point.y})")
+                return
+
+            full_seq = [start] + list(path)
+            text = _compress_path(full_seq, target_kind='terrain')
+            async_tts.speak(text)
+            log(f"[Path] To ({point.x},{point.y}): {text}")
+        except Exception as e:
+            log(f"[Path] Error: {e}")
+
+    def _query_path_to_marked_target(view):
+        """Shift+P: re-announce the full compressed path to the current marked
+        target. Useful for refreshing path orientation during a long approach
+        without having to unmark + remark. Speaks 'No mark' when nothing is
+        marked, with no other side effects."""
+        try:
+            target = _marked_target[0]
+            if target is None:
+                async_tts.speak("No mark")
+                log("[Path] Shift+P with no mark")
+                return
+            msg = _announce_mark_full_path(view, target)
+            if msg is None:
+                async_tts.speak("Path unavailable")
+                log("[Path] Shift+P unavailable for marked target")
+                return
+            name = _mark_target_name(target)
+            line = f"{name}. {msg}"
+            async_tts.speak(line)
+            log(f"[Path] Shift+P: {line}")
+        except Exception as e:
+            log(f"[Path] Shift+P error: {e}")
+
+    def _unit_threatens_point(unit, x, y):
+        """Check if a unit can threaten a given point via any spell or custom-threatening buff."""
+        for spell in getattr(unit, 'spells', []):
+            try:
+                if spell.can_threaten(x, y):
+                    return True
+            except Exception:
+                pass
+        for buff in getattr(unit, 'buffs', []):
+            try:
+                if buff.can_threaten.__func__ != Level.Buff.can_threaten:
+                    if buff.can_threaten(x, y):
+                        return True
+            except Exception:
+                pass
+        return False
+
+    def _query_los_summary(view, scan_level=None, ref_point=None, qualifier=None):
+        """L key: LoS composition gestalt — count by type with directional clustering."""
+        try:
+            game = getattr(view, 'game', None)
+            if game is None:
+                return
+            player = game.p1
+            if player is None:
+                return
+            level = scan_level or game.cur_level
+            if level is None:
+                return
+            if ref_point is None:
+                ref_point = Level.Point(player.x, player.y)
+
+            _qp = f"From {qualifier}. " if qualifier else ""
+
+            # Gather visible hostile units grouped by (name, direction)
+            visible = []
+            for unit in level.units:
+                if not Level.are_hostile(player, unit):
+                    continue
+                try:
+                    can_see = level.can_see(ref_point.x, ref_point.y, unit.x, unit.y)
+                except Exception:
+                    can_see = False
+                if can_see:
+                    dx = unit.x - ref_point.x
+                    dy = unit.y - ref_point.y
+                    direction = _cardinal_direction(dx, dy)
+                    visible.append((_name(unit), direction, unit))
+
+            if not visible:
+                text = f"{_qp}Nothing in sight"
+                log(f"[LoS] {_log_ctx()} {text}")
+                async_tts.speak(text)
+                return
+
+            total = len(visible)
+            has_marked_visible = any(_is_marked(u) for _, _, u in visible)
+            # Group by (name, direction), preserving order of first appearance
+            groups = {}
+            group_order = []
+            for name, direction, _u in visible:
+                key = (name, direction)
+                if key not in groups:
+                    groups[key] = 0
+                    group_order.append(key)
+                groups[key] += 1
+
+            # Format: "2 Goblins south, Fire Imp east"
+            parts = []
+            for name, direction in group_order:
+                count = groups[(name, direction)]
+                dir_suffix = f" {direction}" if direction else ", here"
+                if count > 1:
+                    parts.append(f"{count} {name}s{dir_suffix}")
+                else:
+                    parts.append(f"{name}{dir_suffix}")
+
+            count_str = f"{total} in sight"
+            mark_note = ". Marked target visible" if has_marked_visible else ""
+            text = f"{_qp}{count_str}. {', '.join(parts)}{mark_note}"
+            log(f"[LoS] {_log_ctx()} {text}")
+            async_tts.speak(text)
+        except Exception as e:
+            log(f"[LoS] Error: {e}")
+
+    def _query_threat(view, scan_level=None, ref_point=None, qualifier=None):
+        """T key: Threat vocalization.
+        No unit highlighted: 'Safe' or 'Threatened, N. Enemy, direction.'
+        Enemy unit highlighted: 'Threatens you' or 'Can't reach you.'"""
+        try:
+            game = view.game
+            if game is None:
+                return
+            player = game.p1
+            if player is None:
+                return
+            level = scan_level or game.cur_level
+            if level is None:
+                return
+            if ref_point is not None:
+                ref_x, ref_y = ref_point.x, ref_point.y
+            else:
+                ref_x, ref_y = player.x, player.y
+            _qp = f"From {qualifier}. " if qualifier else ""
+
+            # Per-unit threat check: if examining a hostile unit
+            examine = getattr(view, 'examine_target', None)
+            if examine is None:
+                examine = getattr(view, '_examine_target', None)
+            if (examine and hasattr(examine, 'cur_hp')
+                    and not _is_player(examine)
+                    and Level.are_hostile(player, examine)):
+                if _unit_threatens_point(examine, ref_x, ref_y):
+                    text = f"{_qp}Threatens you"
+                else:
+                    text = f"{_qp}Can't reach you"
+                log(f"[Threat] {_name(examine)}: {text}")
+                async_tts.speak(text)
+                return
+
+            # Global threat summary
+            threatening = []
+            for unit in level.units:
+                if not Level.are_hostile(player, unit):
+                    continue
+                if _unit_threatens_point(unit, ref_x, ref_y):
+                    dist = max(abs(unit.x - ref_x), abs(unit.y - ref_y))
+                    threatening.append((unit, dist))
+
+            if not threatening:
+                text = f"{_qp}Safe"
+                log(f"[Threat] {_qp}Safe")
+                async_tts.speak(text)
+                return
+
+            threatening.sort(key=lambda x: x[1])
+            parts = [f"Threatened, {len(threatening)}"]
+            for unit, dist in threatening[:8]:
+                dx = unit.x - ref_x
+                dy = unit.y - ref_y
+                offset = _direction_offset(dx, dy)
+                parts.append(f"{_name(unit)}, {offset}")
+            if len(threatening) > 8:
+                parts.append(f"and {len(threatening) - 8} more")
+
+            text = f"{_qp}{'. '.join(parts)}"
+            log(f"[Threat] {_qp}{'. '.join(parts)}")
+            async_tts.speak(text)
+        except Exception as e:
+            log(f"[Threat] Error: {e}")
+
+    def _query_space(view, scan_level=None, ref_point=None, qualifier=None):
+        """B key: Spatial raycast query.
+        Prepends terrain classification, then walkable distances in 8 directions.
+        Only reports directions with distance >= 1 (skips blocked).
+        Clockwise order: N, NE, E, SE, S, SW, W, NW."""
+        try:
+            game = view.game
+            if game is None:
+                return
+            level = scan_level or game.cur_level
+            if level is None:
+                return
+            if ref_point is not None:
+                px, py = ref_point.x, ref_point.y
+            else:
+                px, py = game.p1.x, game.p1.y
+            _qp = f"From {qualifier}. " if qualifier else ""
+
+            # Terrain classification prefix (S53)
+            tc, axis = _classify_terrain(level, px, py)
+            prefix = _TERRAIN_LABELS[tc](axis) if tc in _TERRAIN_LABELS else "open"
+
+            # Corridor branch scan — report perpendicular openings along the axis
+            branch_text = ""
+            if tc == 'corridor' and axis:
+                branches = _scan_corridor_branches(level, px, py, axis)
+                if branches:
+                    branch_text = ". ".join(branches)
+
+            parts = []
+            for name, dx, dy in _RAYCAST_DIRS:
+                dist = _ray_length(level, px, py, dx, dy)
+                if dist >= 1:
+                    parts.append(f"{name} {dist}")
+
+            rays = ", ".join(parts) if parts else "enclosed"
+            if branch_text:
+                text = f"{_qp}{prefix}. {branch_text}. {rays}"
+            else:
+                text = f"{_qp}{prefix}. {rays}"
+            log(f"[Space] ({px},{py}) {text}")
+            async_tts.speak(text)
+        except Exception as e:
+            log(f"[Space] Error: {e}")
+
+    # ---- Deploy Phase: State Tracking, Overview & Category Cycling ----
+    # Session 49 — Bug #38 deploy spatial navigation.
+    # Key 1: quadrant overview. Keys 2-5: cycle orbs, pickups, spawners, shops.
+
+    _was_deploying = [False]
+
+    # ---- CycleScanner: unified one-per-press cycling infrastructure ----
+
+    class CycleScanner:
+        """State machine for one-per-press nearest-first cycling scans."""
+        def __init__(self, name):
+            self.name = name
+            self._list = []
+            self._idx = 0
+            self._ref = None
+            self._count_spoken = False
+
+        def reset(self):
+            self._list = []
+            self._idx = 0
+            self._ref = None
+
+        def turn_reset(self):
+            self.reset()
+            self._count_spoken = False
+
+        def needs_rebuild(self, ref_point):
+            return (not self._list
+                    or self._ref is None
+                    or self._ref.x != ref_point.x
+                    or self._ref.y != ref_point.y)
+
+        def set_list(self, items, ref_point):
+            self._list = items
+            self._idx = 0
+            self._ref = ref_point
+
+        def advance(self, reverse=False, rebuilt=False):
+            """Advance cycle index. Returns (idx, total, show_count) or None if empty."""
+            total = len(self._list)
+            if total == 0:
+                return None
+            if reverse and not rebuilt:
+                self._idx = (self._idx - 2) % total
+            idx = self._idx % total
+            show_count = (idx == 0 and rebuilt and not self._count_spoken)
+            if show_count:
+                self._count_spoken = True
+            self._idx = idx + 1
+            return idx, total, show_count
+
+        @property
+        def items(self):
+            return self._list
+
+    _enemy_scanner = CycleScanner("enemies")
+    _spawner_scanner = CycleScanner("spawners")
+    _landmark_scanner = CycleScanner("landmarks")
+    _ally_scanner = CycleScanner("allies")
+
+    # ---- Mark/tracking system (Alt+scan key to mark, passive updates) ----
+    # Supports both units and landmarks. One mark at a time.
+    # Unit mark: stores unit object directly.
+    # Landmark mark: stores (name, x, y) tuple.
+
+    _last_scanned_target = [None]   # Most recently announced target (unit or (name, x, y))
+    _marked_target = [None]         # Player-marked target for persistent tracking
+    _mark_last_visible = [None]     # LoS state: True/False/None (unset). Only speak "blocked" on transition.
+    _mark_tier_immediate = [True]   # Config: True = immediate tier, False = turn-end
+
+    def _mark_target_name(target):
+        """Get display name for a mark target (unit or landmark tuple)."""
+        if isinstance(target, tuple):
+            return target[0]
+        return _name(target)
+
+    def _mark_scanned_target(view):
+        """Mark the last scanned target. Toggle off if already marked.
+        On a fresh mark, also announces the full compressed path when
+        cfg.pathfind_marked is on."""
+        target = _last_scanned_target[0]
+        if target is None:
+            async_tts.speak("Nothing to mark")
+            log("[Mark] Nothing to mark")
+            return
+        current = _marked_target[0]
+        if current is not None and _same_mark(current, target):
+            _marked_target[0] = None
+            _mark_last_visible[0] = None
+            async_tts.speak(f"Unmarked {_mark_target_name(target)}")
+            log(f"[Mark] Unmarked {_mark_target_name(target)}")
+            return
+        _marked_target[0] = target
+        _mark_last_visible[0] = None  # Force first update to report LoS status
+        name = _mark_target_name(target)
+        path_msg = _announce_mark_full_path(view, target) if cfg.pathfind_marked else None
+        if path_msg:
+            async_tts.speak(f"Marked {name}. {path_msg}")
+            log(f"[Mark] Marked {name}. {path_msg}")
+        else:
+            async_tts.speak(f"Marked {name}")
+            log(f"[Mark] Marked {name}")
+
+    def _same_mark(a, b):
+        """Check if two mark targets refer to the same thing."""
+        a_is_landmark = isinstance(a, tuple)
+        b_is_landmark = isinstance(b, tuple)
+        if a_is_landmark != b_is_landmark:
+            return False
+        if a_is_landmark:
+            return a[1] == b[1] and a[2] == b[2]  # same position
+        return a is b  # unit identity
+
+    def _is_marked(target):
+        """Check if a target (unit or landmark tuple) is the current mark."""
+        current = _marked_target[0]
+        if current is None:
+            return False
+        return _same_mark(current, target)
+
+    def _get_mark_update(level, ref_point):
+        """Get status string for the marked target, or None if no mark/gone.
+        Reports 'blocked' only on first update or when LoS status changes."""
+        target = _marked_target[0]
+        if target is None:
+            return None
+        if isinstance(target, tuple):
+            # Landmark mark — check if prop still exists at position
+            name, tx, ty = target
+            try:
+                tile = level.tiles[tx][ty]
+            except (IndexError, TypeError):
+                tile = None
+            if tile is None or tile.prop is None:
+                _marked_target[0] = None
+                _mark_last_visible[0] = None
+                return f"Marked landmark gone: {name}"
+            dx = tx - ref_point.x
+            dy = ty - ref_point.y
+            direction = _direction_offset(dx, dy)
+            # LoS check for landmarks
+            try:
+                visible = level.can_see(ref_point.x, ref_point.y, tx, ty)
+            except Exception:
+                visible = True
+            los_tag = _mark_los_tag(visible)
+            return f"Marked: {name}, {direction}{los_tag}"
+        else:
+            # Unit mark
+            if target not in level.units:
+                _marked_target[0] = None
+                _mark_last_visible[0] = None
+                return "Marked unit dead"
+            dx = target.x - ref_point.x
+            dy = target.y - ref_point.y
+            direction = _direction_offset(dx, dy)
+            # LoS check for units
+            try:
+                visible = level.can_see(ref_point.x, ref_point.y, target.x, target.y)
+            except Exception:
+                visible = True
+            los_tag = _mark_los_tag(visible)
+            return f"Marked: {_name(target)}, {direction}{los_tag}"
+
+    def _mark_los_tag(visible):
+        """Return LoS tag for mark update. Only speaks on first check or transition."""
+        prev = _mark_last_visible[0]
+        _mark_last_visible[0] = visible
+        if prev is None:
+            # First update after marking — always report
+            return "" if visible else ", blocked"
+        if visible != prev:
+            # Transition — report the change
+            return ", in sight" if visible else ", blocked"
+        # No change — stay quiet
+        return ""
+
+    # ---- Mark pathfinding ----
+    # On Alt+key: announce full compressed path. Each turn while marked, prepend
+    # next step to the regular mark readout. Gated on cfg.pathfind_marked.
+
+    def _mark_target_xy(target):
+        """(x, y) tuple from a mark target, or None if unresolvable."""
+        if isinstance(target, tuple):
+            return (target[1], target[2])
+        if hasattr(target, 'x') and hasattr(target, 'y'):
+            return (target.x, target.y)
+        return None
+
+    def _is_hostile_unit_target(player, target):
+        """True iff target is a non-player non-ally unit. Hostile units block their tile,
+        so paths to them must resolve to a walkable adjacent neighbor."""
+        if isinstance(target, tuple) or target is None:
+            return False
+        if _is_player(target):
+            return False
+        try:
+            return Level.are_hostile(player, target)
+        except Exception:
+            return False
+
+    def _compute_mark_path(level, player, target):
+        """Path from player to marked target. Returns (full_seq, target_kind):
+        - full_seq: list of Point objects starting at the player's tile and ending at
+          the destination (or its walkable adjacent for hostile units), or None if no
+          path exists. A single-point list means the player is already on the target.
+        - target_kind: 'unit' if hostile unit (tail = 'arrive adjacent'), else 'terrain'."""
+        target_xy = _mark_target_xy(target)
+        if target_xy is None:
+            return None, 'terrain'
+        is_hostile = _is_hostile_unit_target(player, target)
+        target_kind = 'unit' if is_hostile else 'terrain'
+        start = Level.Point(player.x, player.y)
+        if (player.x, player.y) == target_xy:
+            return [start], target_kind
+        if is_hostile:
+            neighbors = _walkable_neighbors(level, target_xy)
+            best_path = None
+            best_len = None
+            for nx, ny in neighbors:
+                p = level.find_path(start, Level.Point(nx, ny), player, pythonize=True)
+                if p and (best_len is None or len(p) < best_len):
+                    best_len = len(p)
+                    best_path = p
+            if best_path is None:
+                return None, target_kind
+            return [start] + list(best_path), target_kind
+        tx, ty = target_xy
+        if not (0 <= tx < level.width and 0 <= ty < level.height):
+            return None, target_kind
+        if not level.tiles[tx][ty].can_walk:
+            return None, target_kind
+        p = level.find_path(start, Level.Point(tx, ty), player, pythonize=True)
+        if not p:
+            return None, target_kind
+        return [start] + list(p), target_kind
+
+    def _mark_hp_clause(target):
+        """', {cur_hp} HP' for units (incl. spawners), empty for landmarks/props."""
+        if isinstance(target, tuple):
+            return ""
+        cur_hp = getattr(target, 'cur_hp', None)
+        if cur_hp is None:
+            return ""
+        return f", {cur_hp} HP"
+
+    def _announce_mark_full_path(view, target):
+        """Speak full compressed path to a freshly-marked target. Returns the spoken
+        string for logging, or None if pathing wasn't applicable. Call site composes
+        this with the 'Marked X' confirmation."""
+        try:
+            game = view.game
+            if game is None or game.p1 is None:
+                return None
+            level = game.cur_level
+            if level is None:
+                return None
+            player = game.p1
+            target_xy = _mark_target_xy(target)
+            if target_xy is None:
+                return None
+            if (player.x, player.y) == target_xy:
+                return "Already at target."
+            dx = target_xy[0] - player.x
+            dy = target_xy[1] - player.y
+            if abs(dx) <= 1 and abs(dy) <= 1:
+                direction = _cardinal_direction(dx, dy)
+                return f"Target adjacent, {direction}."
+            full_seq, target_kind = _compute_mark_path(level, player, target)
+            if full_seq is None:
+                # Distinguish impassable destination from no-route condition.
+                if isinstance(target, tuple):
+                    token = _classify_unreachable(level, target_xy)
+                else:
+                    # Hostile unit with no walkable neighbors, or no path to any.
+                    token = 'no_route'
+                return ("Target on impassable tile." if token == 'impassable'
+                        else "No route from here, may open up.")
+            if len(full_seq) < 2:
+                return "Already at target."
+            return _compress_path(full_seq, target_kind=target_kind)
+        except Exception as e:
+            log(f"[Mark Path] Error: {e}")
+            return None
+
+    def _speak_mark_turn_update(view):
+        """Per-turn mark readout. With pathfind_marked on, the line is
+        '{direction} to {name}, {hp} HP.' — single next-step direction (diagonal-aware,
+        matching the game's pathfinding), target name, target HP. HP omitted for
+        non-living targets (landmarks/props). LoS transitions append ', in sight' or
+        ', blocked' before the period. Adjacent / on-tile cases stay silent: the
+        on-mark announcement and the melee threat tracker already cover those.
+        Terminal messages (death/disappearance) pass through unchanged. With
+        pathfind_marked off, original full-readout behavior."""
+        target_before = _marked_target[0]
+        if target_before is None or view.game is None or view.game.p1 is None:
+            return
+        try:
+            level = view.game.cur_level
+            player = view.game.p1
+            ref = Level.Point(player.x, player.y)
+            los_before = _mark_last_visible[0]
+            update = _get_mark_update(level, ref)
+            if not update:
+                return
+            target_cleared = (_marked_target[0] is None)
+            los_changed = (_mark_last_visible[0] != los_before)
+
+            if not cfg.pathfind_marked:
+                async_tts.speak(update)
+                log(f"[Mark] Turn update: {update}")
+                return
+
+            if target_cleared:
+                async_tts.speak(update)
+                log(f"[Mark] Turn update: {update}")
+                return
+
+            # Adjacent / on-tile: silent. Melee threat tracker handles hostile
+            # adjacency; on-mark announcement covered terrain/landmark adjacency.
+            target_xy = _mark_target_xy(target_before)
+            if target_xy is None:
+                return
+            if (player.x, player.y) == target_xy:
+                return
+            dx, dy = target_xy[0] - player.x, target_xy[1] - player.y
+            if abs(dx) <= 1 and abs(dy) <= 1:
+                return
+
+            full_seq, _kind = _compute_mark_path(level, player, target_before)
+            if full_seq is None:
+                async_tts.speak("No path.")
+                log("[Mark] Turn update: No path.")
+                return
+            if len(full_seq) < 2:
+                return
+            p0, p1 = full_seq[0], full_seq[1]
+            direction = _cardinal_direction(p1.x - p0.x, p1.y - p0.y)
+            if not direction:
+                return
+
+            name = _mark_target_name(target_before)
+            body = f"{direction.capitalize()} to {name}{_mark_hp_clause(target_before)}"
+            if los_changed:
+                tag = ", in sight" if _mark_last_visible[0] else ", blocked"
+                body = f"{body}{tag}"
+            line = f"{body}."
+            async_tts.speak(line)
+            log(f"[Mark] Turn update: {line}")
+        except Exception as e:
+            log(f"[Mark] Turn update error: {e}")
+
+    # Cycling state for deploy category navigation (keys 2-5)
+    _deploy_cycle_cat = [None]     # Current category (2-5) or None
+    _deploy_cycle_items = [[]]     # Sorted entity list for current category
+    _deploy_cycle_idx = [0]        # Current index in cycle
+
+    _DEPLOY_CAT_NAMES = {2: "memory orbs", 3: "pickups", 4: "spawners", 5: "shops"}
+
+    def _deploy_reset_cycle():
+        """Clear cycling state. Called on deploy entry/exit and arrow movement."""
+        _deploy_cycle_cat[0] = None
+        _deploy_cycle_items[0] = []
+        _deploy_cycle_idx[0] = 0
+
+    def _announce_deploy_overview(view):
+        """Quadrant overview: enemy counts + notable entities per quadrant.
+        Auto-fires on deploy entry, re-voiced via key 1."""
+        try:
+            level = view.game.next_level
+            if level is None:
+                return
+            # level_num increments after try_deploy, so during deploy it's still
+            # the current level. Add 1 to show the level being deployed to.
+            level_num = getattr(view.game, 'level_num', 0) + 1
+
+            # Build per-quadrant aggregates
+            quads = {}  # quadrant_name -> {enemies, spawners, props: [str]}
+            for q in ("northeast", "southeast", "southwest", "northwest"):
+                quads[q] = {"enemies": 0, "spawners": 0, "props": []}
+
+            # Count enemies and spawners by quadrant
+            player = view.game.p1
+            for unit in level.units:
+                if not Level.are_hostile(player, unit):
+                    continue
+                q = _quadrant_label(unit.x, unit.y)
+                if getattr(unit, 'is_lair', False):
+                    quads[q]["spawners"] += 1
+                else:
+                    quads[q]["enemies"] += 1
+
+            # Count notable props by quadrant
+            orb_counts = {}   # quadrant -> count
+            pickup_counts = {}  # quadrant -> count
+            for tile in level.iter_tiles():
+                prop = tile.prop
+                if prop is None:
+                    continue
+                cls = type(prop).__name__
+                q = _quadrant_label(tile.x, tile.y)
+                if cls == 'ManaDot':
+                    orb_counts[q] = orb_counts.get(q, 0) + 1
+                elif cls in ('HealDot', 'ChargeDot', 'HeartDot', 'GoldDot',
+                             'SpellScroll', 'EquipPickup', 'ItemPickup'):
+                    pickup_counts[q] = pickup_counts.get(q, 0) + 1
+                elif cls == 'PlaceOfPower':
+                    tag = getattr(prop, 'tag', None)
+                    tag_name = getattr(tag, 'name', '') if tag else ''
+                    quads[q]["props"].append(f"{tag_name} Circle" if tag_name else "Circle")
+                elif cls in ('Shop', 'ShrineShop', 'ShiftingShop', 'MiniShop',
+                             'DuplicatorShop', 'AmnesiaShop') or hasattr(prop, 'shop_type'):
+                    quads[q]["props"].append("shop")
+                elif cls == 'NPC':
+                    quads[q]["props"].append(_name(prop))
+
+            # Add orb and pickup counts to props
+            for q, count in orb_counts.items():
+                quads[q]["props"].append(f"{count} orb{'s' if count > 1 else ''}")
+            for q, count in pickup_counts.items():
+                quads[q]["props"].append(f"{count} pickup{'s' if count > 1 else ''}")
+
+            # Build speech chunks — one per category for [/] buffer navigation
+            chunks = [f"Deploy, level {level_num}"]
+            for q in ("northeast", "southeast", "southwest", "northwest"):
+                data = quads[q]
+                if data["enemies"] == 0 and data["spawners"] == 0 and not data["props"]:
+                    continue  # Skip empty quadrants
+                q_parts = []
+                if data["enemies"]:
+                    q_parts.append(f"{data['enemies']} enem{'y' if data['enemies'] == 1 else 'ies'}")
+                if data["spawners"]:
+                    q_parts.append(f"{data['spawners']} spawner{'s' if data['spawners'] > 1 else ''}")
+                q_parts.extend(data["props"])
+                chunks.append(f"{q.capitalize()}: {', '.join(q_parts)}")
+
+            log(f"[Deploy] Overview: {'. '.join(chunks)}")
+            async_tts.speak_batched(chunks)
+        except Exception as e:
+            log(f"[Deploy] Overview error: {e}")
+
+    def _deploy_cycle(view, category):
+        """Cycle through deploy category entities. Jumps cursor to each entity.
+        category: 2=orbs, 3=pickups, 4=spawners, 5=shops."""
+        try:
+            level = view.game.next_level
+            if level is None:
+                return
+            ref = view.deploy_target
+            if ref is None:
+                return
+
+            # Rebuild list if switching categories
+            if _deploy_cycle_cat[0] != category:
+                _deploy_cycle_cat[0] = category
+                _deploy_cycle_idx[0] = 0
+
+                if category == 2:
+                    raw = _deploy_get_orbs(level)
+                    items = [(p, x, y, "Memory Orb") for p, x, y in raw]
+                elif category == 3:
+                    items = _deploy_get_pickups(level)  # Already (prop, x, y, name)
+                elif category == 4:
+                    raw = _deploy_get_spawners(level)
+                    items = [(u, x, y, _name(u)) for u, x, y in raw]
+                elif category == 5:
+                    items = _deploy_get_interactions(level)  # Already (prop, x, y, name)
+                else:
+                    return
+
+                # Sort by Chebyshev distance from current cursor
+                items.sort(key=lambda e: max(abs(e[1] - ref.x), abs(e[2] - ref.y)))
+                _deploy_cycle_items[0] = items
+
+            items = _deploy_cycle_items[0]
+            if not items:
+                cat_name = _DEPLOY_CAT_NAMES.get(category, "items")
+                text = f"No {cat_name}"
+                log(f"[Deploy] Cycle: {text}")
+                async_tts.speak(text)
+                return
+
+            # Get current item
+            idx = _deploy_cycle_idx[0] % len(items)
+            _entity, x, y, ename = items[idx]
+
+            # For spawners, number duplicates based on current sort order
+            if category == 4:
+                display_names = _number_deploy_dupes(items)
+                ename = display_names[idx][3]
+
+            # Jump cursor (suppress tile announce — we speak our own format)
+            view.deploy_target = Level.Point(x, y)
+            _last_examine_xy[0] = None  # Reset dedup
+            _deploy_tile_suppress[0] = True
+            view.try_examine_tile(view.deploy_target)
+
+            # Announce: "Jumped to: Name, quadrant"
+            quadrant = _quadrant_label(x, y)
+            coord_tag = f" ({x},{y})" if cfg.show_coordinates else ""
+            text = f"Jumped to: {ename}, {quadrant}{coord_tag}"
+            log(f"[Deploy] Cycle {_DEPLOY_CAT_NAMES.get(category, '?')} [{idx+1}/{len(items)}]: {text}")
+            async_tts.speak(text)
+
+            # Advance index (wraps via modulo on next read)
+            _deploy_cycle_idx[0] = idx + 1
+
+        except Exception as e:
+            log(f"[Deploy] Cycle error: {e}")
+
+    # ---- Gameover / Victory voicing ----
+    _gameover_spoken = [False]
+
+    def _announce_gameover(view):
+        """Speak game outcome with speak_batched for [/] navigation.
+        Victory: narrative sentences as individual chunks.
+        Defeat: stats file split by section (turns, spell casts, damage, etc.)."""
+        import re as _re_go
+        game = view.game
+        if not game:
+            return
+        is_victory = game.victory
+        label = "Victory" if is_victory else "Defeat"
+        chunks = []
+
+        if is_victory:
+            chunks.append("Victory! The Dark Wizard is slain.")
+            chunks.append("His beasts have been broken and made tame.")
+            chunks.append("The beauty of Avalon will be built again.")
+            chunks.append("Your soul is permitted to sleep and dream once more.")
+            chunks.append(f"{game.total_turns} total turns.")
+        else:
+            chunks.append(f"Defeat. Realm {game.level_num}.")
+
+            # Read stats file, split by section for buffer navigation
+            try:
+                stats_path = os.path.join('saves', str(game.run_number),
+                                          'stats.level_%d.txt' % game.level_num)
+                if os.path.exists(stats_path):
+                    with open(stats_path, 'r') as f:
+                        content = f.read().strip()
+                    if content:
+                        sections = _re_go.split(r'\n\s*\n', content)
+                        # Skip first section (Realm/Outcome — already announced)
+                        for section in sections[1:]:
+                            collapsed = ' '.join(l.strip() for l in section.split('\n') if l.strip())
+                            if collapsed:
+                                chunks.append(collapsed)
+            except Exception:
+                chunks.append(f"{game.total_turns} total turns.")
+
+        chunks.append("Press any key to continue.")
+        async_tts.speak_batched(chunks)
+        log(f"[Gameover] {label}: Realm {game.level_num}, {game.total_turns} turns ({len(chunks)} chunks)")
+        try:
+            _p = game.p1
+            _spells = []
+            if _p:
+                for _sp in getattr(_p, 'spells', []):
+                    _sn = getattr(_sp, 'name', None)
+                    if _sn:
+                        _spells.append(_sn)
+            _items = []
+            if _p:
+                for _it in getattr(_p, 'items', []):
+                    _in = getattr(_it, 'name', None)
+                    if _in:
+                        _items.append(_in)
+            _telemetry.emit('gameover',
+                            outcome='victory' if is_victory else 'defeat',
+                            realm=getattr(game, 'level_num', None),
+                            total_turns=getattr(game, 'total_turns', None),
+                            hp=getattr(_p, 'cur_hp', None) if _p else None,
+                            hp_max=getattr(_p, 'max_hp', None) if _p else None,
+                            sp=getattr(_p, 'xp', None) if _p else None,
+                            spells=_spells,
+                            items=_items,
+                            char_sheet=f"saves/{getattr(game,'run_number',None)}/char_sheet.png")
+        except Exception:
+            pass
+
+    def _speak_mod_keybinds():
+        """Speak all mod keybind reference. Triggered by Shift+/ (?) in level state."""
+        lines = [
+            "Mod keybind reference.",
+            "F, vitals. HP, shields, status effects. Shift F, ally overview.",
+            "J, enemy scan. Press repeatedly to cycle, nearest first. Shift reverses.",
+            "L, line of sight. Enemy count by type and direction.",
+            "N, spawner scan. Press repeatedly to cycle nests. Shift reverses.",
+            "Y, ally scan. Press repeatedly to cycle allies. Shift reverses.",
+            "Alt plus J, N, Q, or Y, mark or unmark the last scanned target.",
+            "Q, landmark scan. Cycle nearest first. Shift Q reverses.",
+            "G, charges. Selected spell or all spells.",
+            "T, threat. Adjacent enemy count and positions.",
+            "D, detail. Full description of whatever is under the cursor.",
+            "B, spatial scan. Walkable distances in 8 directions.",
+            "X, hazard scan. Clouds and webs.",
+            "P, path to cursor in look mode. Shift P, full path to marked target.",
+            "V, look mode. Cursor to examine tiles.",
+            "C, character sheet.",
+            "Left control, cancel speech.",
+            "Z, repeat last speech.",
+            "Left bracket, speech history back. Right bracket, forward.",
+            "Slash, game help. Shift slash, this reference.",
+            "In deploy: 1 overview, 2 orbs, 3 pickups, 4 spawners, 5 shops.",
+            "In shop: Tab for filter guide.",
+        ]
+        text = " ".join(lines)
+        async_tts.speak(text)
+        log("[Help] Mod keybind reference spoken")
+
+    def patched_process_level_input(self):
+        """Intercept mod hotkeys before normal input processing.
+        Also detects deploy phase start/abort transitions, turn boundaries,
+        gameover/victory voicing, and drives the speech batching flush cycle."""
+
+        # First-load keybind migration: patch the live instance's key_binds
+        # so saved user options (which may contain old PgUp/PgDn) get overridden.
+        # Only on first load — subsequent loads respect user customization.
+        if not _keybinds_instance_patched[0]:
+            _keybinds_instance_patched[0] = True
+            if not _keybinds_migrated and _KB_PREV is not None and _KB_NEXT is not None:
+                self.key_binds[_KB_PREV] = [_pg_keybind.K_BACKSLASH, _pg_keybind.K_PAGEUP]
+                self.key_binds[_KB_NEXT] = [_pg_keybind.K_BACKSPACE, _pg_keybind.K_PAGEDOWN]
+                if _KB_FF is not None:
+                    self.key_binds[_KB_FF] = [None, None]
+                log("[Keybinds] First-load: patched live instance key_binds")
+
+        deploying = getattr(self.game, 'deploying', False)
+        _game_ref[0] = self.game
+
+        # Telemetry: lazy init_run on first entry; rotate realm file on level change.
+        try:
+            if _telemetry.ENABLED:
+                _g = self.game
+                _rn = getattr(_g, 'run_number', None)
+                _ln = getattr(_g, 'level_num', None)
+                if _telemetry._state.get("run_dir") is None and _rn is not None:
+                    _telemetry.init_run(_rn, MOD_VERSION)
+                if _ln is not None and _ln != _telemetry._state.get("realm_num"):
+                    _telemetry.set_realm(_ln)
+                    try:
+                        _lvl = _g.cur_level
+                        _p = _g.p1
+                        _enemies = [u for u in _lvl.units if Level.are_hostile(_p, u)]
+                        _spawners = [u for u in _enemies if getattr(u, 'is_lair', False)]
+                        # Per-type roster — exposes realm difficulty profile
+                        # without requiring a screenshot read at analysis time.
+                        _roster = {}
+                        for _u in _enemies:
+                            _nm = getattr(_u, 'name', None) or type(_u).__name__
+                            if getattr(_u, 'is_lair', False):
+                                _nm = f"Spawner_{_nm}"
+                            _roster[_nm] = _roster.get(_nm, 0) + 1
+                        _telemetry.emit('level_enter',
+                                        realm=_ln,
+                                        enemies=len(_enemies),
+                                        spawners=len(_spawners),
+                                        roster=_roster,
+                                        screenshot=f"saves/{_rn}/level_{_ln}_begin.png",
+                                        stats=f"saves/{_rn}/stats.level_{_ln}.txt",
+                                        combat_log=f"saves/{_rn}/log/combat_log.txt")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # Gameover/victory detection — speak outcome once, then pass through
+        # for the "any key → reminisce" transition in the original handler.
+        if self.gameover_frames == 0:
+            _gameover_spoken[0] = False
+        elif not _gameover_spoken[0]:
+            _gameover_spoken[0] = True
+            batcher.flush()
+            _flush_hp()
+            _announce_gameover(self)
+        if self.gameover_frames > 0:
+            _original_process_level_input(self)
+            return
+
+        # Turn signal: detect is_awaiting_input False→True transition
+        # Suppress during autowalk (#24), debounce rapid enemy-pass sequences (#32),
+        # and suppress after level complete (victory turn would stomp stats speech).
+        if not deploying and not _level_complete[0]:
+            awaiting = getattr(self.game.cur_level, 'is_awaiting_input', False)
+            if awaiting and not _turn_announced[0]:
+                _turn_announced[0] = True
+                _turn_count[0] += 1
+                now = time.time()
+                # Telemetry: per-turn vitals snapshot (heartbeat). Closes the
+                # gap left by on-demand-only [Vitals]. Player subjective state
+                # captured once per turn regardless of whether F was pressed.
+                try:
+                    if _telemetry.ENABLED:
+                        _p = self.game.p1
+                        if _p:
+                            _telemetry.set_turn(_turn_count[0])
+                            _telemetry.set_pos(_p.x, _p.y)
+                            _statuses = sorted(set(
+                                getattr(b, 'name', '') for b in getattr(_p, 'buffs', [])
+                                if getattr(b, 'name', '')
+                            ))
+                            _charges = {}
+                            for _sp in getattr(_p, 'spells', []):
+                                _n = getattr(_sp, 'name', None)
+                                _c = getattr(_sp, 'cur_charges', None)
+                                if _n is not None and _c is not None:
+                                    _charges[_n] = _c
+                            # Item inventory — consumable depth per turn
+                            _items = {}
+                            for _it in getattr(_p, 'items', []):
+                                _iname = getattr(_it, 'name', None)
+                                if _iname:
+                                    _items[_iname] = _items.get(_iname, 0) + 1
+                            # Minion roster — allies on the board (bounded, useful)
+                            _minions = []
+                            try:
+                                _lvl = self.game.cur_level
+                                if _lvl:
+                                    for _u in _lvl.units:
+                                        if _u is _p or Level.are_hostile(_p, _u):
+                                            continue
+                                        _nm = getattr(_u, 'name', None) or type(_u).__name__
+                                        _minions.append({
+                                            'n': _nm,
+                                            'p': [getattr(_u, 'x', 0), getattr(_u, 'y', 0)],
+                                            'hp': getattr(_u, 'cur_hp', None),
+                                        })
+                            except Exception:
+                                pass
+                            _telemetry.emit('turn_end',
+                                            hp=getattr(_p, 'cur_hp', None),
+                                            hp_max=getattr(_p, 'max_hp', None),
+                                            sp=getattr(_p, 'xp', None),
+                                            shields=getattr(_p, 'shields', None),
+                                            status=_statuses,
+                                            charges=_charges,
+                                            items=_items,
+                                            minions=_minions)
+                except Exception:
+                    pass
+                # Marked target update — immediate tier fires FIRST in the post-turn
+                # sequence so the navigation step lands at the head of NVDA's speech
+                # queue. Combat-heavy turns produced enough flush content to bury the
+                # prefix under damage/cast/death events when this fired after flush.
+                if _mark_tier_immediate[0] and _marked_target[0] is not None and _turn_count[0] > 1:
+                    _speak_mark_turn_update(self)
+
+                # Composer pipeline fires before the batcher flush so its
+                # composed utterance precedes the batcher's flat enemy-turn
+                # output. The pipeline coordinates crisis + digest + orphan
+                # producers in mark-precedence order and emits ONE TTS call
+                # covering all three. Each producer is config-gated; if all
+                # three are disabled the pipeline is a no-op. When only the
+                # digest is enabled (Phase 1 default), behavior matches the
+                # original single-producer firing — same content, same
+                # ordering, single tts.speak call.
+                try:
+                    _wizard_unit = getattr(self.game, 'p1', None)
+                    _pipeline.fire_pipeline(
+                        async_tts, log, cfg, _wizard_unit,
+                        telemetry=_telemetry,
+                    )
+                except Exception as _pipe_e:
+                    log(f"[Pipeline] error in fire_pipeline: {_pipe_e}")
+
+                # Flush queued speech before turn signal, then HP (#39)
+                batcher.flush()
+                _flush_hp()
+                adjacency_tracker.heartbeat()
+                _flush_cloud_arrivals()
+                _enemy_scanner.turn_reset()
+                _spawner_scanner.turn_reset()
+                _landmark_scanner.turn_reset()
+                _ally_scanner.turn_reset()
+
+                if _turn_count[0] == 1:
+                    # Auto-announce enemy/spawner count on level start
+                    try:
+                        level = self.game.cur_level
+                        player = self.game.p1
+                        enemies = [u for u in level.units if Level.are_hostile(player, u)]
+                        spawners = [u for u in enemies if getattr(u, 'is_lair', False)]
+                        parts = [f"{len(enemies)} enem{'y' if len(enemies) == 1 else 'ies'}"]
+                        if spawners:
+                            parts.append(f"{len(spawners)} spawner{'s' if len(spawners) != 1 else ''}")
+                        text = ", ".join(parts)
+                        log(f"[Level Start] {text}")
+                        async_tts.speak(text)
+                    except Exception:
+                        pass
+                elif (_turn_count[0] > 1
+                        and not getattr(self, 'path', None)
+                        and now - _last_turn_time[0] > 0.5):
+                    _last_turn_time[0] = now
+                    text = f"Turn {_turn_count[0]}"
+                    log(f"[Turn] {text}")
+                    async_tts.speak(text)
+
+                # Marked target update — turn-end tier: after turn signal
+                if not _mark_tier_immediate[0] and _marked_target[0] is not None and _turn_count[0] > 1:
+                    _speak_mark_turn_update(self)
+
+        # Deploy start detection
+        if deploying and not _was_deploying[0]:
+            _was_deploying[0] = True
+            _deploy_reset_cycle()
+            _announce_deploy_overview(self)
+
+        try:
+            for evt in self.events:
+                if evt.type != pygame.KEYDOWN:
+                    continue
+                # Skip modifier-only keys — Shift/Alt/Ctrl fire their own KEYDOWN
+                # before the letter key.  Without this guard, pressing Shift+J would
+                # reset the enemy scanner on the Shift event, then rebuild from
+                # scratch on the J event, killing reverse-cycling.
+                if evt.key in (pygame.K_LSHIFT, pygame.K_RSHIFT,
+                               pygame.K_LALT, pygame.K_RALT,
+                               pygame.K_LCTRL, pygame.K_RCTRL):
+                    continue
+                # Telemetry: record every hotkey press with modifiers. Closes
+                # the single biggest mindset-visibility gap — reveals exactly
+                # which scans/queries the player runs and when.
+                try:
+                    if _telemetry.ENABLED:
+                        _m = pygame.key.get_mods()
+                        _telemetry.emit('hotkey',
+                                        key=pygame.key.name(evt.key),
+                                        shift=bool(_m & pygame.KMOD_SHIFT),
+                                        alt=bool(_m & pygame.KMOD_ALT),
+                                        ctrl=bool(_m & pygame.KMOD_CTRL),
+                                        deploying=bool(deploying))
+                except Exception:
+                    pass
+                # Reset scan cycling on keys that aren't the respective scan key
+                if evt.key != pygame.K_j:  # enemy scanner relocated E→J (RW3 binds E=Crafting)
+                    _enemy_scanner.reset()
+                if evt.key != pygame.K_n:
+                    _spawner_scanner.reset()
+                if evt.key != pygame.K_q:
+                    _landmark_scanner.reset()
+                if evt.key != pygame.K_y:
+                    _ally_scanner.reset()
+                # Deploy-only number keys: overview (1) and category cycling (2-5)
+                if deploying and evt.key == pygame.K_1:
+                    _announce_deploy_overview(self)
+                elif deploying and evt.key == pygame.K_2:
+                    _deploy_cycle(self, 2)
+                elif deploying and evt.key == pygame.K_3:
+                    _deploy_cycle(self, 3)
+                elif deploying and evt.key == pygame.K_4:
+                    _deploy_cycle(self, 4)
+                elif deploying and evt.key == pygame.K_5:
+                    _deploy_cycle(self, 5)
+                elif evt.key == pygame.K_f:
+                    mods = pygame.key.get_mods()
+                    if mods & pygame.KMOD_SHIFT:
+                        _query_ally_overview(self)
+                    else:
+                        _query_vitals(self)
+                elif evt.key == pygame.K_j:  # enemy scan (was E; E now opens RW3 Crafting)
+                    mods = pygame.key.get_mods()
+                    if mods & pygame.KMOD_ALT:
+                        _mark_scanned_target(self)
+                    else:
+                        ref, lvl, qual = _get_scan_reference(self)
+                        rev = bool(mods & pygame.KMOD_SHIFT)
+                        _query_enemies(self, scan_level=lvl, ref_point=ref, qualifier=qual, reverse=rev)
+                elif evt.key == pygame.K_n:
+                    mods = pygame.key.get_mods()
+                    if mods & pygame.KMOD_ALT:
+                        _mark_scanned_target(self)
+                    else:
+                        ref, lvl, qual = _get_scan_reference(self)
+                        rev = bool(mods & pygame.KMOD_SHIFT)
+                        _query_spawners(self, scan_level=lvl, ref_point=ref, qualifier=qual, reverse=rev)
+                elif evt.key == pygame.K_y:
+                    mods = pygame.key.get_mods()
+                    if mods & pygame.KMOD_ALT:
+                        _mark_scanned_target(self)
+                    else:
+                        ref, lvl, qual = _get_scan_reference(self)
+                        rev = bool(mods & pygame.KMOD_SHIFT)
+                        _query_allies(self, scan_level=lvl, ref_point=ref, qualifier=qual, reverse=rev)
+                elif evt.key == pygame.K_g:
+                    _query_charges(self)
+                elif evt.key == pygame.K_q:
+                    mods = pygame.key.get_mods()
+                    if mods & pygame.KMOD_ALT:
+                        _mark_scanned_target(self)
+                    else:
+                        ref, lvl, qual = _get_scan_reference(self)
+                        rev = bool(mods & pygame.KMOD_SHIFT)
+                        _query_landmarks(self, scan_level=lvl, ref_point=ref, qualifier=qual, reverse=rev)
+                elif evt.key == pygame.K_x:
+                    ref, lvl, qual = _get_scan_reference(self)
+                    _query_hazards(self, scan_level=lvl, ref_point=ref, qualifier=qual)
+                elif evt.key == pygame.K_l:
+                    ref, lvl, qual = _get_scan_reference(self)
+                    _query_los_summary(self, scan_level=lvl, ref_point=ref, qualifier=qual)
+                elif evt.key == pygame.K_LCTRL:
+                    async_tts.cancel()
+                    _cancel_hp_announcement()
+                    batcher.clear()
+                    log("[Speech] Cancelled")
+                elif evt.key == pygame.K_z:
+                    # Repeat at current cursor position (don't add to history)
+                    idx = async_tts._cursor
+                    hist = async_tts._history
+                    if hist:
+                        entry = hist[idx] if idx >= 0 else hist[-1]
+                        async_tts.base_tts.cancel()
+                        async_tts.base_tts.speak(entry)
+                        log(f"[Repeat] {entry}")
+                elif evt.key == pygame.K_LEFTBRACKET:
+                    async_tts.history_back()
+                    idx = async_tts._cursor
+                    if idx >= 0:
+                        log(f"[History] Back ({idx+1}/{len(async_tts._history)})")
+                elif evt.key == pygame.K_RIGHTBRACKET:
+                    async_tts.history_forward()
+                    idx = async_tts._cursor
+                    pos = idx + 1 if idx >= 0 else len(async_tts._history)
+                    log(f"[History] Forward ({pos}/{len(async_tts._history)})")
+                elif evt.key == pygame.K_d:
+                    _query_detail(self)
+                elif evt.key == pygame.K_p:
+                    if pygame.key.get_mods() & pygame.KMOD_SHIFT:
+                        _query_path_to_marked_target(self)
+                    else:
+                        _query_path_to_cursor(self)
+                    # Consume so the game's K_p (pdb.set_trace dev cheat) doesn't fire.
+                    self.events = [e for e in self.events
+                                   if not (e.type == pygame.KEYDOWN and e.key == pygame.K_p)]
+                elif evt.key == pygame.K_t:
+                    ref, lvl, qual = _get_scan_reference(self)
+                    _query_threat(self, scan_level=lvl, ref_point=ref, qualifier=qual)
+                elif evt.key == pygame.K_b:
+                    ref, lvl, qual = _get_scan_reference(self)
+                    _query_space(self, scan_level=lvl, ref_point=ref, qualifier=qual)
+                elif evt.key == pygame.K_SLASH and (pygame.key.get_mods() & pygame.KMOD_SHIFT):
+                    _speak_mod_keybinds()
+                    # Consume event so game doesn't also open Help screen
+                    self.events = [e for e in self.events if not (e.type == pygame.KEYDOWN and e.key == pygame.K_SLASH)]
+        except Exception as e:
+            log(f"[Hotkey] Error: {e}")
+
+        # ---- RCtrl+Arrow diagonal movement ----
+        # Intercept arrow keys when Right Ctrl is held, convert to diagonal movement.
+        # Must happen before the game sees the arrow event.
+        # Counterclockwise mapping: RCtrl+Up=NW, RCtrl+Right=NE, RCtrl+Down=SE, RCtrl+Left=SW
+        _RCTRL_DIAG_MAP = {
+            pygame.K_UP: Level.Point(-1, -1),     # NW
+            pygame.K_RIGHT: Level.Point(1, -1),   # NE
+            pygame.K_DOWN: Level.Point(1, 1),      # SE
+            pygame.K_LEFT: Level.Point(-1, 1),     # SW
+        }
+        _diag_consumed = []
+        if self.can_execute_inputs():
+            keys = pygame.key.get_pressed()
+            # Also accept LCtrl+Alt (AltGr on European/Spanish keyboards sends LCtrl+RAlt)
+            _diag_trigger = keys[pygame.K_RCTRL] or (
+                keys[pygame.K_LCTRL] and (keys[pygame.K_LALT] or keys[pygame.K_RALT]))
+            if _diag_trigger:
+                for evt in self.events:
+                    if evt.type == pygame.KEYDOWN and evt.key in _RCTRL_DIAG_MAP:
+                        movedir = _RCTRL_DIAG_MAP[evt.key]
+                        if self.cur_spell:
+                            new_target = Level.Point(
+                                self.cur_spell_target.x + movedir.x,
+                                self.cur_spell_target.y + movedir.y)
+                            if self.game.cur_level.is_point_in_bounds(new_target):
+                                self.cur_spell_target = new_target
+                                self.try_examine_tile(new_target)
+                        elif deploying and self.deploy_target:
+                            new_point = Level.Point(
+                                self.deploy_target.x + movedir.x,
+                                self.deploy_target.y + movedir.y)
+                            if self.game.next_level.is_point_in_bounds(new_point):
+                                self.deploy_target = new_point
+                                self.try_examine_tile(new_point)
+                        else:
+                            self.try_move(movedir)
+                            self.cur_spell_target = None
+                        _diag_consumed.append(evt)
+                if _diag_consumed:
+                    self.events = [e for e in self.events if e not in _diag_consumed]
+
+        # Capture cursor AFTER our hotkeys, BEFORE game's native input (arrows/mouse)
+        _pre_native_pos = None
+        if deploying and self.deploy_target:
+            _pre_native_pos = (self.deploy_target.x, self.deploy_target.y)
+
+        # Activate batcher BEFORE the original handler so events emitted inside
+        # step_logic (player's cast fallout) are captured by the collapse tier
+        # instead of falling through to immediate speech. The post-original
+        # check below remains as a safety net; start_batching() is idempotent.
+        if (_turn_announced[0] and
+                getattr(self.game.cur_level, 'is_awaiting_input', False)):
+            batcher.start_batching()
+
+        _original_process_level_input(self)
+
+        # Guard: enter_reminisce() sets self.game = None during gameover transition.
+        # All post-processing below requires a valid game reference.
+        if self.game is None:
+            return
+
+        # Deploy: reset cycle if cursor moved via arrows/mouse (detected by
+        # position change during _original_process_level_input, not our cycle jump)
+        if deploying and _pre_native_pos and self.deploy_target:
+            new_pos = (self.deploy_target.x, self.deploy_target.y)
+            if new_pos != _pre_native_pos:
+                _deploy_reset_cycle()
+
+        # Turn signal: reset when player acts (is_awaiting_input goes False)
+        # Start batching when player acts — events during enemy turn get queued
+        if not getattr(self.game.cur_level, 'is_awaiting_input', True):
+            if _turn_announced[0]:
+                batcher.start_batching()
+            _turn_announced[0] = False
+
+        # Post-processing: deploy abort detection
+        # (Confirm is handled by patched_deploy, which sets _was_deploying = False first)
+        if not getattr(self.game, 'deploying', False) and _was_deploying[0]:
+            _was_deploying[0] = False
+            _deploy_reset_cycle()
+            async_tts.speak("Deploy aborted")
+            log("[Deploy] Aborted")
+
+    _PyGameView.process_level_input = patched_process_level_input
+    log("  Custom hotkeys installed (F=Vitals, E=Enemies, Q=Landmarks, G=Charges, "
+        "D=Detail, T=Threat, B=Space, LCtrl=Cancel, Z=Repeat, [/]=History, Deploy:1-5)")
+
+    # ---- Deploy Confirm Hook ----
+
+    _original_deploy = _PyGameView.deploy
+
+    def patched_deploy(self, p):
+        """Announce successful deployment."""
+        level_before = getattr(self.game, 'level_num', 0)
+        _original_deploy(self, p)
+        try:
+            level_after = getattr(self.game, 'level_num', 0)
+            if level_after > level_before:
+                _was_deploying[0] = False
+                _deploy_reset_cycle()
+                async_tts.speak(f"Deployed. Level {level_after}")
+                log(f"[Deploy] Confirmed - Level {level_after}")
+        except Exception as e:
+            log(f"[Deploy] Confirm error: {e}")
+
+    _PyGameView.deploy = patched_deploy
+    log("  Deploy confirm hook installed")
+
+    # ---- Rift Reroll Feedback Hook ----
+    import Game as _Game_module
+
+    _original_try_reroll = _Game_module.Game.try_reroll_rifts
+
+    def patched_try_reroll_rifts(self):
+        """Announce rift reroll success or failure."""
+        _game_ref[0] = self
+        if self.rift_rerolls:
+            _original_try_reroll(self)
+            remaining = self.rift_rerolls
+            text = f"Rifts rerolled, {remaining} remaining" if remaining else "Rifts rerolled, none remaining"
+            async_tts.speak(text)
+            log(f"[Reroll] {text}")
+        else:
+            async_tts.speak("No rerolls")
+            log("[Reroll] No rerolls available")
+
+    _Game_module.Game.try_reroll_rifts = patched_try_reroll_rifts
+    log("  Rift reroll feedback hook installed")
+
+    # ---- Movement Feedback: Direction + Wall Bumps ----
+    # Hook try_move to announce cardinal direction on first step in a new direction,
+    # and "Blocked" on wall bumps (once per blocked direction to prevent spam).
+    # Melee attacks (walking into enemies) are excluded — on_spell_cast handles those.
+
+    _original_try_move = _PyGameView.try_move
+    _last_move_dir = [None]     # (dx, dy) of last successful move direction
+    _last_blocked_dir = [None]  # (dx, dy) of last blocked direction (prevents spam)
+    _last_terrain_class = [None]  # Terrain classification for transition detection (S53)
+
+    def patched_try_move(self, movedir):
+        """Announce movement direction on direction changes, 'Blocked' on wall bumps.
+        Auto-walk (self.path non-empty) suppresses all speech to avoid rapid-fire spam."""
+        # Auto-walk in progress — execute silently
+        if getattr(self, 'path', None):
+            return _original_try_move(self, movedir)
+
+        # Pre-check: is there a hostile at the destination? (melee attack, not movement)
+        is_melee = False
+        try:
+            new_x = self.game.p1.x + movedir.x
+            new_y = self.game.p1.y + movedir.y
+            blocker = self.game.cur_level.get_unit_at(new_x, new_y)
+            if blocker and Level.are_hostile(self.game.p1, blocker):
+                is_melee = True
+        except Exception:
+            pass
+
+        result = _original_try_move(self, movedir)
+        try:
+            if result and not is_melee:
+                # Actual movement — announce direction on change.
+                # With coords enabled: speak every step (coord is new info each step).
+                # Repeated direction + coords: speak coord only (no direction repeat).
+                _last_blocked_dir[0] = None
+                dir_tuple = (movedir.x, movedir.y)
+                direction_changed = dir_tuple != _last_move_dir[0]
+                if direction_changed:
+                    _last_move_dir[0] = dir_tuple
+                dir_name = _cardinal_direction(movedir.x, movedir.y)
+                if dir_name and (direction_changed or cfg.show_coordinates):
+                    # p1.x/y is not updated synchronously — compute destination from movedir
+                    px, py = self.game.p1.x + movedir.x, self.game.p1.y + movedir.y
+                    if cfg.show_coordinates:
+                        text = f"{dir_name} ({px},{py})" if direction_changed else f"({px},{py})"
+                    else:
+                        text = dir_name
+                    async_tts.speak(text)
+                    log(f"[Move] ({px},{py}) {dir_name}")
+                # Passive terrain classification — announce on transition only (S53)
+                try:
+                    tc, axis = _classify_terrain(self.game.cur_level,
+                                                 self.game.p1.x, self.game.p1.y)
+                    if tc != _last_terrain_class[0]:
+                        _last_terrain_class[0] = tc
+                        if tc in _TERRAIN_LABELS:
+                            terrain_text = _TERRAIN_LABELS[tc](axis)
+                            async_tts.speak(terrain_text)
+                            log(f"[Terrain] ({self.game.p1.x},{self.game.p1.y}) {terrain_text}")
+                except Exception as e:
+                    log(f"[Terrain] Error: {e}")
+            elif result and is_melee:
+                # Melee attack — reset direction tracking, let on_spell_cast handle speech
+                _last_move_dir[0] = None
+            elif not result:
+                # Failed move — announce obstacle type once per direction (#28)
+                # If deploy screen just activated, suppress — overview will speak
+                if getattr(self.game, 'deploying', False):
+                    _last_move_dir[0] = None
+                    _last_blocked_dir[0] = None
+                else:
+                    dir_tuple = (movedir.x, movedir.y)
+                    if dir_tuple != _last_blocked_dir[0]:
+                        _last_blocked_dir[0] = dir_tuple
+                        _last_move_dir[0] = None
+                        obstacle = "Blocked"
+                        try:
+                            bx = self.game.p1.x + movedir.x
+                            by = self.game.p1.y + movedir.y
+                            dest_tile = self.game.cur_level.tiles[bx][by]
+                            if dest_tile.is_chasm:
+                                obstacle = "Impossible, chasm"
+                            elif dest_tile.is_wall():
+                                obstacle = "Impossible, wall"
+                            else:
+                                blocker = self.game.cur_level.get_unit_at(bx, by)
+                                if blocker:
+                                    obstacle = f"Blocked by {_name(blocker)}"
+                        except (IndexError, KeyError):
+                            obstacle = "Impossible, edge"
+                        except Exception:
+                            pass
+                        async_tts.speak(obstacle)
+                        log(f"[Move] ({self.game.p1.x},{self.game.p1.y}) {obstacle}")
+        except Exception as e:
+            log(f"[Move] Error: {e}")
+        return result
+
+    _PyGameView.try_move = patched_try_move
+    log("  Movement feedback hook installed")
+
+    # ========================================================================
+    # CENTRALIZED STATE TRANSITION DETECTION
+    # ========================================================================
+    # Tracks self.state every frame via draw_screen hook. On any state change,
+    # announces the new state. Per-state input processor patches (below) handle
+    # richer content voicing; this guarantees no transition is ever silent.
+    # ========================================================================
+
+    # All state constants
+    _STATE_LEVEL = getattr(_main, 'STATE_LEVEL', 0)
+    _STATE_CHAR_SHEET = getattr(_main, 'STATE_CHAR_SHEET', 1)
+    _STATE_SHOP = getattr(_main, 'STATE_SHOP', 2)
+    _STATE_TITLE = getattr(_main, 'STATE_TITLE', 3)
+    _STATE_OPTIONS = getattr(_main, 'STATE_OPTIONS', 4)
+    _STATE_MESSAGE = getattr(_main, 'STATE_MESSAGE', 5)
+    _STATE_CONFIRM = getattr(_main, 'STATE_CONFIRM', 6)
+    _STATE_REMINISCE = getattr(_main, 'STATE_REMINISCE', 7)
+    _STATE_REBIND = getattr(_main, 'STATE_REBIND', 8)
+    _STATE_COMBAT_LOG = getattr(_main, 'STATE_COMBAT_LOG', 9)
+    _STATE_PICK_MODE = getattr(_main, 'STATE_PICK_MODE', 10)
+    _STATE_PICK_TRIAL = getattr(_main, 'STATE_PICK_TRIAL', 11)
+    _STATE_SETUP_CUSTOM = getattr(_main, 'STATE_SETUP_CUSTOM', 12)
+    _STATE_PICK_MUTATOR_PARAMS = getattr(_main, 'STATE_PICK_MUTATOR_PARAMS', 13)
+    _STATE_ENTER_MUTATOR_VALUE = getattr(_main, 'STATE_ENTER_MUTATOR_VALUE', 14)
+
+    # Human-readable state names for announcement
+    _STATE_NAMES = {
+        _STATE_LEVEL: "Level",
+        _STATE_CHAR_SHEET: "Character Sheet",
+        _STATE_SHOP: "Shop",
+        _STATE_TITLE: "Rift Wizard 3",
+        _STATE_OPTIONS: "Options",
+        _STATE_MESSAGE: "Message",
+        _STATE_CONFIRM: "Confirm",
+        _STATE_REMINISCE: "Run Complete",
+        _STATE_REBIND: "Key Rebind",
+        _STATE_COMBAT_LOG: "Combat Log",
+        _STATE_PICK_MODE: "Select Game Mode",
+        _STATE_PICK_TRIAL: "Select Trial",
+        _STATE_SETUP_CUSTOM: "Custom Mutator Setup",
+        _STATE_PICK_MUTATOR_PARAMS: "Mutator Parameters",
+        _STATE_ENTER_MUTATOR_VALUE: "Enter Mutator Value",
+    }
+
+    # States that are NOT YET VOICED — announce "coming soon" on entry
+    # These have no input processor patch, so this is the only speech they get.
+    _UNVOICED_STATES = set()
+
+    # States where the per-state input patch already handles a richer entry
+    # announcement. The centralized hook skips these to avoid double-speaking.
+    _SELF_ANNOUNCING_STATES = {
+        _STATE_CONFIRM,
+        _STATE_TITLE,
+        _STATE_PICK_MODE,
+        _STATE_PICK_TRIAL,
+        _STATE_MESSAGE,
+        _STATE_OPTIONS,
+        _STATE_REMINISCE,
+        _STATE_COMBAT_LOG,
+        _STATE_CHAR_SHEET,  # open_char_sheet hook announces
+        _STATE_SHOP,        # open_shop hook announces
+        _STATE_REBIND,
+        _STATE_SETUP_CUSTOM,
+        _STATE_PICK_MUTATOR_PARAMS,
+        _STATE_ENTER_MUTATOR_VALUE,
+    }
+
+    # KEY_BIND constants for keybind resolution
+    _KB_UP = getattr(_main, 'KEY_BIND_UP', 0)
+    _KB_DOWN = getattr(_main, 'KEY_BIND_DOWN', 1)
+    _KB_LEFT = getattr(_main, 'KEY_BIND_LEFT', 2)
+    _KB_RIGHT = getattr(_main, 'KEY_BIND_RIGHT', 3)
+    _KB_CONFIRM = getattr(_main, 'KEY_BIND_CONFIRM', 9)
+    _KB_ABORT = getattr(_main, 'KEY_BIND_ABORT', 10)
+
+    def _key_name(view, bind_id):
+        """Resolve a KEY_BIND_* to a human-readable key name from current bindings."""
+        import pygame
+        try:
+            keys = view.key_binds.get(bind_id, [])
+            for k in keys:
+                if k is not None:
+                    return pygame.key.name(k)
+        except Exception:
+            pass
+        return "?"
+
+    # Suppression flag — set False to silence keybind announcements once players
+    # are comfortable. Can be wired to a config toggle later.
+    _ANNOUNCE_KEYBINDS = True
+
+    def _get_state_keybinds(view, state):
+        """Return keybind help string for a state, or '' if none/suppressed."""
+        if not _ANNOUNCE_KEYBINDS:
+            return ""
+
+        up = _key_name(view, _KB_UP)
+        down = _key_name(view, _KB_DOWN)
+        left = _key_name(view, _KB_LEFT)
+        right = _key_name(view, _KB_RIGHT)
+        confirm = _key_name(view, _KB_CONFIRM)
+        abort = _key_name(view, _KB_ABORT)
+        nav_ud = f"{up} and {down} to navigate"
+        nav_lr = f"{left} and {right}"
+
+        if state == _STATE_TITLE:
+            return f"{nav_ud}. {confirm} to select"
+
+        if state in (_STATE_PICK_MODE, _STATE_PICK_TRIAL):
+            return f"{nav_ud}. {confirm} to select. {abort} to go back"
+
+        if state == _STATE_OPTIONS:
+            return f"{nav_ud}. {nav_lr} to adjust. {abort} to close"
+
+        if state == _STATE_MESSAGE:
+            # Mod adds [ ] for chunk navigation on batched messages
+            return f"{confirm} to advance. left bracket for previous. {abort} to close"
+
+        if state == _STATE_CONFIRM:
+            return f"{nav_lr} to toggle. {confirm} to accept"
+
+        if state == _STATE_REMINISCE:
+            return f"{nav_lr} to browse slides. {abort} to exit"
+
+        if state == _STATE_REBIND:
+            return (f"{nav_ud} to navigate bindings. {nav_lr} for primary or secondary. "
+                    f"{confirm} to rebind. {abort} to save and exit")
+
+        if state == _STATE_SETUP_CUSTOM:
+            return (f"{nav_ud} to browse mutators. {nav_lr} between available, play, and selected. "
+                    f"{confirm} to add or remove. {abort} to cancel")
+
+        if state == _STATE_PICK_MUTATOR_PARAMS:
+            return f"{nav_ud} to browse options. {confirm} to select. {abort} to cancel"
+
+        if state == _STATE_ENTER_MUTATOR_VALUE:
+            return f"Type a number. {confirm} to accept. {abort} to cancel"
+
+        if state == _STATE_COMBAT_LOG:
+            return f"{nav_ud} to scroll. {nav_lr} to change turn. {abort} to close"
+
+        if state == _STATE_CHAR_SHEET:
+            return f"{nav_ud}. {nav_lr} to switch sections. {confirm} to select. {abort} to close"
+
+        if state == _STATE_SHOP:
+            shop_type = getattr(view, 'shop_type', -1)
+            if shop_type == _SHOP_TYPE_BESTIARY:
+                return f"{nav_ud}. {nav_lr} for pages. {abort} to close"
+            elif shop_type == _SHOP_TYPE_SPELLS:
+                # Learn Spell: explain owned-spell upgrade flow
+                return (f"{nav_ud}. {nav_lr} for pages. {confirm} to buy. "
+                        f"{confirm} on owned spell to view upgrades. "
+                        f"{abort} to close. Letter keys to filter. Tab to change filter category, comma for filter list")
+            elif shop_type == _SHOP_TYPE_CRAFTING:
+                # Craft Equipment (blueprint list)
+                return (f"{nav_ud}. {nav_lr} for pages. {confirm} to craft or wishlist. "
+                        f"{abort} to close. Letter keys to filter. Tab to change filter category, comma for filter list")
+            elif shop_type == _SHOP_TYPE_COMPONENT_SELECTION:
+                # Component selection (combination builder)
+                return (f"{nav_ud}. {confirm} to add or remove component. "
+                        f"I for item, R for recipe progress. {abort} to cancel")
+            elif shop_type == _SHOP_TYPE_SPELL_UPGRADES:
+                # Spell upgrade picker
+                return f"{nav_ud}. {confirm} to buy upgrade. {abort} to go back"
+            else:
+                # SHOP_TYPE_SHOP (level shops)
+                return f"{nav_ud}. {confirm} to select. {abort} to close"
+
+        # STATE_LEVEL and unvoiced states — no keybinds announced
+        return ""
+
+    _prev_state = [None]
+    _original_draw_screen = _PyGameView.draw_screen
+
+    _pending_keybinds = [None]  # Deferred keybind speech — spoken on next frame
+
+    def _patched_draw_screen(self, color=None):
+        """Centralized state transition detector. Runs every frame.
+        Announces state name for non-self-announcing states, and defers
+        keybind help to next frame so it speaks after all state-entry content."""
+        cur = self.state
+
+        # Speak deferred keybinds from previous frame's transition
+        if _pending_keybinds[0] is not None:
+            kb = _pending_keybinds[0]
+            _pending_keybinds[0] = None
+            async_tts.speak(kb)
+            log(f"[State] Keybinds: {kb}")
+
+        if cur != _prev_state[0]:
+            old_name = _STATE_NAMES.get(_prev_state[0], str(_prev_state[0]))
+            new_name = _STATE_NAMES.get(cur, f"Unknown State {cur}")
+            log(f"[State] Transition: {old_name} → {new_name}")
+
+            keybinds = _get_state_keybinds(self, cur)
+
+            if cur in _UNVOICED_STATES:
+                # NOT YET VOICED — tell the player clearly, no keybinds
+                async_tts.speak(f"{new_name}. Coming soon, not currently accessible")
+                log(f"[State] {new_name}: unvoiced state, announced coming soon")
+            elif cur not in _SELF_ANNOUNCING_STATES:
+                # State has no per-state patch AND is not unvoiced — announce name
+                # Currently this covers STATE_LEVEL only (no keybinds for Level)
+                async_tts.speak(new_name)
+                log(f"[State] Announced: {new_name}")
+            # else: self-announcing states handle their own entry speech
+
+            # Defer keybind help to next frame — after all state-entry hooks finish
+            if keybinds and cur not in _UNVOICED_STATES:
+                _pending_keybinds[0] = keybinds
+
+            _prev_state[0] = cur
+
+        _original_draw_screen(self, color)
+
+    _PyGameView.draw_screen = _patched_draw_screen
+    log("  Centralized state transition detector installed")
+
+    # ========================================================================
+    # STATE SCREEN VOICING
+    # ========================================================================
+    # Voice navigation for non-gameplay state screens: title, options, confirm,
+    # pick mode, pick trial, message, reminisce, combat log.
+    # Pattern: wrap process_*_input; detect entry (first call) and selection
+    # changes (compare before/after original call).
+    # ========================================================================
+
+    # ---- STATE_CONFIRM (Yes/No confirmation dialogs) ----
+    _orig_process_confirm = _PyGameView.process_confirm_input
+    _sr_confirm_entered = [False]
+
+    def _patched_process_confirm(self):
+        if not _sr_confirm_entered[0]:
+            _sr_confirm_entered[0] = True
+            prompt = getattr(self, 'confirm_text', '') or "Confirm?"
+            sel = "Yes" if self.examine_target else "No"
+            async_tts.speak(f"{prompt} {sel}")
+            log(f"[State] CONFIRM entered: {prompt} → {sel}")
+
+        prev_sel = self.examine_target
+        _orig_process_confirm(self)
+
+        if self.state != _STATE_CONFIRM:
+            _sr_confirm_entered[0] = False
+        elif self.examine_target != prev_sel:
+            sel = "Yes" if self.examine_target else "No"
+            async_tts.speak(sel)
+            log(f"[State] CONFIRM: {sel}")
+
+    _PyGameView.process_confirm_input = _patched_process_confirm
+    log("  Confirm dialog voicing installed")
+
+    # ---- STATE_TITLE (main menu) ----
+    _orig_process_title = _PyGameView.process_title_input
+    _sr_title_entered = [False]
+    # Keyed by RW3 TITLE_SELECTION_* constants (read from _main) rather than raw
+    # positions, so inserted/appended menu entries can't silently misalign labels.
+    # Mirrors draw_title's own label map (RiftWizard3.py).
+    _sr_title_labels = {
+        getattr(_main, 'TITLE_SELECTION_LOAD', 0): "Continue Run",
+        getattr(_main, 'TITLE_SELECTION_ABANDON', 1): "Abandon Run",
+        getattr(_main, 'TITLE_SELECTION_NEW', 2): "New Game",
+        getattr(_main, 'TITLE_SELECTION_OPTIONS', 3): "Options",
+        getattr(_main, 'TITLE_SELECTION_HELP', 4): "How to Play",
+        getattr(_main, 'TITLE_SELECTION_BESTIARY', 5): "Bestiary",
+        getattr(_main, 'TITLE_SELECTION_DISCORD', 6): "Discord",
+        getattr(_main, 'TITLE_SELECTION_MODS', 7): "Mods",
+        getattr(_main, 'TITLE_SELECTION_CREDITS', 8): "Credits",
+        getattr(_main, 'TITLE_SELECTION_EXIT', 9): "Quit",
+    }
+
+    def _patched_process_title(self):
+        if not _sr_title_entered[0]:
+            _sr_title_entered[0] = True
+            # Suppress the deferred keybind help — we'll include it inline
+            _pending_keybinds[0] = None
+            if not _keybinds_migrated:
+                async_tts.speak(
+                    "Rift Wizard 3. "
+                    "Note: Words of Power has rebound tooltip cycling to "
+                    "Backslash and Backspace for screen reader compatibility. "
+                    "Fast Forward has been unbound. "
+                    "You can rebind these in Options. "
+                    "Up and down to navigate. Return to select."
+                )
+                log("[State] TITLE entered + keybind migration announcement")
+            else:
+                async_tts.speak("Rift Wizard 3. Up and down to navigate. Return to select.")
+                log("[State] TITLE entered")
+
+        prev_sel = self.examine_target
+        _orig_process_title(self)
+
+        if self.state != _STATE_TITLE:
+            _sr_title_entered[0] = False
+        elif self.examine_target != prev_sel and self.examine_target is not None:
+            label = _sr_title_labels.get(self.examine_target, f"Option {self.examine_target}")
+            async_tts.speak(label)
+            log(f"[State] TITLE: {label}")
+
+    _PyGameView.process_title_input = _patched_process_title
+    log("  Title menu voicing installed")
+
+    # ---- STATE_PICK_MODE (game mode selection) ----
+    # Labels keyed by RW3 GAME_MODE_* constants (read from _main) rather than raw
+    # positions, so a reordered/added mode can't misalign the readout. Mirrors
+    # draw_pick_mode, including its victory "*" marker (spoken as ", completed").
+    _orig_process_pick_mode = _PyGameView.process_pick_mode_input
+    _sr_pick_mode_entered = [False]
+    _GAME_MODE_NORMAL = getattr(_main, 'GAME_MODE_NORMAL', 0)
+    _GAME_MODE_TRIALS = getattr(_main, 'GAME_MODE_TRIALS', 1)
+    _GAME_MODE_WEEKLY = getattr(_main, 'GAME_MODE_WEEKLY', 2)
+    _GAME_MODE_RANDOM = getattr(_main, 'GAME_MODE_RANDOM', 3)
+    _GAME_MODE_CUSTOM = getattr(_main, 'GAME_MODE_CUSTOM', 4)
+    _sr_mode_labels = {
+        _GAME_MODE_NORMAL: "Normal Game",
+        _GAME_MODE_TRIALS: "Archmage Trials",
+        _GAME_MODE_WEEKLY: "Weekly Run",
+        _GAME_MODE_RANDOM: "Mutated Run",
+        _GAME_MODE_CUSTOM: "Custom Run",
+    }
+
+    def _mode_completed(mode):
+        """Mirror draw_pick_mode's victory '*' condition. Safe on any Steam error."""
+        try:
+            SA = getattr(_main, 'SteamAdapter', None)
+            if SA is None:
+                return False
+            if mode == _GAME_MODE_NORMAL:
+                return bool(SA.get_stat('w'))
+            if mode == _GAME_MODE_WEEKLY:
+                gwn = getattr(_main, 'get_weekly_name', None)
+                return bool(gwn) and bool(SA.get_trial_status(gwn()))
+            if mode == _GAME_MODE_TRIALS:
+                trials = getattr(_main, 'all_trials', [])
+                return bool(trials) and all(SA.get_trial_status(t.name) for t in trials)
+        except Exception:
+            return False
+        return False
+
+    def _mode_label(mode):
+        base = _sr_mode_labels.get(mode, f"Mode {mode}")
+        return f"{base}, completed" if _mode_completed(mode) else base
+
+    def _patched_process_pick_mode(self):
+        if not _sr_pick_mode_entered[0]:
+            _sr_pick_mode_entered[0] = True
+            label = _mode_label(self.examine_target) if self.examine_target is not None else ""
+            async_tts.speak(f"Select Game Mode. {label}" if label else "Select Game Mode")
+            log("[State] PICK_MODE entered")
+
+        prev_sel = self.examine_target
+        _orig_process_pick_mode(self)
+
+        if self.state != _STATE_PICK_MODE:
+            _sr_pick_mode_entered[0] = False
+        elif self.examine_target != prev_sel and self.examine_target is not None:
+            label = _mode_label(self.examine_target)
+            async_tts.speak(label)
+            log(f"[State] PICK_MODE: {label}")
+
+    _PyGameView.process_pick_mode_input = _patched_process_pick_mode
+    log("  Pick mode voicing installed")
+
+    # ---- STATE_PICK_TRIAL (trial picker) ----
+    _orig_process_pick_trial = _PyGameView.process_pick_trial_input
+    _sr_pick_trial_entered = [False]
+
+    def _trial_completed(name):
+        """Mirror draw_pick_trial's victory '*' marker. Safe on any Steam error."""
+        try:
+            SA = getattr(_main, 'SteamAdapter', None)
+            return bool(SA) and bool(SA.get_trial_status(name))
+        except Exception:
+            return False
+
+    def _trial_name(target):
+        name = getattr(target, 'name', str(target)) if target is not None else ''
+        if name and _trial_completed(name):
+            return f"{name}, completed"
+        return name
+
+    def _patched_process_pick_trial(self):
+        if not _sr_pick_trial_entered[0]:
+            _sr_pick_trial_entered[0] = True
+            name = _trial_name(self.examine_target)
+            async_tts.speak(f"Select Trial. {name}" if name else "Select Trial")
+            log("[State] PICK_TRIAL entered")
+
+        prev_sel = self.examine_target
+        _orig_process_pick_trial(self)
+
+        if self.state != _STATE_PICK_TRIAL:
+            _sr_pick_trial_entered[0] = False
+        elif self.examine_target != prev_sel and self.examine_target is not None:
+            name = _trial_name(self.examine_target)
+            desc = ''
+            try:
+                desc = self.examine_target.get_description()
+            except Exception:
+                pass
+            msg = f"{name}. {desc}" if desc else name
+            async_tts.speak(msg)
+            log(f"[State] PICK_TRIAL: {name}")
+
+    _PyGameView.process_pick_trial_input = _patched_process_pick_trial
+    log("  Pick trial voicing installed")
+
+    # ---- STATE_MESSAGE (intro text, help text) ----
+    # Splits large text blocks into buffer-navigable chunks so [/] can
+    # step through individual keybindings, status effects, etc.
+    # _split_message_for_speech imported from helpers.py
+    from helpers import _split_message_for_speech
+
+    def _speak_message(msg):
+        """Speak a message screen, batching into history chunks if multi-part."""
+        chunks = _split_message_for_speech(msg)
+        if len(chunks) > 1:
+            async_tts.speak_batched(chunks)
+            log(f"[State] MESSAGE batched: {len(chunks)} chunks")
+        else:
+            async_tts.speak(msg)
+
+    _orig_process_message = _PyGameView.process_message_input
+    _sr_message_entered = [False]
+    _sr_last_message = [None]
+
+    def _patched_process_message(self):
+        msg = getattr(self, 'message', '') or ''
+        if not _sr_message_entered[0]:
+            _sr_message_entered[0] = True
+            _sr_last_message[0] = msg
+            if msg:
+                _speak_message(msg)
+            log(f"[State] MESSAGE entered ({len(msg)} chars)")
+
+        _orig_process_message(self)
+
+        if self.state != _STATE_MESSAGE:
+            _sr_message_entered[0] = False
+            _sr_last_message[0] = None
+        else:
+            new_msg = getattr(self, 'message', '') or ''
+            if new_msg != _sr_last_message[0]:
+                _sr_last_message[0] = new_msg
+                if new_msg:
+                    _speak_message(new_msg)
+                log(f"[State] MESSAGE advanced ({len(new_msg)} chars)")
+
+    _PyGameView.process_message_input = _patched_process_message
+    log("  Message screen voicing installed")
+
+    # ---- STATE_OPTIONS (settings menu) ----
+    _orig_process_options = _PyGameView.process_options_input
+    _sr_options_entered = [False]
+    # Keyed by RW3 OPTION_* constants (read from _main) so reordered/added entries
+    # can't misalign the readout. Mirrors draw_options_menu (RiftWizard3.py).
+    _OPTION_HELP = getattr(_main, 'OPTION_HELP', 0)
+    _OPTION_SOUND_VOLUME = getattr(_main, 'OPTION_SOUND_VOLUME', 1)
+    _OPTION_MUSIC_VOLUME = getattr(_main, 'OPTION_MUSIC_VOLUME', 2)
+    _OPTION_SPELL_SPEED = getattr(_main, 'OPTION_SPELL_SPEED', 3)
+    _OPTION_CONTROLS = getattr(_main, 'OPTION_CONTROLS', 4)
+    _OPTION_RETURN = getattr(_main, 'OPTION_RETURN', 5)
+    _OPTION_EXIT = getattr(_main, 'OPTION_EXIT', 6)
+    _OPTION_LANGUAGE_SELECT = getattr(_main, 'OPTION_LANGUAGE_SELECT', 7)
+    _OPTION_WINDOW_MODE = getattr(_main, 'OPTION_WINDOW_MODE', 8)
+    _OPTION_SAVE_PREFERENCES = getattr(_main, 'OPTION_SAVE_PREFERENCES', 9)
+    _WINDOW_MODE_NAMES = {
+        getattr(_main, 'WINDOW_MODE_WINDOWED', 'windowed'): 'Windowed',
+        getattr(_main, 'WINDOW_MODE_BORDERLESS', 'borderless'): 'Borderless',
+        getattr(_main, 'WINDOW_MODE_FULLSCREEN', 'fullscreen'): 'Fullscreen',
+    }
+
+    def _options_label(view, idx):
+        """Build spoken label for an options menu item, including current value."""
+        if idx == _OPTION_SOUND_VOLUME:
+            return f"Sound Volume {view.options.get('sound_volume', 0)}"
+        elif idx == _OPTION_MUSIC_VOLUME:
+            return f"Music Volume {view.options.get('music_volume', 0)}"
+        elif idx == _OPTION_SPELL_SPEED:
+            speed = view.options.get('spell_speed', 0)
+            names = {0: 'normal', 1: 'fast', 2: 'turbo', 3: 'Xturbo'}
+            return f"Animation Speed {names.get(speed, speed)}"
+        elif idx == _OPTION_WINDOW_MODE:
+            mode = getattr(view, 'window_mode', None)
+            return f"Display {_WINDOW_MODE_NAMES.get(mode, mode)}"
+        elif idx == _OPTION_LANGUAGE_SELECT:
+            return "Language Select"
+        elif idx == _OPTION_SAVE_PREFERENCES:
+            return "Save Preferences"
+        elif idx == _OPTION_CONTROLS:
+            return "Rebind Controls"
+        elif idx == _OPTION_RETURN:
+            return "Return to Game"
+        elif idx == _OPTION_EXIT:
+            return "Save and Exit" if view.game else "Back to Title"
+        elif idx == _OPTION_HELP:
+            return "How to Play"
+        return f"Option {idx}"
+
+    def _patched_process_options(self):
+        if not _sr_options_entered[0]:
+            _sr_options_entered[0] = True
+            label = _options_label(self, self.examine_target) if self.examine_target is not None else ""
+            async_tts.speak(f"Options. {label}" if label else "Options")
+            log("[State] OPTIONS entered")
+
+        prev_sel = self.examine_target
+        prev_sound = self.options.get('sound_volume', 0)
+        prev_music = self.options.get('music_volume', 0)
+        prev_speed = self.options.get('spell_speed', 0)
+        prev_window = getattr(self, 'window_mode', None)
+        _orig_process_options(self)
+
+        if self.state != _STATE_OPTIONS:
+            _sr_options_entered[0] = False
+        elif self.examine_target != prev_sel and self.examine_target is not None:
+            async_tts.speak(_options_label(self, self.examine_target))
+            log(f"[State] OPTIONS: {_options_label(self, self.examine_target)}")
+        else:
+            # Check if a value changed (Left/Right or toggle on volume/speed/display)
+            cur_sound = self.options.get('sound_volume', 0)
+            cur_music = self.options.get('music_volume', 0)
+            cur_speed = self.options.get('spell_speed', 0)
+            cur_window = getattr(self, 'window_mode', None)
+            if (cur_sound != prev_sound or cur_music != prev_music
+                    or cur_speed != prev_speed or cur_window != prev_window):
+                async_tts.speak(_options_label(self, self.examine_target))
+                log(f"[State] OPTIONS value: {_options_label(self, self.examine_target)}")
+
+    _PyGameView.process_options_input = _patched_process_options
+    log("  Options menu voicing installed")
+
+    # ---- STATE_REMINISCE (post-game slideshow) ----
+    _orig_process_reminisce = _PyGameView.process_reminisce_input
+    _sr_reminisce_entered = [False]
+
+    def _reminisce_slide_label(view):
+        """Describe current reminisce slide from filename."""
+        try:
+            imgs = view.reminisce_imgs
+            idx = view.reminisce_index
+            total = len(imgs)
+            fn = os.path.basename(imgs[idx])
+            # Filenames: level_N_begin.png, level_N_finish.png
+            fn_clean = fn.replace('.png', '').replace('level_', '')
+            if '_begin' in fn_clean:
+                level = fn_clean.replace('_begin', '')
+                return f"Level {level} start. Slide {idx + 1} of {total}"
+            elif '_finish' in fn_clean:
+                level = fn_clean.replace('_finish', '')
+                return f"Level {level} end. Slide {idx + 1} of {total}"
+            else:
+                return f"Slide {idx + 1} of {total}"
+        except Exception:
+            return "Slide"
+
+    def _patched_process_reminisce(self):
+        if not _sr_reminisce_entered[0]:
+            _sr_reminisce_entered[0] = True
+            async_tts.speak(f"Run Complete. {_reminisce_slide_label(self)}")
+            log("[State] REMINISCE entered")
+
+        prev_idx = self.reminisce_index
+        _orig_process_reminisce(self)
+
+        if self.state != _STATE_REMINISCE:
+            _sr_reminisce_entered[0] = False
+        elif self.reminisce_index != prev_idx:
+            async_tts.speak(_reminisce_slide_label(self))
+            log(f"[State] REMINISCE: slide {self.reminisce_index}")
+
+    _PyGameView.process_reminisce_input = _patched_process_reminisce
+    log("  Reminisce slideshow voicing installed")
+
+    # ---- STATE_COMBAT_LOG (combat log viewer) ----
+    _orig_process_combat_log = _PyGameView.process_combat_log_input
+    _sr_combat_log_entered = [False]
+
+    def _combat_log_header(view):
+        return f"Level {view.combat_log_level}, Turn {view.combat_log_turn}"
+
+    def _combat_log_current_line(view):
+        """Get the line at the current scroll offset."""
+        try:
+            lines = view.combat_log_lines
+            idx = 1 + view.combat_log_offset
+            if 0 <= idx < len(lines):
+                return lines[idx]
+        except Exception:
+            pass
+        return ""
+
+    def _patched_process_combat_log(self):
+        if not _sr_combat_log_entered[0]:
+            _sr_combat_log_entered[0] = True
+            header = _combat_log_header(self)
+            line = _combat_log_current_line(self)
+            msg = f"Combat Log. {header}. {line}" if line else f"Combat Log. {header}"
+            async_tts.speak(msg)
+            log(f"[State] COMBAT_LOG entered: {header}")
+
+        prev_offset = self.combat_log_offset
+        prev_turn = self.combat_log_turn
+        prev_level = self.combat_log_level
+        _orig_process_combat_log(self)
+
+        if self.state != _STATE_COMBAT_LOG:
+            _sr_combat_log_entered[0] = False
+        elif self.combat_log_turn != prev_turn or self.combat_log_level != prev_level:
+            # Turn or level changed (Left/Right)
+            header = _combat_log_header(self)
+            line = _combat_log_current_line(self)
+            msg = f"{header}. {line}" if line else header
+            async_tts.speak(msg)
+            log(f"[State] COMBAT_LOG: {header}")
+        elif self.combat_log_offset != prev_offset:
+            # Scrolled within same turn
+            line = _combat_log_current_line(self)
+            if line:
+                async_tts.speak(line)
+                log(f"[State] COMBAT_LOG line: {line}")
+
+    _PyGameView.process_combat_log_input = _patched_process_combat_log
+    log("  Combat log voicing installed")
+
+    # ---- STATE_REBIND (key rebinding screen) ----
+    _orig_process_rebind = _PyGameView.process_key_rebind
+    _sr_rebind_entered = [False]
+
+    import pygame as _pygame
+
+    def _rebind_label(view):
+        """Build spoken label for the current rebind cursor position."""
+        target = view.examine_target
+        if isinstance(target, list):
+            bind_id, col = target[0], target[1]
+            _kn = getattr(_main, 'key_names', {})
+            func_name = _kn.get(bind_id, f"Bind {bind_id}")
+            key1, key2 = view.new_key_binds.get(bind_id, (None, None))
+            key_val = [key1, key2][col]
+            key_str = _pygame.key.name(key_val) if key_val else "Unbound"
+            slot = "primary" if col == 0 else "secondary"
+            return f"{func_name}. {slot}. {key_str}"
+        _KBA = getattr(_main, 'KEY_BIND_OPTION_ACCEPT', None)
+        _KBR = getattr(_main, 'KEY_BIND_OPTION_RESET', None)
+        if target == _KBA:
+            return "Done"
+        elif target == _KBR:
+            return "Reset to Default"
+        return ""
+
+    def _patched_process_rebind(self):
+        if not _sr_rebind_entered[0]:
+            _sr_rebind_entered[0] = True
+            label = _rebind_label(self)
+            async_tts.speak(f"Rebind Controls. {label}" if label else "Rebind Controls")
+            log("[State] REBIND entered")
+
+        prev_sel = str(self.examine_target)
+        prev_rebinding = getattr(self, 'rebinding', False)
+        _orig_process_rebind(self)
+
+        if self.state != _STATE_REBIND:
+            _sr_rebind_entered[0] = False
+            return
+
+        cur_rebinding = getattr(self, 'rebinding', False)
+        if cur_rebinding and not prev_rebinding:
+            async_tts.speak("Press a key to bind")
+            log("[State] REBIND: awaiting key press")
+        elif not cur_rebinding and prev_rebinding:
+            # Just finished binding
+            label = _rebind_label(self)
+            async_tts.speak(f"Bound. {label}")
+            log(f"[State] REBIND set: {label}")
+        elif str(self.examine_target) != prev_sel and not cur_rebinding:
+            label = _rebind_label(self)
+            if label:
+                async_tts.speak(label)
+                log(f"[State] REBIND: {label}")
+
+    _PyGameView.process_key_rebind = _patched_process_rebind
+    log("  Key rebind voicing installed")
+
+    # ---- STATE_SETUP_CUSTOM (custom game mutator selection) ----
+    _orig_process_setup_custom = _PyGameView.process_setup_custom_input
+    _sr_setup_custom_entered = [False]
+
+    def _mutator_label(view, target):
+        """Build spoken label for a mutator or special target in custom setup."""
+        if target == "play":
+            n = len(view.custom_mutators) if hasattr(view, 'custom_mutators') else 0
+            return f"Play. {n} mutator{'s' if n != 1 else ''} selected"
+        if target is None:
+            return ""
+        # Active (configured) mutator instance
+        custom = getattr(view, 'custom_mutators', [])
+        if custom and target in custom:
+            name = getattr(target, 'name', target.__class__.__name__)
+            desc = getattr(target, 'description', '')
+            first_line = desc.split('\n')[0] if desc else ''
+            return f"Selected. {name}. {first_line}" if first_line else f"Selected. {name}"
+        # Available mutator class
+        _all_mut = getattr(_main, 'all_mutators', [])
+        if target in _all_mut:
+            name = target.__name__ if hasattr(target, '__name__') else str(target)
+            try:
+                desc = view.get_placeholder_description(target)
+                first_line = desc.split('\n')[0] if desc else ''
+            except Exception:
+                first_line = ''
+            return f"{name}. {first_line}" if first_line else name
+        return str(target)
+
+    def _patched_process_setup_custom(self):
+        if not _sr_setup_custom_entered[0]:
+            _sr_setup_custom_entered[0] = True
+            label = _mutator_label(self, self.examine_target)
+            async_tts.speak(f"Custom Game Setup. {label}" if label else "Custom Game Setup")
+            log("[State] SETUP_CUSTOM entered")
+
+        prev_sel = self.examine_target
+        _orig_process_setup_custom(self)
+
+        if self.state != _STATE_SETUP_CUSTOM:
+            _sr_setup_custom_entered[0] = False
+        elif self.examine_target != prev_sel and self.examine_target is not None:
+            label = _mutator_label(self, self.examine_target)
+            if label:
+                async_tts.speak(label)
+                log(f"[State] SETUP_CUSTOM: {label}")
+
+    _PyGameView.process_setup_custom_input = _patched_process_setup_custom
+    log("  Custom game setup voicing installed")
+
+    # ---- STATE_PICK_MUTATOR_PARAMS (mutator parameter selection) ----
+    _orig_process_pick_params = _PyGameView.process_pick_mutator_params_input
+    _sr_pick_params_entered = [False]
+
+    def _patched_process_pick_params(self):
+        if not _sr_pick_params_entered[0]:
+            _sr_pick_params_entered[0] = True
+            mut_name = getattr(self, 'pending_mutator_class', None)
+            mut_name = mut_name.__name__ if mut_name else "Mutator"
+            label = self.format_param_value(self.examine_target) if self.examine_target else ""
+            async_tts.speak(f"{mut_name}. Select parameter. {label}" if label else f"{mut_name}. Select parameter")
+            log("[State] PICK_MUTATOR_PARAMS entered")
+
+        prev_sel = self.examine_target
+        _orig_process_pick_params(self)
+
+        if self.state != _STATE_PICK_MUTATOR_PARAMS:
+            _sr_pick_params_entered[0] = False
+        elif self.examine_target != prev_sel and self.examine_target is not None:
+            label = self.format_param_value(self.examine_target)
+            if label:
+                async_tts.speak(label)
+                log(f"[State] PICK_MUTATOR_PARAMS: {label}")
+
+    _PyGameView.process_pick_mutator_params_input = _patched_process_pick_params
+    log("  Mutator parameter picker voicing installed")
+
+    # ---- STATE_ENTER_MUTATOR_VALUE (numeric value entry) ----
+    _orig_process_enter_value = _PyGameView.process_enter_mutator_value_input
+    _sr_enter_value_entered = [False]
+
+    def _patched_process_enter_value(self):
+        if not _sr_enter_value_entered[0]:
+            _sr_enter_value_entered[0] = True
+            mut_name = getattr(self, 'pending_mutator_class', None)
+            mut_name = mut_name.__name__ if mut_name else "Mutator"
+            async_tts.speak(f"{mut_name}. Enter a value")
+            log("[State] ENTER_MUTATOR_VALUE entered")
+
+        prev_buf = getattr(self, 'pending_value_buffer', '')
+        _orig_process_enter_value(self)
+
+        if self.state != _STATE_ENTER_MUTATOR_VALUE:
+            _sr_enter_value_entered[0] = False
+        else:
+            cur_buf = getattr(self, 'pending_value_buffer', '')
+            if cur_buf != prev_buf:
+                if len(cur_buf) > len(prev_buf):
+                    # New digit typed — speak just the digit
+                    async_tts.speak(cur_buf[-1])
+                elif len(cur_buf) < len(prev_buf):
+                    # Backspace — speak remaining or "empty"
+                    async_tts.speak(cur_buf if cur_buf else "empty")
+                log(f"[State] ENTER_VALUE: {cur_buf}")
+
+    _PyGameView.process_enter_mutator_value_input = _patched_process_enter_value
+    log("  Mutator value entry voicing installed")
+
+    log("  State screen voicing: 12 states with full navigation + centralized transition detector for all 15")
+
+else:
+    log("[WARNING] Could not find PyGameView class - UI hooks not installed")
+
+# ============================================================================
+
+log("=" * 60)
+log(f"Screen Reader Mod - ACTIVE | NVDA: {tts.enabled} | Batching: 3-tier | Hotkeys: F E Q G D T B Z [/] 1-5")
+log("=" * 60)
