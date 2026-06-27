@@ -1010,10 +1010,14 @@ _VIA_HINT_CAP = 3  # Max blocked entries per scan that get pathfinding computati
 # ---- Level-Load Coverage Audit ----
 # Scans every tile on level load, logs objects the mod doesn't currently handle.
 # Zero speech output — log-only diagnostic for between-session review.
+# RW3 ground props (Level.py + LevelRewards.py). Shop subclasses are caught by
+# _classify_prop's .items fallback, not enumerated here; this set is only the
+# audit whitelist, so anything new still gets logged as an unknown prop.
 _KNOWN_PROP_TYPES = {
-    'Portal', 'HealDot', 'ManaDot', 'ChargeDot', 'SpellScroll', 'HeartDot',
-    'GoldDot', 'PlaceOfPower', 'NPC', 'Shop', 'EquipPickup', 'ItemPickup',
-    'ShrineShop', 'ShiftingShop', 'MiniShop', 'DuplicatorShop', 'AmnesiaShop',
+    'Portal', 'MemoryOrb', 'HeartDot', 'ComponentPickup', 'Shop',
+    'DuplicationShop', 'ReformationShop', 'ShrineOfKnowledge', 'EvolutionShop',
+    'DissolutionShop', 'SpellGraftShrine', 'GearGraftShrine', 'ChronomancyShrine',
+    'ShrineOfPerfection', 'SpiderShrine', 'SoulShrine',
 }
 
 def _audit_level(level, level_num):
@@ -1110,13 +1114,15 @@ def _deploy_get_orbs(level):
     """Memory Orbs on level. Returns [(prop, x, y), ...]."""
     results = []
     for tile in level.iter_tiles():
-        if tile.prop and type(tile.prop).__name__ == 'ManaDot':
+        if tile.prop and type(tile.prop).__name__ == 'MemoryOrb':
             results.append((tile.prop, tile.x, tile.y))
     return results
 
 def _deploy_get_pickups(level):
-    """Item pickups on level (heals, charges, hearts, gold, scrolls, equipment, items).
-    Excludes Memory Orbs (separate category). Returns [(prop, x, y, name), ...]."""
+    """Non-orb item pickups on level. Excludes Memory Orbs (separate category 2).
+    RW3 floor pickups are only ComponentPickup and HeartDot — scrolls/equipment/
+    gold/heals/recharges are not floor props in RW3 (they come via shops/crafting).
+    Returns [(prop, x, y, name), ...]."""
     results = []
     for tile in level.iter_tiles():
         prop = tile.prop
@@ -1124,25 +1130,11 @@ def _deploy_get_pickups(level):
             continue
         cls = type(prop).__name__
         # Naming mirrors _classify_prop (which is scoped inside UI hooks block)
-        if cls == 'SpellScroll':
-            spell = getattr(prop, 'spell', None)
-            name = f"Scroll: {_name(spell, 'unknown')}" if spell else "Scroll"
-        elif cls == 'EquipPickup':
-            item = getattr(prop, 'item', None)
-            name = f"Equipment: {_name(item)}" if item else "Equipment"
-        elif cls == 'ItemPickup':
-            item = getattr(prop, 'item', None)
-            name = f"Item: {_name(item)}" if item else "Item"
+        if cls == 'ComponentPickup':
+            comp = getattr(prop, 'component', None)
+            name = f"Component: {_name(comp)}" if comp else "Component"
         elif cls == 'HeartDot':
-            bonus = getattr(prop, 'bonus', 10)
-            name = f"Ruby Heart, plus {bonus} max HP"
-        elif cls == 'HealDot':
-            name = "Full Heal"
-        elif cls == 'ChargeDot':
-            name = "Spell Recharge"
-        elif cls == 'GoldDot':
-            gold = getattr(prop, 'gold', 1)
-            name = f"Gold, {gold}"
+            name = "Ruby Heart, plus 25 max HP"  # RW3 fixed +25 (Level.py:2792)
         else:
             continue  # Not a pickup type
         results.append((prop, tile.x, tile.y, name))
@@ -1156,34 +1148,28 @@ def _deploy_get_spawners(level):
 # _number_deploy_dupes imported from helpers.py
 
 def _deploy_get_interactions(level):
-    """Shops, shrines, circles, NPCs on level. Returns [(prop, x, y, name), ...]."""
+    """Shops and shrines on level. Returns [(prop, x, y, name), ...].
+    Catches every RW3 Shop subclass via the .items attr Shop.__init__ sets, plus
+    standalone trigger-shrines (Perfection/Spiders/Necromancy, plain Props with no
+    .items) via the name fallback. Excludes orbs/components/hearts (categories 2-3)
+    and rifts. Naming mirrors _classify_prop."""
+    _other_category = ('MemoryOrb', 'ComponentPickup', 'HeartDot', 'Portal')
     results = []
-    seen_positions = set()
     for tile in level.iter_tiles():
         prop = tile.prop
         if prop is None:
             continue
         cls = type(prop).__name__
-        # Naming mirrors _classify_prop (which is scoped inside UI hooks block)
-        if cls == 'PlaceOfPower':
-            tag = getattr(prop, 'tag', None)
-            tag_name = getattr(tag, 'name', '') if tag else ''
-            name = f"{tag_name} Circle" if tag_name else "Circle"
-        elif cls == 'MiniShop':
-            name = "Miniaturization Shrine"
-        elif cls == 'DuplicatorShop':
-            name = "Duplication Shrine"
-        elif cls == 'AmnesiaShop':
-            name = "Amnesia Shrine"
-        elif cls in ('Shop', 'ShrineShop', 'ShiftingShop'):
-            name = _name(prop, "Shop")
-        elif cls == 'NPC':
-            name = _name(prop)
-        elif hasattr(prop, 'shop_type') or hasattr(prop, 'items'):
+        if cls in _other_category or hasattr(prop, 'level_gen_params'):
+            continue
+        if hasattr(prop, 'shop_type') or hasattr(prop, 'items'):
             name = _name(prop, "Shop")
         else:
-            continue
-        seen_positions.add((tile.x, tile.y))
+            # Open fallback: any other named interactive prop (trigger-shrines, etc.)
+            n = _name(prop, "")
+            if not n or n == "Tile":
+                continue
+            name = n
         results.append((prop, tile.x, tile.y, name))
     return results
 
@@ -3877,6 +3863,18 @@ if _PyGameView is not None:
         # examine path (_describe_target) so tooltip cycling matches look/walk mode.
         if hasattr(target, 'level_gen_params'):
             return f"{counter}. {_describe_portal(target, view)}"
+        # Buff — extra examine tooltips that spell upgrades attach via
+        # add_upgrade_tooltip (e.g. the Rejuvenation regen buff behind Healing
+        # Light's Ritual of Rejuvenation, the Haste buff behind Ritual of Haste).
+        # Must follow the Upgrade branch above, since Upgrade subclasses Buff.
+        # Without this, the buff hits the name-only fallback and its effect text
+        # ("Heals 5 HP each turn") is never spoken.
+        if isinstance(target, Level.Buff):
+            parts = [_name(target)]
+            desc = _desc_text(target)
+            if desc:
+                parts.append(_clean_desc(desc))
+            return f"{counter}. " + ". ".join(parts)
         # Fallback
         return f"{counter}. {_name(target)}"
 
@@ -5030,70 +5028,48 @@ if _PyGameView is not None:
     def _classify_prop(prop):
         """Classify a tile prop into a category and readable name.
         Returns (category, priority, name) where category is 'landmark' or 'pickup', or None to skip.
-        Priority only matters for pickups (lower = announced first)."""
+        Priority only matters for pickups (lower = announced first).
+
+        RW3 ground props (Level.py + LevelRewards.py): Portal (Rift), MemoryOrb,
+        ComponentPickup, HeartDot, and Shop + its shrine subclasses. Shops are
+        caught by the .items attr Shop.__init__ always sets. Standalone
+        trigger-shrines (no .items) and any future prop fall through to the open
+        name fallback, so nothing navigable goes silent; _audit_level still logs
+        unknowns for review."""
         cls = type(prop).__name__
         # Landmarks: strategic navigation points
         if hasattr(prop, 'level_gen_params'):
             if getattr(prop, 'locked', False):
                 return None
             return ('landmark', 0, "Rift")
-        if cls == 'PlaceOfPower':
-            tag = getattr(prop, 'tag', None)
-            tag_name = getattr(tag, 'name', '') if tag else ''
-            return ('landmark', 0, f"{tag_name} Circle" if tag_name else _name(prop))
-        # Shops/Shrines (check specific subclasses via class name — avoids import issues)
-        if cls in ('ShrineShop', 'ShiftingShop'):
-            return ('landmark', 0, _name(prop))
-        if cls == 'MiniShop':
-            return ('landmark', 0, "Miniaturization Shrine")
-        if cls == 'DuplicatorShop':
-            return ('landmark', 0, "Duplication Shrine")
-        if cls == 'AmnesiaShop':
-            return ('landmark', 0, "Amnesia Shrine")
-        if cls == 'Shop' or hasattr(prop, 'shop_type') or hasattr(prop, 'items'):
-            # Generic shop fallback. Includes amorphously-named Shop instances
-            # whose .name doesn't contain "shop"/"shrine" — chests, boxes,
-            # scrolls (e.g. Scroll of Spells), Arcane Library, etc.
-            return ('landmark', 0, _name(prop, "Shop"))
-        # Pickups — Tier 0: unique finds (build-defining, don't miss these)
-        if cls == 'SpellScroll':
-            spell = getattr(prop, 'spell', None)
-            sname = _name(spell, "unknown") if spell else "unknown"
-            return ('pickup', _PICKUP_UNIQUE, f"Scroll: {sname}")
-        if cls == 'EquipPickup':
-            item = getattr(prop, 'item', None)
-            return ('pickup', _PICKUP_UNIQUE, f"Equipment: {_name(item)}" if item else "Equipment")
-        if cls == 'ItemPickup':
-            item = getattr(prop, 'item', None)
-            return ('pickup', _PICKUP_UNIQUE, f"Item: {_name(item)}" if item else "Item")
-        # Pickups — Tier 1: resources (economy, sustain, recharges)
-        if cls == 'ManaDot':
+        # Pickups — Tier 0: crafting components (build-defining floor finds)
+        if cls == 'ComponentPickup':
+            comp = getattr(prop, 'component', None)
+            return ('pickup', _PICKUP_UNIQUE, f"Component: {_name(comp)}" if comp else "Component")
+        # Pickups — Tier 1: resources (SP economy)
+        if cls == 'MemoryOrb':
             return ('pickup', _PICKUP_RESOURCE, "Memory Orb")
-        if cls == 'GoldDot':
-            gold = getattr(prop, 'gold', 1)
-            return ('pickup', _PICKUP_RESOURCE, f"Gold, {gold}")
-        if cls == 'ChargeDot':
-            return ('pickup', _PICKUP_RESOURCE, "Spell Recharge")
-        # Pickups — Tier 2: stat boosts and heals
+        # Pickups — Tier 2: stat boosts (RW3 Ruby Heart is fixed +25, Level.py:2792)
         if cls == 'HeartDot':
-            bonus = getattr(prop, 'bonus', 10)
-            return ('pickup', _PICKUP_STAT, f"Ruby Heart, plus {bonus} max HP")
-        if cls == 'HealDot':
-            return ('pickup', _PICKUP_STAT, "Heal")
+            return ('pickup', _PICKUP_STAT, "Ruby Heart, plus 25 max HP")
+        # Shops & shrine-shops: announce by their own game name. The .items attr
+        # is set by Shop.__init__, so this catches every LevelRewards Shop subclass.
+        if cls == 'Shop' or hasattr(prop, 'shop_type') or hasattr(prop, 'items'):
+            return ('landmark', 0, _name(prop, "Shop"))
+        # Open fallback: any remaining named prop (standalone trigger-shrines like
+        # Shrine of Perfection/Spiders/Necromancy, and any future RW3 prop) →
+        # landmark by its game name.
+        name = _name(prop, "")
+        if name and name != "Tile":
+            return ('landmark', 0, name)
         return None
 
     def _landmark_cat_label(name):
-        """Short category label for count header breakdown."""
-        if name.startswith("Scroll:"): return "scroll"
-        if name.startswith("Equipment:"): return "equipment"
-        if name.startswith("Item:"): return "item"
+        """Short category label for the Q count-header breakdown (RW3 prop set)."""
+        if name.startswith("Component:"): return "component"
         if name == "Memory Orb": return "orb"
-        if name.startswith("Gold"): return "gold"
-        if name == "Spell Recharge": return "recharge"
         if name.startswith("Ruby Heart"): return "heart"
-        if name == "Heal": return "heal"
         if name == "Rift": return "rift"
-        if "Circle" in name: return "circle"
         if "Shrine" in name: return "shrine"
         return "shop"
 
@@ -5319,7 +5295,7 @@ if _PyGameView is not None:
                 item_names = [_name(item) for item in items]
                 parts.append("Items: " + ", ".join(item_names))
             return ". ".join(parts)
-        # EquipPickup — describe the equipment inside
+        # Any prop carrying a single .item — describe it (defensive; not a stock RW3 prop)
         if hasattr(prop, 'item') and isinstance(prop, Level.Prop):
             item = prop.item
             parts = [_name(item)]
@@ -5337,10 +5313,11 @@ if _PyGameView is not None:
             if desc:
                 parts.append(_clean_desc(desc))
             return ". ".join(parts)
-        # SpellScroll — describe the spell
+        # Any prop carrying a spell — describe the spell (defensive; not a stock RW3 prop)
         if hasattr(prop, 'spell'):
             return _describe_spell(prop.spell)
-        # Generic prop (ManaDot, HealDot, HeartDot, ChargeDot, GoldDot, PlaceOfPower, etc.)
+        # Generic prop: name + description. Covers MemoryOrb, HeartDot,
+        # ComponentPickup, and standalone trigger-shrines.
         parts = [_name(prop)]
         desc = ''
         try:
@@ -6141,20 +6118,19 @@ if _PyGameView is not None:
                     continue
                 cls = type(prop).__name__
                 q = _quadrant_label(tile.x, tile.y)
-                if cls == 'ManaDot':
+                if cls == 'MemoryOrb':
                     orb_counts[q] = orb_counts.get(q, 0) + 1
-                elif cls in ('HealDot', 'ChargeDot', 'HeartDot', 'GoldDot',
-                             'SpellScroll', 'EquipPickup', 'ItemPickup'):
+                elif cls in ('ComponentPickup', 'HeartDot'):
                     pickup_counts[q] = pickup_counts.get(q, 0) + 1
-                elif cls == 'PlaceOfPower':
-                    tag = getattr(prop, 'tag', None)
-                    tag_name = getattr(tag, 'name', '') if tag else ''
-                    quads[q]["props"].append(f"{tag_name} Circle" if tag_name else "Circle")
-                elif cls in ('Shop', 'ShrineShop', 'ShiftingShop', 'MiniShop',
-                             'DuplicatorShop', 'AmnesiaShop') or hasattr(prop, 'shop_type'):
+                elif hasattr(prop, 'level_gen_params'):
+                    quads[q]["props"].append("rift")
+                elif cls == 'Shop' or hasattr(prop, 'shop_type') or hasattr(prop, 'items'):
                     quads[q]["props"].append("shop")
-                elif cls == 'NPC':
-                    quads[q]["props"].append(_name(prop))
+                else:
+                    # Open fallback: standalone trigger-shrines and other named props
+                    n = _name(prop, "")
+                    if n and n != "Tile":
+                        quads[q]["props"].append("shrine" if "Shrine" in n else n)
 
             # Add orb and pickup counts to props
             for q, count in orb_counts.items():
