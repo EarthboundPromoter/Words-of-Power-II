@@ -1,5 +1,5 @@
 # Rift Wizard 2 Screen Reader Mod — Words of Power
-MOD_VERSION = "0.4.0"
+MOD_VERSION = "0.1.0"
 
 import sys
 import os
@@ -3871,7 +3871,24 @@ if _PyGameView is not None:
         # ("Heals 5 HP each turn") is never spoken.
         if isinstance(target, Level.Buff):
             parts = [_name(target)]
-            desc = _desc_text(target)
+            # Mirror the game's examine renderer (RiftWizard3.py:7169-7181): first
+            # the resistances/bonuses drawn from the buff's resists dict, then the
+            # description text. A resist buff like Lightning Immunity stores its
+            # whole meaning in resists ({Lightning: 100}) and has NO description or
+            # tooltip — without this it would read only its name.
+            bonus_lines = _format_bonus_lines(target)
+            if bonus_lines:
+                parts.append(". ".join(bonus_lines))
+            # Description: prefer get_description(), but fall back to get_tooltip()
+            # when it's empty — some buffs (e.g. Clarity/StunImmune) override
+            # get_tooltip() and leave description None.
+            desc = _desc_text(target)  # get_description() paired with live fmt_dict
+            if not desc and hasattr(target, 'get_tooltip'):
+                try:
+                    fmt = target.fmt_dict() if hasattr(target, 'fmt_dict') else None
+                    desc = read_text(target.get_tooltip(), fmt)
+                except Exception:
+                    desc = ""
             if desc:
                 parts.append(_clean_desc(desc))
             return f"{counter}. " + ". ".join(parts)
