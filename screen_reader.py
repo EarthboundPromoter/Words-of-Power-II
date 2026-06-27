@@ -3850,11 +3850,18 @@ if _PyGameView is not None:
             if desc:
                 parts.append(_clean_desc(desc))
             return f"{counter}. " + ". ".join(parts)
-        # Component (RW3: former consumable Items are now Components)
+        # Component (RW3: former consumable Items are now Components). Rift-reward
+        # shrines and map drops wrap the component in a ComponentPickup prop
+        # (RiftWizard3.py:7477), which is NOT a Component — without unwrapping it
+        # falls to the name-only fallback and its description is never spoken (e.g.
+        # the on-craft rares like Flame Blade Fragment). The game's draw_examine
+        # handles both; mirror that here.
+        if isinstance(target, getattr(Level, 'ComponentPickup', ())):
+            target = target.component
         if isinstance(target, getattr(Level, 'Component', ())):
             parts = [_name(target)]
             desc = _desc_text(target)
-            if desc and desc != "Undescribed Item":
+            if desc and desc not in ("Undescribed Item", "Undescribed Component"):
                 parts.append(_clean_desc(desc))
             return f"{counter}. " + ". ".join(parts)
         # Prospective-equipment list (RW3 crafting preview: the gear this rift's
@@ -4248,7 +4255,13 @@ if _PyGameView is not None:
         for buff in passives:
             tooltip = buff.get_tooltip() if hasattr(buff, 'get_tooltip') else None
             if tooltip:
-                passive_descs.append(tooltip)
+                # RW3 buff tooltips are often (template, fmt) tuples; _clean_desc
+                # routes through read_text (resolving the tuple) + strips markup.
+                # Appending the raw tuple here throws "sequence item 0: expected str
+                # instance, tuple found" on the join below — silencing the readout.
+                cleaned = _clean_desc(tooltip)
+                if cleaned:
+                    passive_descs.append(cleaned)
         if passive_descs:
             parts.append("Passives: " + "; ".join(passive_descs))
 
@@ -4299,6 +4312,7 @@ if _PyGameView is not None:
                 tooltip = getattr(buff, 'description', None)
             if not tooltip:
                 continue
+            tooltip = read_text(tooltip)  # RW3 tooltips may be (template, fmt) tuples; .lower() below would throw on a tuple
             # Strip leading "On death, " if present — we add our own prefix
             stripped = tooltip
             if stripped.lower().startswith("on death, "):
