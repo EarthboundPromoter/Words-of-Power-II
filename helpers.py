@@ -364,15 +364,18 @@ def _scan_corridor_branches(level, px, py, axis):
 
 # ---- Deploy Helpers ----
 
-_DEPLOY_CENTER = 16  # Map center for quadrant labels (33x33 grid, 0-indexed)
+def _quadrant_label(x, y, width, height):
+    """Fixed quadrant relative to map center. NE/SE/SW/NW.
 
-def _quadrant_label(x, y):
-    """Fixed quadrant relative to map center. NE/SE/SW/NW."""
-    c = _DEPLOY_CENTER
-    if x >= c:
-        return "northeast" if y < c else "southeast"
+    Center is derived from the level's own dimensions so it tracks the grid
+    size — RW3 is 18x18 (center 9); RW2 was 33x33 (center 16). A hardcoded
+    center collapses almost everything to one quadrant on the smaller grid."""
+    cx = width // 2
+    cy = height // 2
+    if x >= cx:
+        return "northeast" if y < cy else "southeast"
     else:
-        return "northwest" if y < c else "southwest"
+        return "northwest" if y < cy else "southwest"
 
 def _number_deploy_dupes(items):
     """Add ordinal suffix to duplicate names in a deploy cycling list.

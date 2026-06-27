@@ -325,30 +325,39 @@ class TestSplitMessageForSpeech:
 # ---- _quadrant_label ----
 
 class TestQuadrantLabel:
+    # RW3 grid is 18x18 -> center 9. Center is derived from the passed
+    # dimensions, so the same logic also works on RW2's 33x33 (center 16).
 
     def test_northeast(self):
         # x >= center, y < center
-        assert _quadrant_label(20, 5) == "northeast"
+        assert _quadrant_label(12, 3, 18, 18) == "northeast"
 
     def test_southeast(self):
         # x >= center, y >= center
-        assert _quadrant_label(25, 20) == "southeast"
+        assert _quadrant_label(14, 12, 18, 18) == "southeast"
 
     def test_northwest(self):
         # x < center, y < center
-        assert _quadrant_label(5, 10) == "northwest"
+        assert _quadrant_label(3, 4, 18, 18) == "northwest"
 
     def test_southwest(self):
         # x < center, y >= center
-        assert _quadrant_label(3, 30) == "southwest"
+        assert _quadrant_label(2, 15, 18, 18) == "southwest"
 
     def test_center_goes_southeast(self):
-        # Exactly at center: x >= 16, y >= 16
-        assert _quadrant_label(16, 16) == "southeast"
+        # Exactly at center (9,9): x >= 9, y >= 9
+        assert _quadrant_label(9, 9, 18, 18) == "southeast"
 
     def test_center_x_north(self):
         # x == center, y < center
-        assert _quadrant_label(16, 0) == "northeast"
+        assert _quadrant_label(9, 0, 18, 18) == "northeast"
+
+    def test_center_is_dynamic_on_larger_grid(self):
+        # x=12 sits west of a 33-grid center (16) but east of an 18-grid center
+        # (9) — so the same point flips quadrants with the size, proving the
+        # center is derived from the dimensions rather than hardcoded.
+        assert _quadrant_label(12, 5, 33, 33) == "northwest"
+        assert _quadrant_label(12, 5, 18, 18) == "northeast"
 
 
 # ---- _number_deploy_dupes ----

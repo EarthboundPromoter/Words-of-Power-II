@@ -10,6 +10,13 @@ an early work-in-progress RW3 port — expect frequent changes.
   numbering rather than continuing the Rift Wizard 2 line's count.
 
 ### Fixed
+- **Deploy quadrant overview now reports the correct quadrants.** The map-center
+  used to label northeast/southeast/southwest/northwest was still set for Rift
+  Wizard 2's larger 33x33 grid, so on RW3's 18x18 board nearly everything was
+  announced as "northwest." The center is now taken from the level's own size, so
+  entities are spread across the right quadrants.
+- **Rifts no longer clutter the deploy overview.** They were being listed per-rift
+  even though they're inert until the level is cleared; they're now omitted.
 - **Buff pop-up tooltips now read their full effect.** When cycling a spell's
   tooltips (e.g. on Healing Light), the buffs that pop up were reading as a bare
   name because their effect text lives in different places depending on the buff:

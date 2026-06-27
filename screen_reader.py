@@ -6120,7 +6120,7 @@ if _PyGameView is not None:
             for unit in level.units:
                 if not Level.are_hostile(player, unit):
                     continue
-                q = _quadrant_label(unit.x, unit.y)
+                q = _quadrant_label(unit.x, unit.y, level.width, level.height)
                 if getattr(unit, 'is_lair', False):
                     quads[q]["spawners"] += 1
                 else:
@@ -6134,13 +6134,16 @@ if _PyGameView is not None:
                 if prop is None:
                     continue
                 cls = type(prop).__name__
-                q = _quadrant_label(tile.x, tile.y)
+                # Rifts are inert until the level is cleared — omit from the census.
+                # Skip before the quadrant/fallback logic so they aren't read at all
+                # (the open fallback below would otherwise speak their "Rift" name).
+                if hasattr(prop, 'level_gen_params'):
+                    continue
+                q = _quadrant_label(tile.x, tile.y, level.width, level.height)
                 if cls == 'MemoryOrb':
                     orb_counts[q] = orb_counts.get(q, 0) + 1
                 elif cls in ('ComponentPickup', 'HeartDot'):
                     pickup_counts[q] = pickup_counts.get(q, 0) + 1
-                elif hasattr(prop, 'level_gen_params'):
-                    quads[q]["props"].append("rift")
                 elif cls == 'Shop' or hasattr(prop, 'shop_type') or hasattr(prop, 'items'):
                     quads[q]["props"].append("shop")
                 else:
@@ -6231,7 +6234,7 @@ if _PyGameView is not None:
             view.try_examine_tile(view.deploy_target)
 
             # Announce: "Jumped to: Name, quadrant"
-            quadrant = _quadrant_label(x, y)
+            quadrant = _quadrant_label(x, y, level.width, level.height)
             coord_tag = f" ({x},{y})" if cfg.show_coordinates else ""
             text = f"Jumped to: {ename}, {quadrant}{coord_tag}"
             log(f"[Deploy] Cycle {_DEPLOY_CAT_NAMES.get(category, '?')} [{idx+1}/{len(items)}]: {text}")
