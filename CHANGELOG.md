@@ -3,6 +3,21 @@
 All notable changes to **Words of Power II** are listed here, newest first. This is
 an early work-in-progress RW3 port — expect frequent changes.
 
+## 2026-06-28
+
+### Added
+- **Full README** for the beta: game description, install (zip and clone/pull),
+  what's new in Rift Wizard 3 vs. Rift Wizard 2, how the narration differs, a complete
+  keybind reference (mod keys and the game's own, split by screen), reporting/feedback
+  channels, known issues, and privacy/credits.
+
+### Removed
+- **Bundled `accessible_output2` library** (and its driver DLLs) deleted — the mod
+  speaks through Tolk with a direct-NVDA fallback and never imported it.
+- **`telemetry.py` removed from distribution.** It was a dev-only, local-disk analysis
+  tool with no network code; it is no longer shipped, so the privacy notice that it
+  isn't in release downloads is now accurate.
+
 ## 2026-06-27
 
 ### Added

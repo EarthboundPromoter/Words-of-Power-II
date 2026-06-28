@@ -4,6 +4,7 @@ __pycache__/
 *.log
 logs/
 telemetry/
+telemetry.py
 telemetry_enabled
 
 # Internal dev docs (kept locally, out of the public repo)
