@@ -1008,3 +1008,79 @@ def test_producer_proximity_orders_and_gates():
     # Hidden Imp is behind the gate.
     assert "Out of sight." in text
     assert text.index("Aelf") < text.index("Out of sight.") < text.index("Imp")
+
+
+# ---- Stage C: death capstones (R1) ----
+
+
+def _death_rec(seq, parent, target):
+    return {'sequence': seq, 'parent': parent, 'event_type': 'EventOnDeath',
+            'payload': {'target': target, 'killing_damage': None,
+                        'killing_dtype': None, 'killing_source': None},
+            'marks': []}
+
+
+def test_cast_kill_capstones_the_cast_line():
+    """An enemy cast that kills its target rides a ', killed' capstone."""
+    goblin = _enemy_snap(uid=300, name='Goblin', x=5, y=5)
+    chain = _enemy_cast_chain(10, _enemy_snap(name='Aelf', x=3, y=4),
+                              'Lightning Bolt', goblin, 6, 'Lightning')
+    chain.append(_death_rec(13, 10, goblin))
+    line = _render_action_chain(chain, wizard_team=0, show_coords=True,
+                                movement_verbose=False)
+    assert line == "Aelf (3,4) cast Lightning Bolt at Goblin (5,5), 6 Lightning, killed."
+
+
+def test_dot_death_capstones_tick_and_drops_duration():
+    """A DOT that kills capstones the tick line and suppresses the countdown
+    (the dead unit has no remaining duration)."""
+    g = _enemy_snap(uid=200, name='Goblin', x=3, y=4)
+    records = _bleed_stack(10, g, 2)
+    records.append(_death_rec(12, 10, g))
+    idx = _build_index(records)
+    lines = _tick_lines(records, idx)
+    assert lines == ["Goblin (3,4) Bleed: 3 Physical, killed."]
+
+
+def test_standalone_causeless_death_renders_died():
+    """A death with no rendered cause (silent transformation/dismissal) gets
+    a short standalone 'died' line."""
+    p = _OrphanProducer()
+
+    def noop(_): pass
+
+    dead = _enemy_snap(uid=500, name='Imp', x=6, y=6)
+    rec = {'sequence': 10, 'parent': None, 'event_type': 'EventOnDeath',
+           'payload': {'target': dead, 'is_silent_kill': True}, 'marks': []}
+    section = p.fire([rec], show_coords=True, movement_verbose=False,
+                     log_fn=noop, telemetry=None)
+    assert section[1] == "Imp (6,6) died."
+
+
+def test_aoe_multi_kill_counts_deaths():
+    """An AoE that kills several of one group reads ', N killed'."""
+    g1 = _enemy_snap(uid=301, name='Goblin', x=5, y=5)
+    g2 = _enemy_snap(uid=302, name='Goblin', x=6, y=5)
+    g3 = _enemy_snap(uid=303, name='Goblin', x=7, y=5)
+    caster = _enemy_snap(name='Aelf', x=1, y=1)
+    chain = [
+        {'sequence': 10, 'parent': None, 'event_type': 'cast_begin',
+         'payload': {'caster': caster,
+                     'spell': {'name': 'Fireball', 'melee': False},
+                     'is_player': False, 'pay_costs': True}, 'marks': []},
+    ]
+    seq = 11
+    for g in (g1, g2, g3):
+        chain.append({'sequence': seq, 'parent': 10,
+                      'event_type': 'EventOnDamaged',
+                      'payload': {'target': g, 'damage': 9,
+                                  'damage_type': 'Fire',
+                                  'source_name': 'Fireball'}, 'marks': []})
+        seq += 1
+    # Two of the three die.
+    chain.append(_death_rec(seq, 10, g1))
+    chain.append(_death_rec(seq + 1, 10, g2))
+    line = _render_action_chain(chain, wizard_team=0, show_coords=True,
+                                movement_verbose=False)
+    assert "3 Goblins" in line
+    assert "9 Fire, 2 killed." in line

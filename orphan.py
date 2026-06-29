@@ -391,12 +391,40 @@ def _build_action_signature(chain):
             'damage', target_id, target.get('name'), dtype, damage)
 
 
-def _render_foreign_damage(records, wizard_team, show_coords):
+def _deaths_in_chain(chain):
+    """Map target id -> death target snapshot for EventOnDeath records in a
+    chain. A non-player death rides the line that describes its cause (R1
+    death model, P12 causal fidelity): the producer capstones the damage
+    clause whose target died rather than emitting a separate 'N killed' tier."""
+    deaths = {}
+    for r in chain:
+        if r.get('event_type') != 'EventOnDeath':
+            continue
+        t = (r.get('payload') or {}).get('target') or {}
+        tid = t.get('id')
+        if tid is not None:
+            deaths[tid] = t
+    return deaths
+
+
+def _killed_suffix(n):
+    """The death capstone appended to a damage clause: ', killed' for one
+    death, ', N killed' for several (the count is the tactical magnitude)."""
+    if n <= 0:
+        return ""
+    if n == 1:
+        return ", killed"
+    return f", {n} killed"
+
+
+def _render_foreign_damage(records, wizard_team, show_coords, dead_ids=None):
     """Render damage whose source differs from the enclosing chain's caster
     (e.g. a player's reactive gear proc firing DURING an enemy cast)
     attributed to its OWN source, via the game-convention helper — instead
     of being folded into the caster's spell line. Wizard-targeted foreign
-    damage belongs to crisis, so it is skipped here."""
+    damage belongs to crisis, so it is skipped here. A foreign hit that
+    killed its target carries the death capstone."""
+    dead_ids = dead_ids or set()
     lines = []
     for r in records:
         p = r.get('payload') or {}
@@ -415,7 +443,8 @@ def _render_foreign_damage(records, wizard_team, show_coords):
             source_buff_type=p.get('source_buff_type'),
         )
         if line:
-            lines.append(line + ".")
+            killed = ", killed" if target.get('id') in dead_ids else ""
+            lines.append(line + killed + ".")
     return lines
 
 
@@ -473,12 +502,31 @@ def _render_action_chain(chain, wizard_team, show_coords, movement_verbose):
             and not caster_moved:
         return None
 
+    # Deaths in this chain ride their cause line (the own-damage clause, or a
+    # foreign-proc clause). A death whose target took no rendered damage in
+    # this chain (e.g. a status/transformation death triggered by the cast)
+    # falls through to a short standalone "died" sentence.
+    deaths = _deaths_in_chain(chain)
+    dead_ids = set(deaths)
+
     main = _render_cast_line(chain, caster, spell_name, melee, caster_id,
                              own_damage, wizard_team, show_coords,
-                             movement_verbose)
+                             movement_verbose, dead_ids)
     foreign_lines = _render_foreign_damage(
-        foreign_damage, wizard_team, show_coords)
-    parts = [p for p in ([main] + foreign_lines) if p]
+        foreign_damage, wizard_team, show_coords, dead_ids)
+
+    covered = set()
+    for r in own_damage + foreign_damage:
+        tid = ((r.get('payload') or {}).get('target') or {}).get('id')
+        if tid is not None:
+            covered.add(tid)
+    death_lines = [
+        f"{_name_with_coord(snap, wizard_team, show_coords)} died."
+        for tid, snap in deaths.items()
+        if tid not in covered and not _is_wizard_snap(snap)
+    ]
+
+    parts = [p for p in ([main] + foreign_lines + death_lines) if p]
     if not parts:
         return None
     return " ".join(parts)
@@ -486,10 +534,12 @@ def _render_action_chain(chain, wizard_team, show_coords, movement_verbose):
 
 def _render_cast_line(chain, caster, spell_name, melee, caster_id,
                       damage_events, wizard_team, show_coords,
-                      movement_verbose):
+                      movement_verbose, dead_ids=None):
     """The caster's own action line (verb + targets), over the chain's OWN
-    damage events. Extracted verbatim from the original _render_action_chain
-    so no-foreign chains render byte-identically."""
+    damage events. A target that died carries the death capstone (', killed'
+    single / ', N killed' for an AoE group). dead_ids is the set of unit ids
+    that died in this chain."""
+    dead_ids = dead_ids or set()
     # Movement-via-cast: chain has EventOnMoved on the caster but no
     # damage (Frog Hop, Dash, Blink-style enemy spells). Verbose flag
     # controls whether the caster's pre-move starting position is
@@ -534,9 +584,10 @@ def _render_cast_line(chain, caster, spell_name, melee, caster_id,
         damage = dpayload.get('damage', 0)
         dtype = dpayload.get('damage_type')
         dtype_str = f" {dtype}" if dtype else ""
+        killed = _killed_suffix(1 if target.get('id') in dead_ids else 0)
         if melee:
-            return f"{caster_str} hit {target_str}, {damage}{dtype_str}."
-        return f"{caster_str} cast {spell_name} at {target_str}, {damage}{dtype_str}."
+            return f"{caster_str} hit {target_str}, {damage}{dtype_str}{killed}."
+        return f"{caster_str} cast {spell_name} at {target_str}, {damage}{dtype_str}{killed}."
 
     # Multi-target AoE chain. Group by (target_name, dtype, damage).
     groups = {}
@@ -556,15 +607,17 @@ def _render_cast_line(chain, caster, spell_name, melee, caster_id,
         target_name, _tier, dtype, damage = key
         members = groups[key]
         dtype_str = f" {dtype}" if dtype else ""
+        killed = _killed_suffix(
+            sum(1 for m in members if m.get('id') in dead_ids))
         if len(members) == 1:
             target_str = _name_with_coord(members[0], wizard_team, show_coords)
-            parts.append(f"{target_str}, {damage}{dtype_str}")
+            parts.append(f"{target_str}, {damage}{dtype_str}{killed}")
         else:
             plural = _pluralize(target_name or 'enemy')
             prefix = _team_prefix(members[0], wizard_team)
             coords = _coord_list(members, show_coords)
             parts.append(
-                f"{len(members)} {prefix}{plural}{coords}, {damage}{dtype_str}"
+                f"{len(members)} {prefix}{plural}{coords}, {damage}{dtype_str}{killed}"
             )
     targets_clause = "; ".join(parts)
     if melee:
@@ -733,12 +786,18 @@ def _render_collapsed_action(items, wizard_team, show_coords, movement_verbose):
     coords = _coord_list(casters, show_coords)
     casters_str = f"{len(items)} {prefix}{plural}{coords}"
 
+    # The collapse signature keys on a single target id, so every chain in the
+    # group hit the same unit; one death capstone covers them all.
+    dead = any(target.get('id') in _deaths_in_chain(chain)
+               for _root, chain in items)
+    killed = ", killed" if dead else ""
+
     target_str = _name_with_coord(target, wizard_team, show_coords)
     if melee:
-        return f"{casters_str} hit {target_str}, {damage}{dtype_str} each."
+        return f"{casters_str} hit {target_str}, {damage}{dtype_str} each{killed}."
     return (
         f"{casters_str} cast {spell_name} at {target_str},"
-        f" {damage}{dtype_str} each."
+        f" {damage}{dtype_str} each{killed}."
     )
 
 
@@ -771,9 +830,11 @@ def _render_status_ticks(records, idx, wizard_team, show_coords):
     # targets by their per-target total for the "N enemies ... each" collapse.
     per_target = {}   # (buff_name, target_id, dtype) -> accumulator
     pt_order = []
+    dot_dead_ids = set()  # targets a DOT killed this turn (death capstone)
 
     for root in buff_tick_roots:
         chain = _gather_chain(records, root, idx)
+        dot_dead_ids.update(_deaths_in_chain(chain))
         for rec in chain:
             if rec.get('event_type') != 'EventOnDamaged':
                 continue
@@ -807,34 +868,44 @@ def _render_status_ticks(records, idx, wizard_team, show_coords):
                 _claim(rec)
                 claimed.append(rec)
 
+    # A DOT that killed its target capstones the tick line; `died` enters the
+    # sig so a dead target never merges with a still-living one carrying the
+    # same damage (the death is the salient distinction, and the killed unit
+    # has no remaining duration to renotify).
     dot_groups = {}
     dot_order = []
     for key in pt_order:
         acc = per_target[key]
         t = acc['target']
+        died = t.get('id') in dot_dead_ids
         sig = (acc['buff_name'], t.get('name'), t.get('tier'),
-               acc['dtype'], acc['damage'], acc['turns'])
+               acc['dtype'], acc['damage'], acc['turns'], died)
         if sig not in dot_groups:
             dot_order.append(sig)
             dot_groups[sig] = []
         dot_groups[sig].append(t)
 
     for sig in dot_order:
-        buff_name, target_name, _tier, dtype, damage, turns = sig
+        buff_name, target_name, _tier, dtype, damage, turns, died = sig
         members = dot_groups[sig]
         dtype_str = f" {dtype}" if dtype else ""
-        turns_str = f", {turns} turns left" if turns and turns > 0 else ""
+        # A killed target has no live duration left, so suppress the countdown
+        # in favor of the death capstone.
+        turns_str = ("" if died
+                     else (f", {turns} turns left" if turns and turns > 0 else ""))
         if len(members) == 1:
+            killed = _killed_suffix(1 if died else 0)
             target_str = _name_with_coord(members[0], wizard_team, show_coords)
             out_items.append(_make_item(RANK_STATUS, [members[0]],
-                f"{target_str} {buff_name}: {damage}{dtype_str}{turns_str}."))
+                f"{target_str} {buff_name}: {damage}{dtype_str}{turns_str}{killed}."))
         else:
+            killed = _killed_suffix(len(members) if died else 0)
             plural = _pluralize(target_name or 'enemy')
             prefix = _team_prefix(members[0], wizard_team)
             coords = _coord_list(members, show_coords)
             out_items.append(_make_item(RANK_STATUS, members,
                 f"{len(members)} {prefix}{plural}{coords} {buff_name}:"
-                f" {damage}{dtype_str} each{turns_str}."))
+                f" {damage}{dtype_str} each{turns_str}{killed}."))
 
     # Buff fades on non-wizard targets — natural duration expiry.
     fade_roots = [
@@ -901,6 +972,36 @@ def _render_status_ticks(records, idx, wizard_team, show_coords):
         _claim(rec)
         claimed.append(rec)
 
+    return out_items, claimed
+
+
+# ======================================================================
+# Section 4: causeless deaths (the death-capstone fallback)
+# ======================================================================
+
+
+def _render_standalone_deaths(records, wizard_team, show_coords):
+    """Deaths with no rendered cause line this turn — a transformation /
+    dismissal (the game's silent kill) or a death whose cause the journal
+    didn't capture. In-chain deaths ride their cause line as a capstone (the
+    action/status sections claim those records first); only what's left
+    reaches here, rendered as a short standalone 'X died.' so an ambient death
+    is never silent. Wizard death is crisis/digest territory and is skipped.
+    Returns (items, claimed_records)."""
+    out_items = []
+    claimed = []
+    for r in records:
+        if r.get('event_type') != 'EventOnDeath':
+            continue
+        if _is_claimed_by_other(r) or _has_mark(r, ORPHAN_MARK):
+            continue
+        t = (r.get('payload') or {}).get('target') or {}
+        if _is_wizard_snap(t):
+            continue
+        name_str = _name_with_coord(t, wizard_team, show_coords)
+        out_items.append(_make_item(RANK_STATUS, [t], f"{name_str} died."))
+        _claim(r)
+        claimed.append(r)
     return out_items, claimed
 
 
@@ -1018,8 +1119,12 @@ class _OrphanProducer:
         bare_items, _bare_claimed = _render_bare_effect_section(
             new_records, wizard_team, show_coords
         )
+        # Causeless deaths the cause sections didn't already capstone.
+        death_items, _death_claimed = _render_standalone_deaths(
+            new_records, wizard_team, show_coords
+        )
 
-        all_items = action_items + tick_items + bare_items
+        all_items = action_items + tick_items + bare_items + death_items
         text = _assemble_items(all_items, wizard_pos, los_grouping)
 
         if telemetry is not None:
