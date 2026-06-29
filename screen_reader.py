@@ -4758,7 +4758,15 @@ if _PyGameView is not None:
             _last_examine_xy[0] = xy
 
             if getattr(self.game, 'deploying', False):
-                _announce_deploy_tile(self, point)
+                # Only announce the actual deploy cursor. The game also
+                # examines other tiles during deploy (a non-deploy keypress
+                # such as T/B re-examines the default center tile — (9,9) on
+                # the 18x18 grid), which otherwise spoke a phantom "chasm
+                # (9,9)" before every Threat/Space query. Skip any examine
+                # that isn't the deploy cursor itself.
+                dt = getattr(self, 'deploy_target', None)
+                if dt is None or (point.x, point.y) == (dt.x, dt.y):
+                    _announce_deploy_tile(self, point)
             else:
                 spell = getattr(self, 'cur_spell', None)
                 if spell is not None and type(spell).__name__ == 'LookSpell':
