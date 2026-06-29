@@ -252,12 +252,12 @@ def test_equipment_chain_subcast_killed_verb():
         },
     ]
     lines = _render_equipment_chain(chain, wizard_team=0, show_coords=True)
-    # New digest-style form: Killed section count-led header. Hit damage
-    # uses pre-cap value (30, the post-resist amount before HP truncation)
-    # per the digest convention for kill lines.
+    # Killed section count-led header. The kill-line damage is the CLAMPED
+    # actually-dealt amount (EventOnDamaged.damage = 2), matching the game's
+    # combat log, not the pre-clamp post-resist 30.
     assert lines == [
         "Explosive Spore Manual cast Combust Poison."
-        " 1 killed: Orc (13,5): Combust Poison 30 Fire."
+        " 1 killed: Orc (13,5): Combust Poison 2 Fire."
     ]
 
 
@@ -451,12 +451,14 @@ def test_equipment_chain_subcast_mixed_kills_resists():
         },
     ]
     lines = _render_equipment_chain(chain, wizard_team=0, show_coords=True)
-    # Both Orcs share post-resist damage 30 and same target name, so they
-    # collapse in the Killed section. Hell Hound lands in the Resisted
-    # outcome (single, no count header).
+    # The Orcs share the same NOMINAL hit (post-resist 30) but took DIFFERENT
+    # actual damage — Orc A had 2 HP left (dealt 2), Orc B had 20 (dealt 20).
+    # Since the kill line speaks the clamped actually-dealt amount, they no
+    # longer merge: each renders with its own damage. Hell Hound full-resisted.
     assert lines == [
         "Explosive Spore Manual cast Combust Poison."
-        " 2 killed: 2 Orcs at (13,5), (14,5): Combust Poison 30 Fire."
+        " 2 killed: Orc (13,5): Combust Poison 2 Fire."
+        " Orc (14,5): Combust Poison 20 Fire."
         " Hell Hound (15,5) resisted."
     ]
 

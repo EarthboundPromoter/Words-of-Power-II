@@ -897,11 +897,12 @@ def test_compose_killed_section_single_minion_kill():
     assert compose_killed_section(chain) == expected
 
 
-def test_compose_killed_section_kill_uses_pre_cap_damage():
-    """Killing-blow damage is capped at remaining HP in EventOnDamaged,
-    but the digest uses PreDamaged.damage_post_resist (the spec damage,
-    pre-cap) for rendering. A 7-HP goblin hit by a 32-damage Fireball
-    renders as 32, not 7."""
+def test_compose_killed_section_kill_uses_clamped_damage():
+    """A killing blow's damage is clamped to the target's remaining HP in
+    EventOnDamaged, and that clamped value is what the game's own combat log
+    prints — so the digest reports it too (matching RW2 and the crisis/orphan
+    producers). A 7-HP goblin hit by a 32-damage Fireball renders as 7, not the
+    pre-clamp 32."""
     target = _target_snap(1, name="Goblin", x=5, y=5, max_hp=7)
     chain = [
         _player_cast(1, spell_name="Fireball"),
@@ -912,7 +913,7 @@ def test_compose_killed_section_kill_uses_pre_cap_damage():
         _death(4, 1, target, killing_damage=7, killing_dtype="Fire",
                killing_source="Fireball"),
     ]
-    expected = "1 killed: Goblin (5,5): Fireball 32 Fire."
+    expected = "1 killed: Goblin (5,5): Fireball 7 Fire."
     assert compose_killed_section(chain) == expected
 
 

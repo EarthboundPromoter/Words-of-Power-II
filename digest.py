@@ -409,13 +409,30 @@ def _build_target_hits(chain):
     return hits_by_target
 
 
+def _displayed_damage(hit):
+    """The damage number to SPEAK for a landed hit: the actually-dealt amount
+    (EventOnDamaged.damage — post-resist AND clamped to the target's remaining
+    HP at the killing blow), which is what the game's own combat log prints.
+    Falls back to the pre-clamp post-resist value only if the dealt amount
+    wasn't captured. For a survivor the two are identical (no clamp); only an
+    overkill kill-line differs, and there the clamped value is what RW2 and the
+    crisis/orphan producers already show. Resist/vulnerability tags are derived
+    separately (pre vs post) and are unaffected."""
+    dealt = hit.get('damage_dealt')
+    return dealt if dealt is not None else hit.get('damage_post_resist')
+
+
 def _hit_signature(hits):
     """Equivalence-class signature for a target's hit history. Two targets
     merge iff their signatures match exactly (per design_digest_phrasing.md
-    'no-approximation' rule). Buff/debuff state will extend this signature
-    in a follow-up commit."""
+    'no-approximation' rule). Keyed on the DISPLAYED (clamped) damage so the
+    merge agrees with what is spoken: survivors are unaffected (no HP clamp, so
+    dealt == post-resist), but two overkilled units that took DIFFERENT actual
+    damage (different remaining HP) no longer merge into one line with a single
+    arbitrary number. Buff/debuff state will extend this signature in a
+    follow-up commit."""
     return tuple(
-        (h.get('spell'), h.get('dtype'), h.get('damage_post_resist'),
+        (h.get('spell'), h.get('dtype'), _displayed_damage(h),
          h.get('resisted'), h.get('shielded'))
         for h in hits
     )
@@ -436,7 +453,7 @@ def _format_hits(hits):
             continue
         spell = hit.get('spell')
         dtype = hit.get('dtype')
-        damage = hit.get('damage_post_resist')
+        damage = _displayed_damage(hit)
         if spell is None or damage is None:
             continue
         key = (spell, dtype)
@@ -638,7 +655,7 @@ def _format_hits_with_outcome(hits):
             continue
         spell = hit.get('spell')
         dtype = hit.get('dtype')
-        damage = hit.get('damage_post_resist')
+        damage = _displayed_damage(hit)
         if spell is None or damage is None:
             continue
         key = (spell, dtype)
@@ -1528,7 +1545,7 @@ def _compose_streamlined(chain):
     x, y = target_snap.get('x'), target_snap.get('y')
     is_kill = target_id in deaths
     verb = "killed" if is_kill else "hit"
-    damage = hit.get('damage_post_resist')
+    damage = _displayed_damage(hit)
     dtype = hit.get('dtype')
     dtype_str = f" {dtype}" if dtype else ""
     line = f"{cast_verb} {spell_name}, {verb} {target_name} ({x},{y}), {damage}{dtype_str}."
