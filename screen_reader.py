@@ -178,6 +178,22 @@ _SETTINGS_SCHEMA = [
      "# (20,9), ...' Useful when tracking exact enemy positions matters.\n"
      "# Default: false (noise reduction; flip true for full spatial\n"
      "# detail)."),
+    ('Composer', 'spawn_coord_cap', '5',
+     "# How many spawned units a wave lists by exact position before it\n"
+     "# switches to a directional summary. At or below the cap, the orphan\n"
+     "# composer speaks each tile ('3 Ash Imps spawned at (4,4), (5,3),\n"
+     "# (4,5).'); above it, a top-two-direction summary ('7 Bats spawned, 5\n"
+     "# north, 2 southeast.' or '... scattered.'). Set 0 to always summarize,\n"
+     "# a high number to always list tiles.\n"
+     "# Default: 5"),
+    ('Composer', 'orphan_los_grouping', 'section',
+     "# Where the 'Out of sight.' transition is spoken in the ambient body.\n"
+     "# In-sight enemy/ally/status lines always lead (nearest first); out-of-\n"
+     "# sight lines trail. 'section' (default) speaks one 'Out of sight.' gate\n"
+     "# between the two halves (fewest words). 'block' repeats it before each\n"
+     "# of the enemy / ally / status groups. 'line' tags each out-of-sight\n"
+     "# line individually.\n"
+     "# Default: section"),
 ]
 
 
@@ -271,8 +287,16 @@ class _Cfg:
     dot_renotify_enabled = _settings.getboolean('Composer', 'dot_renotify_enabled', fallback=False)
     crisis_damage_summed = _settings.getboolean('Composer', 'crisis_damage_summed', fallback=False)
     movement_verbose = _settings.getboolean('Composer', 'movement_verbose', fallback=False)
+    spawn_coord_cap = _settings.getint('Composer', 'spawn_coord_cap', fallback=5)
+    orphan_los_grouping = _settings.get(
+        'Composer', 'orphan_los_grouping', fallback='section'
+    ).strip().lower()
 
 cfg = _Cfg()
+if cfg.orphan_los_grouping not in ('section', 'block', 'line'):
+    cfg.orphan_los_grouping = 'section'
+if cfg.spawn_coord_cap < 0:
+    cfg.spawn_coord_cap = 5
 log(f"[Settings] show_coordinates = {cfg.show_coordinates}")
 log(f"[Settings] pathfind_marked = {cfg.pathfind_marked}")
 log(f"[Settings] journal_log_enabled = {cfg.journal_log_enabled}")
@@ -283,6 +307,8 @@ log(f"[Settings] equipment_enabled = {cfg.equipment_enabled}")
 log(f"[Settings] legacy_batcher_combat_enabled = {cfg.legacy_batcher_combat_enabled}")
 log(f"[Settings] dot_renotify_enabled = {cfg.dot_renotify_enabled}")
 log(f"[Settings] movement_verbose = {cfg.movement_verbose}")
+log(f"[Settings] spawn_coord_cap = {cfg.spawn_coord_cap}")
+log(f"[Settings] orphan_los_grouping = {cfg.orphan_los_grouping}")
 
 
 def _legacy_combat_off():
@@ -1709,6 +1735,13 @@ def on_death(event):
                 is_expired = False
                 fallback = f"{name}{coord_tag} killed"
             log(f"[Death] {_log_ctx()} {fallback}")
+            if _legacy_combat_off():
+                # Combat narration is the pipeline's now: the orphan composer
+                # capstones in-chain / DOT / cloud kills and standalone-renders
+                # causeless deaths; the digest's Killed section covers
+                # player-caused kills. The batcher death branch would double
+                # them, so it bows out (the player "You died" path above stays).
+                return
             # Player-caused kills → QUEUED for salience (adjacent to damage output)
             killed_by_player = False
             if event.damage_event is not None:
@@ -2272,6 +2305,12 @@ def _on_unit_added_spawn(evt):
     try:
         unit = evt.unit
         if _level_complete[0]:
+            return
+        if _legacy_combat_off():
+            # The orphan composer now narrates ambient spawns (on-cast summon
+            # capstone, spawn-on-death, buff/generator adds); the digest's
+            # Spawned section covers in-chain player spawns. This batcher
+            # branch would double them.
             return
         game = _game_ref[0]
         if game is None or game.p1 is None:
