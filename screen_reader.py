@@ -2778,6 +2778,19 @@ if _PyGameView is not None:
             except Exception as e:
                 log(f"[Select Item] Error: {e}")
             return
+        # Depleted spell: charges are NOT a pay_cost (can_pay_costs checks
+        # only HP/SP), so the game still "selects" a 0-charge spell for
+        # targeting — but the cast will fail. Reading its range/shape as if
+        # it were ready is misleading; name it and say depleted, nothing
+        # more. (Reviewing a depleted spell's full detail in the character
+        # sheet is a separate, deliberate path and stays verbose.)
+        _cur_charges, _ = _get_charge_info(spell)
+        if _cur_charges == 0:
+            _original_choose_spell(self, spell)
+            text = f"{_name(spell)}, depleted"
+            async_tts.speak(text)
+            log(f"[Select] {text}")
+            return
         cost_ok = spell.can_pay_costs()
         reason = "" if cost_ok else _get_cost_failure_reason(spell)
         _original_choose_spell(self, spell)

@@ -18,6 +18,10 @@ an early work-in-progress RW3 port — expect frequent changes.
   post-purchase character-sheet summary is only spoken when you're actually on the sheet,
   the confirm prompt is read through the normal text cleaner, and a selection with nothing
   describable now says "Nothing selected" instead of leaking a raw value.
+- **A depleted spell no longer reads out as if it's ready to cast.** Selecting a spell with
+  no charges left used to announce its range and shape like any castable spell (the game
+  still lets you start aiming it); it now just says "{name}, depleted" so you know at once
+  not to bother. Reviewing the spell's full detail in the character sheet is unchanged.
 
 ## 2026-06-29 — 0.2.0
 
