@@ -1084,3 +1084,98 @@ def test_aoe_multi_kill_counts_deaths():
                                 movement_verbose=False)
     assert "3 Goblins" in line
     assert "9 Fire, 2 killed." in line
+
+
+# ---- Stage C: spawn rendering (R1) ----
+
+
+def _spawn_rec(seq, parent, unit):
+    return {'sequence': seq, 'parent': parent, 'event_type': 'EventOnUnitAdded',
+            'payload': {'unit': unit}, 'marks': []}
+
+
+def test_on_cast_summon_capstones_cast_line():
+    """An enemy summon spell names the wave it produced on its cast line."""
+    p = _OrphanProducer()
+
+    def noop(_): pass
+
+    caster = _enemy_snap(name='Ash Fiend', x=3, y=4)
+    imp1 = _enemy_snap(uid=601, name='Ash Imp', x=4, y=4)
+    imp2 = _enemy_snap(uid=602, name='Ash Imp', x=5, y=3)
+    chain = [
+        {'sequence': 10, 'parent': None, 'event_type': 'cast_begin',
+         'payload': {'caster': caster,
+                     'spell': {'name': 'Summon Ash Imps', 'melee': False},
+                     'is_player': False, 'pay_costs': True}, 'marks': []},
+        _spawn_rec(11, 10, imp1),
+        _spawn_rec(12, 10, imp2),
+    ]
+    section = p.fire(chain, show_coords=True, movement_verbose=False,
+                     log_fn=noop, telemetry=None)
+    assert section[1] == ("Ash Fiend (3,4) cast Summon Ash Imps. "
+                          "2 Ash Imps spawned at (4,4), (5,3).")
+
+
+def test_causeless_spawn_standalone():
+    """A spawn with no rendered cause (generator/on_advance) gets a standalone
+    spawn line."""
+    p = _OrphanProducer()
+
+    def noop(_): pass
+
+    fly = _enemy_snap(uid=700, name='Fly', x=6, y=6)
+    rec = _spawn_rec(10, None, fly)
+    section = p.fire([rec], show_coords=True, movement_verbose=False,
+                     log_fn=noop, telemetry=None)
+    assert section[1] == "1 Fly spawned at (6,6)."
+
+
+def test_spawn_on_dot_death_renders_both_lines():
+    """A Bag of Bugs killed by a DOT: the tick line capstones the death; the
+    spawned Flies render as their own status line."""
+    p = _OrphanProducer()
+
+    def noop(_): pass
+
+    bag = _enemy_snap(uid=800, name='Bag of Bugs', x=5, y=5)
+    records = _bleed_stack(10, bag, 1)  # buff_tick + EventOnDamaged
+    records.append(_death_rec(12, 10, bag))
+    fly1 = _enemy_snap(uid=801, name='Fly', x=5, y=6)
+    fly2 = _enemy_snap(uid=802, name='Fly', x=6, y=5)
+    records.append(_spawn_rec(13, 10, fly1))
+    records.append(_spawn_rec(14, 10, fly2))
+    section = p.fire(records, show_coords=True, movement_verbose=False,
+                     log_fn=noop, telemetry=None)
+    text = section[1]
+    assert "Bag of Bugs (5,5) Bleed: 3 Physical, killed." in text
+    assert "2 Flies spawned at (5,6), (6,5)." in text
+
+
+def test_large_wave_uses_directional_locality():
+    """Beyond the coord cap, locality is a top-two-direction summary, not a
+    coord list."""
+    p = _OrphanProducer()
+
+    def noop(_): pass
+
+    caster = _enemy_snap(name='Summoner', x=10, y=10)
+    chain = [
+        {'sequence': 10, 'parent': None, 'event_type': 'cast_begin',
+         'payload': {'caster': caster,
+                     'spell': {'name': 'Swarm', 'melee': False},
+                     'is_player': False, 'pay_costs': True}, 'marks': []},
+    ]
+    # 7 bats all to the north of the wizard at (10,10).
+    seq = 11
+    for i in range(7):
+        chain.append(_spawn_rec(seq, 10,
+                     _enemy_snap(uid=900 + i, name='Bat', x=10, y=2 - (i % 3))))
+        seq += 1
+    section = p.fire(chain, show_coords=True, movement_verbose=False,
+                     log_fn=noop, telemetry=None, wizard_pos=(10, 10),
+                     spawn_coord_cap=5)
+    text = section[1]
+    # Past the cap: a directional summary, not a coord list.
+    assert "7 Bats spawned, north." in text
+    assert "Bats spawned at (" not in text

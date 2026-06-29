@@ -25,7 +25,10 @@ else last. This producer respects all prior marks and stamps `orphan_v1`
 on records it renders.
 """
 
-from helpers import _pluralize, source_attributed_line, chebyshev_distance
+from helpers import (
+    _pluralize, source_attributed_line, chebyshev_distance,
+    format_spawn_locality,
+)
 
 
 ORPHAN_MARK = "orphan_v1"
@@ -417,6 +420,58 @@ def _killed_suffix(n):
     return f", {n} killed"
 
 
+def _chain_spawns(chain):
+    """Spawned-unit snapshots (EventOnUnitAdded) in a chain, excluding the
+    wizard and Soul Jars (the latter has its own dedicated UX path). These
+    ride their cause line as a spawn capstone."""
+    out = []
+    for r in chain:
+        if r.get('event_type') != 'EventOnUnitAdded':
+            continue
+        u = (r.get('payload') or {}).get('unit') or {}
+        if _is_wizard_snap(u):
+            continue
+        if 'Soul Jar' in (u.get('name') or ''):
+            continue
+        out.append(u)
+    return out
+
+
+def _spawn_groups(units):
+    """Group spawned units by (name, team), first-seen order preserved."""
+    groups = {}
+    order = []
+    for u in units:
+        key = (u.get('name'), u.get('team'))
+        if key not in groups:
+            order.append(key)
+            groups[key] = []
+        groups[key].append(u)
+    return [(k[0], k[1], groups[k]) for k in order]
+
+
+def _render_spawn_phrase(units, wizard_team, show_coords, wizard_pos,
+                         spawn_coord_cap):
+    """Render spawned units as 'N [Ally ]Type spawned {locality}' clauses,
+    grouped by (name, team) and joined by '; '. Always states count + type
+    (the wave size is the tactical magnitude); locality is scale-tiered via
+    the shared format_spawn_locality (exact coords up to the cap, else a
+    top-two-direction summary). Returns '' when there are no spawns."""
+    if not units:
+        return ""
+    wx, wy = wizard_pos if wizard_pos else (None, None)
+    parts = []
+    for name, team, members in _spawn_groups(units):
+        is_ally = wizard_team is not None and team == wizard_team
+        prefix = "Ally " if is_ally else ""
+        count = len(members)
+        type_str = (name or 'unit') if count == 1 else _pluralize(name or 'unit')
+        locality = format_spawn_locality(members, wx, wy, show_coords,
+                                         spawn_coord_cap)
+        parts.append(f"{count} {prefix}{type_str} spawned{locality}")
+    return "; ".join(parts)
+
+
 def _render_foreign_damage(records, wizard_team, show_coords, dead_ids=None):
     """Render damage whose source differs from the enclosing chain's caster
     (e.g. a player's reactive gear proc firing DURING an enemy cast)
@@ -448,11 +503,13 @@ def _render_foreign_damage(records, wizard_team, show_coords, dead_ids=None):
     return lines
 
 
-def _render_action_chain(chain, wizard_team, show_coords, movement_verbose):
+def _render_action_chain(chain, wizard_team, show_coords, movement_verbose,
+                         wizard_pos=None, spawn_coord_cap=5):
     """Render a single non-player action chain. Normally one line; if the
     chain carries embedded foreign-source damage (a reactive gear proc fired
     during this cast), those hits are attributed to their own source and
-    appended as separate sentences."""
+    appended as separate sentences. An on-cast summon appends a spawn
+    capstone ('... 3 Ash Imps spawned at (...).')."""
     if not chain:
         return None
     root = chain[0]
@@ -526,7 +583,19 @@ def _render_action_chain(chain, wizard_team, show_coords, movement_verbose):
         if tid not in covered and not _is_wizard_snap(snap)
     ]
 
-    parts = [p for p in ([main] + foreign_lines + death_lines) if p]
+    # On-cast summon capstone — names the wave the cast produced (closes the
+    # long-standing "enemy summons unnarrated" gap). Only when the cast line
+    # itself rendered, so the spawn rides a visible cause.
+    spawn_lines = []
+    if main:
+        spawn_phrase = _render_spawn_phrase(
+            _chain_spawns(chain), wizard_team, show_coords, wizard_pos,
+            spawn_coord_cap)
+        if spawn_phrase:
+            spawn_lines.append(spawn_phrase + ".")
+
+    parts = [p for p in ([main] + foreign_lines + death_lines + spawn_lines)
+             if p]
     if not parts:
         return None
     return " ".join(parts)
@@ -626,7 +695,8 @@ def _render_cast_line(chain, caster, spell_name, melee, caster_id,
 
 
 def _render_action_section(records, idx, wizard_team, show_coords,
-                            movement_verbose):
+                            movement_verbose, wizard_pos=None,
+                            spawn_coord_cap=5):
     """Render the non-player actions section. Returns (items, claimed_records).
 
     Walks for non-player cast_begin roots. Single-target chains collapse
@@ -672,7 +742,8 @@ def _render_action_section(records, idx, wizard_team, show_coords,
         is_ally = _is_ally(first_root)
         if len(group) == 1:
             line = _render_action_chain(first_chain, wizard_team,
-                                         show_coords, movement_verbose)
+                                         show_coords, movement_verbose,
+                                         wizard_pos, spawn_coord_cap)
             anchors = [(first_chain[0].get('payload') or {}).get('caster')]
         else:
             line = _render_collapsed_action(group, wizard_team,
@@ -693,7 +764,8 @@ def _render_action_section(records, idx, wizard_team, show_coords,
     for root, chain in standalone_chains:
         is_ally = _is_ally(root)
         line = _render_action_chain(chain, wizard_team, show_coords,
-                                     movement_verbose)
+                                     movement_verbose, wizard_pos,
+                                     spawn_coord_cap)
         if line:
             anchors = [(chain[0].get('payload') or {}).get('caster')]
             out_items.append(_make_item(_rank(is_ally), anchors, line))
@@ -1005,6 +1077,51 @@ def _render_standalone_deaths(records, wizard_team, show_coords):
     return out_items, claimed
 
 
+def _render_spawns(records, idx, wizard_team, show_coords, wizard_pos,
+                   spawn_coord_cap):
+    """Producer-level spawn pass for ambient spawns NOT already capstoned on a
+    cast line — spawn-on-death (from a DOT/cloud chain), generator / on_advance
+    auras, and causeless adds. On-cast summons ride their own cast line (their
+    chain root is an orphan-claimed cast_begin) and are skipped here. Player /
+    gear spawns are owned by digest/crisis/equipment and skipped. One status
+    line per (name, team) group, anchored on its members for proximity
+    ordering. Returns (items, claimed_records)."""
+    out_items = []
+    claimed = []
+    death_ids = {
+        ((r.get('payload') or {}).get('target') or {}).get('id')
+        for r in records if r.get('event_type') == 'EventOnDeath'
+    }
+    pending = []
+    for r in records:
+        if r.get('event_type') != 'EventOnUnitAdded':
+            continue
+        if _is_claimed_by_other(r):
+            continue
+        root = _walk_to_root(r, idx)
+        if (root is not None and root.get('event_type') == 'cast_begin'
+                and _has_mark(root, ORPHAN_MARK)):
+            # Capstoned on its cast line by the action section.
+            continue
+        u = (r.get('payload') or {}).get('unit') or {}
+        if _is_wizard_snap(u) or 'Soul Jar' in (u.get('name') or ''):
+            continue
+        _claim(r)
+        claimed.append(r)
+        # A unit that spawned then died the same turn already reads via its
+        # death line; don't also announce it as a fresh spawn.
+        if u.get('id') in death_ids:
+            continue
+        pending.append(u)
+
+    for name, team, members in _spawn_groups(pending):
+        phrase = _render_spawn_phrase(members, wizard_team, show_coords,
+                                      wizard_pos, spawn_coord_cap)
+        if phrase:
+            out_items.append(_make_item(RANK_STATUS, members, phrase + "."))
+    return out_items, claimed
+
+
 # ======================================================================
 # Producer
 # ======================================================================
@@ -1109,7 +1226,8 @@ class _OrphanProducer:
         wizard_team = _find_wizard_team(journal_records)
 
         action_items, action_claimed = _render_action_section(
-            new_records, idx, wizard_team, show_coords, movement_verbose
+            new_records, idx, wizard_team, show_coords, movement_verbose,
+            wizard_pos, spawn_coord_cap
         )
         tick_items, tick_claimed = _render_status_ticks(
             new_records, idx, wizard_team, show_coords
@@ -1123,8 +1241,16 @@ class _OrphanProducer:
         death_items, _death_claimed = _render_standalone_deaths(
             new_records, wizard_team, show_coords
         )
+        # Spawns not capstoned on a cast line (spawn-on-death, generators,
+        # causeless adds). Runs after the action section so on-cast summons
+        # are already marked.
+        spawn_items, _spawn_claimed = _render_spawns(
+            new_records, idx, wizard_team, show_coords, wizard_pos,
+            spawn_coord_cap
+        )
 
-        all_items = action_items + tick_items + bare_items + death_items
+        all_items = (action_items + tick_items + bare_items + death_items
+                     + spawn_items)
         text = _assemble_items(all_items, wizard_pos, los_grouping)
 
         if telemetry is not None:
