@@ -3,6 +3,57 @@
 All notable changes to **Words of Power II** are listed here, newest first. This is
 an early work-in-progress RW3 port — expect frequent changes.
 
+## 2026-06-29 — 0.2.0
+
+A large rewrite of how combat is narrated. The enemy turn is now spoken as a single,
+coherent report instead of a flat stream, and your gear finally talks. The new
+narration pipeline is now the sole combat voice (the old line-by-line path is retired
+for combat).
+
+### Added
+- **The enemy/ambient turn is now narrated coherently, in priority order.** What
+  enemies and allies do on their turn is composed into one report:
+  - **Nearest threats first.** Lines are ordered by distance from you, and everything
+    out of your line of sight is grouped at the end behind a single "Out of sight" cue,
+    so you can stop listening once the close, visible action is covered.
+  - **Enemy and ally actions** — casts and attacks — with who acted, on whom, for how
+    much, of what type.
+  - **Deaths ride the blow that caused them** — "Aelf cast Lightning Bolt at Goblin,
+    6 Lightning, killed" — instead of a separate, disconnected "killed" line.
+  - **Enemy summons are announced.** "Goblin Spawner cast Summon Goblin. 1 Goblin
+    spawned at (2,4)." Big waves report a count and direction ("7 Bats spawned, 5 north,
+    2 southeast") instead of a wall of coordinates.
+  - **Cloud damage on units away from you** (storm/blizzard clouds hitting enemies or
+    allies off your tile) is now spoken.
+  - **Enemy debuffs on allies and enemy self-buffs** are announced when they land.
+- **Your gear now talks.** Equipment that acts each turn — damage auras, healing auras,
+  status-applying gear (Stone Mask, etc.), and sub-casting items (Explosive Spore
+  Manual) — is narrated in its own slot, right after your action and before the enemy
+  turn. *Freshly enabled — please report anything that sounds off or repetitive.*
+
+### Changed
+- **Damage numbers now match the game.** Overkill is reported as the damage actually
+  dealt, not the spell's full value — a 7-damage hit on a 5-HP enemy reads "5",
+  exactly like the game's own combat log. Resistance and vulnerability are reflected
+  as before.
+
+### Fixed
+- **No more phantom announcements when you enter a level.** The level's enemy roster
+  and your re-applied equipment are no longer narrated as if they had just happened on
+  your first turn.
+- **Fixed silent gaps in busy fights.** A crash in the new narration (triggered on
+  many debuff-cast turns) was quietly dropping the entire enemy-turn report; it now
+  composes reliably.
+- **No more phantom "(9,9)" tile** spoken when you check Threat or Space during deploy.
+- **Clearer attribution of what hits you** — the source and caster of damage and
+  debuffs on you are named more consistently.
+
+### Known issues
+- Gear that acts every turn (a persistent aura) currently repeats its line each turn;
+  a quieter cadence is planned.
+- A few gear effects the game itself never signals — gaining shields each turn, or
+  creating clouds — aren't spoken yet.
+
 ## 2026-06-28
 
 ### Added
