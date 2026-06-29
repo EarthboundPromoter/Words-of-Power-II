@@ -151,7 +151,8 @@ Two sets of keys: the ones the mod adds, and Rift Wizard 3's own. A few things f
 | **Left Ctrl** | Cancel speech. |
 | **Z** | Repeat the last message. |
 | **[** / **]** | Speech history back / forward. |
-| **Shift + /** | Speak the mod's full keybind reference. |
+| **F1** | Open the Words of Power reference (mod keybinds and tips) from any screen — level, menus, shops. |
+| **Shift + /** | Open the Words of Power reference (same as F1). |
 
 **Deploy mode (placement phase before each level)**
 
