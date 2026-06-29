@@ -1,5 +1,5 @@
 # Rift Wizard 2 Screen Reader Mod — Words of Power
-MOD_VERSION = "0.2.0"
+MOD_VERSION = "0.2.5"
 
 import sys
 import os
@@ -5730,7 +5730,7 @@ if _PyGameView is not None:
     def _query_threat(view, scan_level=None, ref_point=None, qualifier=None):
         """T key: Threat vocalization.
         No unit highlighted: 'Safe' or 'Threatened, N. Enemy, direction.'
-        Enemy unit highlighted: 'Threatens you' or 'Can't reach you.'"""
+        Enemy unit highlighted: 'Threatens you' or 'Can't hit you.'"""
         try:
             game = view.game
             if game is None:
@@ -5757,7 +5757,7 @@ if _PyGameView is not None:
                 if _unit_threatens_point(examine, ref_x, ref_y):
                     text = f"{_qp}Threatens you"
                 else:
-                    text = f"{_qp}Can't reach you"
+                    text = f"{_qp}Can't hit you"
                 log(f"[Threat] {_name(examine)}: {text}")
                 async_tts.speak(text)
                 return
@@ -6797,8 +6797,15 @@ if _PyGameView is not None:
                 elif evt.key == pygame.K_b:
                     ref, lvl, qual = _get_scan_reference(self)
                     _query_space(self, scan_level=lvl, ref_point=ref, qualifier=qual)
+                elif evt.key == pygame.K_F1:
+                    # F1 is reserved as the Words of Power entry point (a menu may
+                    # live here later). Opens How to Play jumped to our pages.
+                    _open_mod_help(self)
+                    self.events = [e for e in self.events if not (e.type == pygame.KEYDOWN and e.key == pygame.K_F1)]
                 elif evt.key == pygame.K_SLASH and (pygame.key.get_mods() & pygame.KMOD_SHIFT):
-                    _speak_mod_keybinds()
+                    # Shift+/ now opens the same navigable reference (superseding
+                    # the old flat _speak_mod_keybinds blob).
+                    _open_mod_help(self)
                     # Consume event so game doesn't also open Help screen
                     self.events = [e for e in self.events if not (e.type == pygame.KEYDOWN and e.key == pygame.K_SLASH)]
         except Exception as e:
@@ -7058,6 +7065,8 @@ if _PyGameView is not None:
     _STATE_SETUP_CUSTOM = getattr(_main, 'STATE_SETUP_CUSTOM', 12)
     _STATE_PICK_MUTATOR_PARAMS = getattr(_main, 'STATE_PICK_MUTATOR_PARAMS', 13)
     _STATE_ENTER_MUTATOR_VALUE = getattr(_main, 'STATE_ENTER_MUTATOR_VALUE', 14)
+    _STATE_HOW_TO_PLAY_NAMED = getattr(_main, 'STATE_HOW_TO_PLAY', 18)
+    _STATE_SELECT_LANGUAGE_NAMED = getattr(_main, 'STATE_SELECT_LANGUAGE', 15)
 
     # Human-readable state names for announcement
     _STATE_NAMES = {
@@ -7076,6 +7085,8 @@ if _PyGameView is not None:
         _STATE_SETUP_CUSTOM: "Custom Mutator Setup",
         _STATE_PICK_MUTATOR_PARAMS: "Mutator Parameters",
         _STATE_ENTER_MUTATOR_VALUE: "Enter Mutator Value",
+        _STATE_HOW_TO_PLAY_NAMED: "How to Play",
+        _STATE_SELECT_LANGUAGE_NAMED: "Language",
     }
 
     # States that are NOT YET VOICED — announce "coming soon" on entry
@@ -7099,6 +7110,8 @@ if _PyGameView is not None:
         _STATE_SETUP_CUSTOM,
         _STATE_PICK_MUTATOR_PARAMS,
         _STATE_ENTER_MUTATOR_VALUE,
+        _STATE_HOW_TO_PLAY_NAMED,  # our process_how_to_play_input hook self-announces
+        _STATE_SELECT_LANGUAGE_NAMED,  # our process_language_menu_input hook self-announces
     }
 
     # KEY_BIND constants for keybind resolution
@@ -7247,6 +7260,19 @@ if _PyGameView is not None:
 
             _prev_state[0] = cur
 
+        # Universal F1: open the Words of Power reference from any state that
+        # didn't already consume F1. Level and title handle (and strip) F1 in
+        # their own input handlers, so it's already gone from self.events there;
+        # this central check covers every other screen — shop, character sheet,
+        # options, combat log, confirm dialogs, the menus — from one place.
+        # Excluded only: How to Play itself (you're already in it).
+        if cur != _STATE_HOW_TO_PLAY_NAMED:
+            _evts = getattr(self, 'events', None) or []
+            if any(e.type == pygame.KEYDOWN and e.key == pygame.K_F1 for e in _evts):
+                self.events = [e for e in _evts
+                               if not (e.type == pygame.KEYDOWN and e.key == pygame.K_F1)]
+                _open_mod_help(self)
+
         _original_draw_screen(self, color)
 
     _PyGameView.draw_screen = _patched_draw_screen
@@ -7317,12 +7343,25 @@ if _PyGameView is not None:
                     "Backslash and Backspace for screen reader compatibility. "
                     "Fast Forward has been unbound. "
                     "You can rebind these in Options. "
-                    "Up and down to navigate. Return to select."
+                    "Up and down to navigate. Return to select. "
+                    "Press F1 any time for the Words of Power reference."
                 )
                 log("[State] TITLE entered + keybind migration announcement")
             else:
-                async_tts.speak("Rift Wizard 3. Up and down to navigate. Return to select.")
+                async_tts.speak(
+                    "Rift Wizard 3. Up and down to navigate. Return to select. "
+                    "Press F1 any time for the Words of Power reference."
+                )
                 log("[State] TITLE entered")
+
+        # F1 opens the Words of Power reference from the title screen too. Consume
+        # it and open directly — don't let the original title handler see it.
+        if any(e.type == pygame.KEYDOWN and e.key == pygame.K_F1 for e in self.events):
+            self.events = [e for e in self.events
+                           if not (e.type == pygame.KEYDOWN and e.key == pygame.K_F1)]
+            _sr_title_entered[0] = False  # re-announce title on return from help
+            _open_mod_help(self)
+            return
 
         prev_sel = self.examine_target
         _orig_process_title(self)
@@ -7659,6 +7698,164 @@ if _PyGameView is not None:
 
     _PyGameView.process_combat_log_input = _patched_process_combat_log
     log("  Combat log voicing installed")
+
+    # ---- STATE_SELECT_LANGUAGE (first-run picker AND Options > Language) ----
+    # One screen, two entry points (RiftWizard3.open_language_menu): first launch
+    # with no saved "lang" routes here returning to title; Options routes here
+    # returning to options. Voicing the single process_language_menu_input covers
+    # both — including a blind player's very first interaction with the game.
+    # examine_target holds the highlighted language CODE; Up/Down cycle langs_cache.
+    import Localisation as _loc_lang
+    _STATE_SELECT_LANGUAGE = getattr(_main, 'STATE_SELECT_LANGUAGE', 15)
+    _orig_process_language = _PyGameView.process_language_menu_input
+    _sr_language_entered = [False]
+
+    def _language_label(view):
+        """Display name for the currently highlighted language code."""
+        code = getattr(view, 'examine_target', None)
+        try:
+            return _loc_lang.LANG_DISPLAY_NAME.get(code, code) or str(code)
+        except Exception:
+            return str(code)
+
+    def _patched_process_language(self):
+        if not _sr_language_entered[0]:
+            _sr_language_entered[0] = True
+            label = _language_label(self)
+            async_tts.speak(f"Language. {label}. Up and down to choose, Return to confirm.")
+            log(f"[State] LANGUAGE entered: {label}")
+
+        prev_sel = self.examine_target
+        _orig_process_language(self)
+
+        if self.state != _STATE_SELECT_LANGUAGE:
+            _sr_language_entered[0] = False
+        elif self.examine_target != prev_sel:
+            label = _language_label(self)
+            async_tts.speak(label)
+            log(f"[State] LANGUAGE: {label}")
+
+    _PyGameView.process_language_menu_input = _patched_process_language
+    log("  Language menu voicing installed")
+
+    # ---- STATE_HOW_TO_PLAY (paged help screen) ----
+    # RW3 pages this screen with left/right (and natively maps up/down to paging
+    # too). We add a focus model: up/down navigate by logical unit within a page;
+    # left/right stay paging. To do that we must STRIP up/down KEYDOWNs before
+    # delegating, so RW3's own handler doesn't also page on them. Everything else
+    # (left/right paging, abort, mouse hover) is left to the original.
+    import pygame as _pygame_htp
+    from screen_model import build_how_to_play_model, FocusController
+    import help_content as _help_content
+
+    # Two entry points, one content source:
+    #   * How to Play (native H / menu) APPENDS our pages after the native ones,
+    #     so they're discoverable by paging through the game's own help.
+    #   * F1 / Shift+/ opens a STANDALONE Words of Power screen — our pages only,
+    #     numbered "Page 1 of N" — so it doesn't dump you into "page 5 of 8".
+    # The _mod_help_only flag selects which list get_how_to_play_source_sections
+    # returns. Both the native renderer and our FocusController read that list, so
+    # visual and audible always agree on which mode is showing.
+    _mod_help_only = [False]
+    _orig_get_htp_sections = _PyGameView.get_how_to_play_source_sections
+
+    def _patched_get_htp_sections(self):
+        native = list(_orig_get_htp_sections(self))
+        try:
+            mod_sections = list(_help_content.get_mod_help_sections())
+        except Exception as e:
+            log(f"[Help] mod help sections build failed: {e!r}")
+            mod_sections = []
+        if _mod_help_only[0]:
+            # Standalone F1 screen: our pages only (fall back to native if empty).
+            return mod_sections or native
+        return native + mod_sections
+
+    _PyGameView.get_how_to_play_source_sections = _patched_get_htp_sections
+
+    def _open_mod_help(view):
+        """F1 / Shift+/: open the standalone Words of Power reference (our pages
+        only, starting at page 1). Shared by the level and title screens."""
+        try:
+            _mod_help_only[0] = True
+            view.show_help()
+            view.how_to_play_page = 0
+            view.examine_target = None
+            log("[Help] Words of Power reference opened (standalone)")
+        except Exception as e:
+            _mod_help_only[0] = False
+            log(f"[Help] _open_mod_help failed: {e!r}")
+
+    _STATE_HOW_TO_PLAY = getattr(_main, 'STATE_HOW_TO_PLAY', 18)
+    _KEY_BIND_UP = getattr(_main, 'KEY_BIND_UP', None)
+    _KEY_BIND_DOWN = getattr(_main, 'KEY_BIND_DOWN', None)
+    _orig_process_htp = _PyGameView.process_how_to_play_input
+    # Single-slot mutable state (the install closure can't rebind locals from the
+    # patched fn otherwise). 'ctrl' holds the live FocusController for this visit.
+    _sr_htp = {'entered': False, 'ctrl': None}
+
+    def _patched_process_how_to_play(self):
+        # On first frame in the screen, build the model from RW3's own page data
+        # and announce. Rebuilt each visit so any text/locale change is picked up.
+        if not _sr_htp['entered']:
+            _sr_htp['entered'] = True
+            _sr_htp['ctrl'] = None
+            try:
+                model = build_how_to_play_model(self.get_how_to_play_pages())
+                ctrl = FocusController(
+                    model, screen_label="How to Play",
+                    nav_hint="Up and down to read, left and right to change page.",
+                )
+                ctrl.set_page(getattr(self, 'how_to_play_page', 0) or 0)
+                _sr_htp['ctrl'] = ctrl
+                async_tts.speak(ctrl.enter())
+                log(f"[State] HOW_TO_PLAY entered: page {ctrl.page_index + 1}/{len(model)}")
+            except Exception as e:
+                log(f"[State] HOW_TO_PLAY model build failed: {e!r}")
+
+        ctrl = _sr_htp['ctrl']
+
+        # Pull up/down out of the event stream and run our cursor on them; leave
+        # all other events for the original handler.
+        nav_msg = None
+        remaining = self.events
+        if ctrl is not None:
+            up_keys = self.key_binds.get(_KEY_BIND_UP, []) if _KEY_BIND_UP is not None else []
+            down_keys = self.key_binds.get(_KEY_BIND_DOWN, []) if _KEY_BIND_DOWN is not None else []
+            remaining = []
+            for evt in self.events:
+                if evt.type == _pygame_htp.KEYDOWN and evt.key in up_keys:
+                    nav_msg = ctrl.up()
+                elif evt.type == _pygame_htp.KEYDOWN and evt.key in down_keys:
+                    nav_msg = ctrl.down()
+                else:
+                    remaining.append(evt)
+
+        prev_page = getattr(self, 'how_to_play_page', 0)
+        saved_events = self.events
+        self.events = remaining
+        try:
+            _orig_process_htp(self)
+        finally:
+            self.events = saved_events
+
+        if self.state != _STATE_HOW_TO_PLAY:
+            _sr_htp['entered'] = False
+            _sr_htp['ctrl'] = None
+            _mod_help_only[0] = False  # back to append-mode for the next native open
+            return
+
+        # Page change (left/right/confirm/mouse) wins over any same-frame line nav.
+        new_page = getattr(self, 'how_to_play_page', 0)
+        if ctrl is not None and new_page != prev_page:
+            ctrl.set_page(new_page)
+            async_tts.speak(ctrl.announce_page())
+            log(f"[State] HOW_TO_PLAY page {new_page + 1}")
+        elif nav_msg is not None:
+            async_tts.speak(nav_msg)
+
+    _PyGameView.process_how_to_play_input = _patched_process_how_to_play
+    log("  How to Play voicing installed")
 
     # ---- STATE_REBIND (key rebinding screen) ----
     _orig_process_rebind = _PyGameView.process_key_rebind

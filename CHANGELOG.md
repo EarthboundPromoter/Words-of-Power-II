@@ -3,7 +3,14 @@
 All notable changes to **Words of Power II** are listed here, newest first. This is
 an early work-in-progress RW3 port — expect frequent changes.
 
-## Unreleased
+## 2026-06-29 — 0.2.5
+
+### Added
+- How to Play screen is now voiced, with up/down navigation by line and left/right paging.
+- Words of Power reference: six pages of mod keybinds and tips, appended to the How to Play
+  screen and also available standalone via F1.
+- F1 opens the Words of Power reference from any screen; announced at the title screen.
+- Language selection screen is now voiced (first-run picker and Options, Language).
 
 ### Changed
 - **The mod-enabler tool now finds your game on its own.** `enable_screen_reader`
@@ -31,6 +38,8 @@ an early work-in-progress RW3 port — expect frequent changes.
   no charges left used to announce its range and shape like any castable spell (the game
   still lets you start aiming it); it now just says "{name}, depleted" so you know at once
   not to bother. Reviewing the spell's full detail in the character sheet is unchanged.
+- How to Play and Language screens no longer announce a state number instead of their name.
+- The threat check on an examined enemy now says "can't hit you" instead of "can't reach you".
 
 ## 2026-06-29 — 0.2.0
 
