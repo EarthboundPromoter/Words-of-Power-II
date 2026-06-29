@@ -887,12 +887,14 @@ def _find_wizard_team(chain):
     Spawned section to determine ally classification.
 
     Looks at caster / target / unit / user snapshot fields — same set
-    _find_wizard_id walks. Stops at first match."""
+    _find_wizard_id walks. Stops at first match. The isinstance guard skips
+    string payload fields (e.g. EventOnBuffAttemptApply's generic
+    {'unit': 'Treant'} capture) that would otherwise blow up `.get(...)`."""
     for r in chain:
         payload = r.get('payload') or {}
         for key in ('caster', 'target', 'unit', 'user'):
             snap = payload.get(key)
-            if snap and snap.get('is_player_controlled'):
+            if isinstance(snap, dict) and snap.get('is_player_controlled'):
                 team = snap.get('team')
                 if team is not None:
                     return team

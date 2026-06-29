@@ -277,12 +277,18 @@ def _name_with_coord(unit_snap, wizard_team, show_coords):
 def _find_wizard_team(records):
     """Walk records looking for a player-controlled snapshot to discover
     the wizard's team value. Used for ally classification in line
-    rendering. None if no player-controlled unit appears in the records."""
+    rendering. None if no player-controlled unit appears in the records.
+
+    NB: some events carry STRING payload fields rather than unit snapshots —
+    notably RW3's EventOnBuffAttemptApply, captured generically as
+    {'buff': 'Blind', 'unit': 'Treant', ...}. Scanning all records, those
+    string 'unit' values would blow up `.get(...)`; the isinstance guard skips
+    them (and any other non-snapshot field)."""
     for r in records:
         payload = r.get('payload') or {}
         for key in ('caster', 'target', 'unit', 'user', 'owner'):
             snap = payload.get(key)
-            if snap and snap.get('is_player_controlled'):
+            if isinstance(snap, dict) and snap.get('is_player_controlled'):
                 team = snap.get('team')
                 if team is not None:
                     return team
@@ -485,13 +491,20 @@ def _buff_churn_pairs(records):
     faded = set()
     applied = set()
     for r in records:
-        p = r.get('payload') or {}
-        b = p.get('buff') or {}
-        key = ((p.get('target') or {}).get('id'), b.get('name'))
         et = r.get('event_type')
+        if et not in ('EventOnBuffRemove', 'EventOnBuffApply'):
+            # Skip everything else — notably EventOnBuffAttemptApply, whose
+            # generic capture stores 'buff' as a STRING name, not a snapshot;
+            # `b.get('name')` below would blow up on it.
+            continue
+        p = r.get('payload') or {}
+        b = p.get('buff')
+        if not isinstance(b, dict):
+            continue
+        key = ((p.get('target') or {}).get('id'), b.get('name'))
         if et == 'EventOnBuffRemove':
             faded.add(key)
-        elif et == 'EventOnBuffApply':
+        else:  # EventOnBuffApply
             # Only a genuine fresh re-apply pairs with a fade into churn. A
             # synthesized duration refresh (is_refresh) or spawn-time passive
             # activation (is_silent_activate) must not form a false pair that

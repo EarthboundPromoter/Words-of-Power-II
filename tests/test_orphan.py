@@ -1465,3 +1465,35 @@ def test_silent_activate_apply_does_not_eat_real_fade():
     idx = _build_index(records)
     lines = _tick_lines(records, idx)
     assert "Goblin (3,4) Haste faded." in lines
+
+
+# ---- Regression: EventOnBuffAttemptApply string-payload must not crash ----
+
+
+def test_attempt_apply_string_payload_does_not_crash():
+    """RW3's EventOnBuffAttemptApply is captured generically with STRING
+    payload fields ({'buff': 'Blind', 'unit': 'Treant'}). Orphan scans all
+    records (wizard-team discovery, churn detection) and must not call .get on
+    those strings (was: 'str' object has no attribute 'get', dropping the whole
+    ambient line on debuff-cast turns)."""
+    from orphan import _find_wizard_team, _buff_churn_pairs
+    p = _OrphanProducer()
+
+    def noop(_): pass
+
+    attempt = {'sequence': 9, 'parent': None,
+               'event_type': 'EventOnBuffAttemptApply',
+               'payload': {'buff': 'Blind', 'duration': 4, 'unit': 'Treant'},
+               'marks': []}
+    # An ordinary ambient line should still compose alongside the bad record.
+    g = _enemy_snap(uid=200, name='Goblin', x=3, y=4)
+    dot = _bleed_stack(10, g, 2)
+    records = [attempt] + dot
+    # Direct helper calls must not raise.
+    assert _find_wizard_team(records) is None or isinstance(
+        _find_wizard_team(records), int)
+    assert isinstance(_buff_churn_pairs(records), set)
+    # Full producer fire must not raise and still renders the DOT line.
+    section = p.fire(records, show_coords=True, movement_verbose=False,
+                     log_fn=noop, telemetry=None)
+    assert "Goblin (3,4) Bleed: 3 Physical" in section[1]
