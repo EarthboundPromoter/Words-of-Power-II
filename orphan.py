@@ -472,6 +472,25 @@ def _render_spawn_phrase(units, wizard_team, show_coords, wizard_pos,
     return "; ".join(parts)
 
 
+def _buff_churn_pairs(records):
+    """(target_id, buff_name) pairs that BOTH faded and were re-applied this
+    turn — STACK_REPLACE churn (Blind, Purity: remove+apply). The fade+reapply
+    nets to a sustained refresh, so suppress BOTH halves and it reads as no
+    change (B5, extended to non-wizard)."""
+    faded = set()
+    applied = set()
+    for r in records:
+        p = r.get('payload') or {}
+        b = p.get('buff') or {}
+        key = ((p.get('target') or {}).get('id'), b.get('name'))
+        et = r.get('event_type')
+        if et == 'EventOnBuffRemove':
+            faded.add(key)
+        elif et == 'EventOnBuffApply':
+            applied.add(key)
+    return faded & applied
+
+
 def _render_foreign_damage(records, wizard_team, show_coords, dead_ids=None):
     """Render damage whose source differs from the enclosing chain's caster
     (e.g. a player's reactive gear proc firing DURING an enemy cast)
@@ -1054,7 +1073,10 @@ def _render_status_ticks(records, idx, wizard_team, show_coords):
                 f"{len(members)} {prefix}{plural}{coords} in {cloud_name}:"
                 f" {damage}{dtype_str} each{killed}."))
 
-    # Buff fades on non-wizard targets — natural duration expiry.
+    # Buff fades on non-wizard targets — natural duration expiry. A fade that
+    # is half of a same-turn STACK_REPLACE churn is suppressed (its re-apply
+    # is suppressed too), so the refresh reads as no change.
+    churn = _buff_churn_pairs(records)
     fade_roots = [
         r for r in records
         if r.get('event_type') == 'EventOnBuffRemove'
@@ -1076,6 +1098,12 @@ def _render_status_ticks(records, idx, wizard_team, show_coords):
         buff = payload.get('buff') or {}
         bname = buff.get('name')
         if not bname:
+            _claim(rec)
+            claimed.append(rec)
+            continue
+        if (target.get('id'), bname) in churn:
+            # Half of a STACK_REPLACE refresh; suppress (claim so it doesn't
+            # fall through to the legacy batcher).
             _claim(rec)
             claimed.append(rec)
             continue
@@ -1194,6 +1222,77 @@ def _render_spawns(records, idx, wizard_team, show_coords, wizard_pos,
                                       wizard_pos, spawn_coord_cap)
         if phrase:
             out_items.append(_make_item(RANK_STATUS, members, phrase + "."))
+    return out_items, claimed
+
+
+def _render_buff_applies(records, wizard_team, show_coords):
+    """Onset-focused gate for buff/debuff applications on NON-wizard units —
+    an enemy debuffs an ally, an enemy self-buffs, a cloud applies Frozen /
+    Soaked. Renders genuine onsets only (the engine self-silences sustained
+    refreshes); intensity re-stacks (stack_count_after > 1) are suppressed —
+    their magnitude rides the DOT-damage channel — as is STACK_REPLACE churn
+    (same-turn fade+reapply). Wizard buffs are crisis/digest territory.
+    Curse (debuff): 'Goblin Frozen, 2 turns.'; bless: 'Ogre gained Haste.'
+    Returns (items, claimed_records)."""
+    out_items = []
+    claimed = []
+    churn = _buff_churn_pairs(records)
+    groups = {}
+    order = []
+    for r in records:
+        if r.get('event_type') != 'EventOnBuffApply':
+            continue
+        if _is_claimed_by_other(r):
+            continue
+        p = r.get('payload') or {}
+        t = p.get('target') or {}
+        if _is_wizard_snap(t):
+            continue
+        # Sustained / init-time applies aren't onsets: silent duration
+        # refresh (synthesized is_refresh), spawn-time passive activation
+        # (is_silent_activate), or an intensity re-stack (count > 1).
+        if p.get('is_refresh') or p.get('is_silent_activate'):
+            continue
+        if (p.get('stack_count_after') or 0) != 1:
+            continue
+        b = p.get('buff') or {}
+        bname = b.get('name')
+        if not bname:
+            continue
+        btype = b.get('buff_type')
+        if btype not in (1, 2):
+            # passive (0) / item (3) gear aren't combat-onset narration.
+            _claim(r)
+            claimed.append(r)
+            continue
+        if (t.get('id'), bname) in churn:
+            _claim(r)
+            claimed.append(r)
+            continue
+        turns = b.get('turns_left') or 0
+        sig = (bname, btype, t.get('name'), t.get('tier'), turns)
+        if sig not in groups:
+            order.append(sig)
+            groups[sig] = []
+        groups[sig].append(t)
+        _claim(r)
+        claimed.append(r)
+
+    for sig in order:
+        bname, btype, target_name, _tier, turns = sig
+        members = groups[sig]
+        turns_str = f", {turns} turns" if turns and turns > 0 else ""
+        gained = "gained " if btype == 1 else ""
+        if len(members) == 1:
+            target_str = _name_with_coord(members[0], wizard_team, show_coords)
+            out_items.append(_make_item(RANK_STATUS, [members[0]],
+                f"{target_str} {gained}{bname}{turns_str}."))
+        else:
+            plural = _pluralize(target_name or 'enemy')
+            prefix = _team_prefix(members[0], wizard_team)
+            coords = _coord_list(members, show_coords)
+            out_items.append(_make_item(RANK_STATUS, members,
+                f"{len(members)} {prefix}{plural}{coords} {gained}{bname}{turns_str}."))
     return out_items, claimed
 
 
@@ -1323,9 +1422,15 @@ class _OrphanProducer:
             new_records, idx, wizard_team, show_coords, wizard_pos,
             spawn_coord_cap
         )
+        # Buff/debuff onsets on non-wizard units (enemy debuffs ally, enemy
+        # self-buff, cloud-applied status). Onset-gated; runs after the chain
+        # sections so claim==render holds for crisis/digest-owned wizard buffs.
+        buff_items, _buff_claimed = _render_buff_applies(
+            new_records, wizard_team, show_coords
+        )
 
         all_items = (action_items + tick_items + bare_items + death_items
-                     + spawn_items)
+                     + spawn_items + buff_items)
         text = _assemble_items(all_items, wizard_pos, los_grouping)
 
         if telemetry is not None:

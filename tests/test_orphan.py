@@ -1234,3 +1234,113 @@ def test_cloud_tick_skips_wizard():
     idx = _build_index(records)
     lines = _tick_lines(records, idx)
     assert lines == []
+
+
+# ---- Stage C: non-wizard buff-apply onset gate (R1) ----
+
+
+def _buff_apply_rec(seq, parent, target, name, buff_type=2, turns=2,
+                    stack_after=1, **flags):
+    payload = {'target': target,
+               'buff': {'name': name, 'turns_left': turns,
+                        'buff_type': buff_type, 'stack_type': 0},
+               'stack_count_after': stack_after}
+    payload.update(flags)
+    return {'sequence': seq, 'parent': parent, 'event_type': 'EventOnBuffApply',
+            'payload': payload, 'marks': []}
+
+
+def test_buff_apply_debuff_onset():
+    p = _OrphanProducer()
+
+    def noop(_): pass
+
+    g = _enemy_snap(uid=200, name='Goblin', x=3, y=4)
+    rec = _buff_apply_rec(10, None, g, 'Frozen', buff_type=2, turns=2)
+    section = p.fire([rec], show_coords=True, movement_verbose=False,
+                     log_fn=noop, telemetry=None)
+    assert section[1] == "Goblin (3,4) Frozen, 2 turns."
+
+
+def test_buff_apply_bless_says_gained():
+    p = _OrphanProducer()
+
+    def noop(_): pass
+
+    o = _enemy_snap(uid=201, name='Ogre', x=5, y=5)
+    rec = _buff_apply_rec(10, None, o, 'Haste', buff_type=1, turns=5)
+    section = p.fire([rec], show_coords=True, movement_verbose=False,
+                     log_fn=noop, telemetry=None)
+    assert section[1] == "Ogre (5,5) gained Haste, 5 turns."
+
+
+def test_buff_apply_intensity_restack_suppressed():
+    """stack_count_after > 1 is an intensity re-stack; magnitude rides the DOT
+    channel, so the onset gate stays silent."""
+    p = _OrphanProducer()
+
+    def noop(_): pass
+
+    g = _enemy_snap(uid=200, name='Goblin', x=3, y=4)
+    rec = _buff_apply_rec(10, None, g, 'Bleed', buff_type=2, stack_after=3)
+    section = p.fire([rec], show_coords=True, movement_verbose=False,
+                     log_fn=noop, telemetry=None)
+    assert section[1] == ""
+
+
+def test_buff_apply_refresh_and_silent_activate_suppressed():
+    p = _OrphanProducer()
+
+    def noop(_): pass
+
+    g = _enemy_snap(uid=200, name='Goblin')
+    refresh = _buff_apply_rec(10, None, g, 'Frozen', is_refresh=True)
+    g2 = _enemy_snap(uid=201, name='Wolf')
+    passive = _buff_apply_rec(11, None, g2, 'Pack Tactics',
+                              is_silent_activate=True)
+    section = p.fire([refresh, passive], show_coords=True,
+                     movement_verbose=False, log_fn=noop, telemetry=None)
+    assert section[1] == ""
+
+
+def test_buff_apply_wizard_skipped():
+    """Wizard buffs are crisis/digest territory."""
+    p = _OrphanProducer()
+
+    def noop(_): pass
+
+    rec = _buff_apply_rec(10, None, _wizard_snap(), 'Blind')
+    section = p.fire([rec], show_coords=True, movement_verbose=False,
+                     log_fn=noop, telemetry=None)
+    assert section[1] == ""
+
+
+def test_buff_replace_churn_suppresses_both_fade_and_onset():
+    """A same-turn fade+reapply of Blind (STACK_REPLACE) reads as no change —
+    neither the fade nor the onset is spoken."""
+    p = _OrphanProducer()
+
+    def noop(_): pass
+
+    g = _enemy_snap(uid=200, name='Goblin', x=3, y=4)
+    fade = {'sequence': 10, 'parent': None, 'event_type': 'EventOnBuffRemove',
+            'payload': {'target': g, 'buff': {'name': 'Blind'}}, 'marks': []}
+    reapply = _buff_apply_rec(11, None, g, 'Blind', buff_type=2)
+    section = p.fire([fade, reapply], show_coords=True, movement_verbose=False,
+                     log_fn=noop, telemetry=None)
+    assert section[1] == ""
+
+
+def test_buff_apply_collapses_across_targets():
+    p = _OrphanProducer()
+
+    def noop(_): pass
+
+    recs = []
+    for i, x in enumerate((3, 5, 7)):
+        g = _enemy_snap(uid=200 + i, name='Goblin', x=x, y=4)
+        recs.append(_buff_apply_rec(10 + i, None, g, 'Frozen', turns=2))
+    section = p.fire(recs, show_coords=True, movement_verbose=False,
+                     log_fn=noop, telemetry=None)
+    assert "3 Goblins" in section[1]
+    assert "Frozen, 2 turns." in section[1]
