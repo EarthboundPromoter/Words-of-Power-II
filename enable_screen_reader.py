@@ -10,9 +10,12 @@ Why this exists:
 
 Usage:
     Close Rift Wizard 3 first (the game re-saves options on exit and would
-    overwrite this change). Then run the tool. Built as a standalone .exe it needs
-    nothing installed; as a script run:  python enable_screen_reader.py
-    Pass --disable to turn the mod back off.
+    overwrite this change). Then run the tool from anywhere -- it locates your
+    Steam copy of the game automatically (and still works if run from inside the
+    install). Built as a standalone .exe it needs nothing installed; as a script
+    run:  python enable_screen_reader.py
+    Pass --disable to turn the mod back off, or --options <path> to point it at a
+    specific options2.dat if auto-detection ever misses.
 
 Safety:
     options2.dat is a plain pickle of builtin types only. This tool reads the
@@ -23,12 +26,23 @@ Safety:
 import argparse
 import os
 import pickle
+import re
 import sys
 
 MOD_NAME = "screen_reader"
 OPTIONS_FILENAME = "options2.dat"
 # Protocol 4 is readable by the game's bundled Python 3.8 (and everything newer).
 PICKLE_PROTOCOL = 4
+
+# Rift Wizard 3 is sold only on Steam (solo dev/publisher Dylan White; no
+# GOG/itch/Epic listing). These constants let us locate the install from
+# anywhere on the machine by asking Steam's own library records, so this tool
+# no longer has to live inside the game folder to find options2.dat.
+RW3_STEAM_APPID = "4366330"
+RW3_DEFAULT_DIRNAME = "Rift Wizard 3"
+# A file that must sit beside options2.dat in a real RW3 install. We confirm a
+# candidate folder against it before writing, so we never touch the wrong game.
+RW3_SENTINEL = "RiftWizard3.py"
 
 
 def _search_roots():
@@ -49,8 +63,84 @@ def _search_roots():
     return roots
 
 
+def _steam_roots():
+    """Steam install roots, read from the Windows registry (best-effort)."""
+    roots = []
+    try:
+        import winreg
+    except ImportError:
+        return roots  # Not on Windows -- caller falls back to other strategies.
+    # SteamPath (per-user, set by the running client) is the most reliable;
+    # the InstallPath keys cover machines where only the installer ran.
+    keys = [
+        (winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam", "SteamPath"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam", "InstallPath"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Valve\Steam", "InstallPath"),
+    ]
+    for hive, subkey, value in keys:
+        try:
+            with winreg.OpenKey(hive, subkey) as key:
+                raw, _ = winreg.QueryValueEx(key, value)
+        except OSError:
+            continue
+        if raw:
+            root = os.path.normpath(raw)
+            if not any(os.path.normcase(root) == os.path.normcase(r) for r in roots):
+                roots.append(root)
+    return roots
+
+
+def _steam_library_dirs(steam_root):
+    """Every Steam library 'path' listed in libraryfolders.vdf, plus the root."""
+    libs = [steam_root]
+    vdf = os.path.join(steam_root, "steamapps", "libraryfolders.vdf")
+    try:
+        with open(vdf, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return libs
+    # The .vdf stores Windows paths with doubled backslashes, e.g.
+    #   "path"  "D:\\SteamLibrary"
+    for raw in re.findall(r'"path"\s*"([^"]+)"', text):
+        lib = os.path.normpath(raw.replace("\\\\", "\\"))
+        if lib not in libs:
+            libs.append(lib)
+    return libs
+
+
+def _rw3_installdir(library_dir):
+    """Folder name RW3 is installed under in this library (from its manifest)."""
+    manifest = os.path.join(
+        library_dir, "steamapps", "appmanifest_%s.acf" % RW3_STEAM_APPID
+    )
+    try:
+        with open(manifest, "r", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return None
+    match = re.search(r'"installdir"\s*"([^"]+)"', text)
+    return match.group(1) if match else None
+
+
+def _find_via_steam():
+    """Locate RW3's options2.dat by walking Steam's own library records."""
+    for steam_root in _steam_roots():
+        for lib in _steam_library_dirs(steam_root):
+            installdir = _rw3_installdir(lib) or RW3_DEFAULT_DIRNAME
+            game_dir = os.path.join(lib, "steamapps", "common", installdir)
+            candidate = os.path.join(game_dir, OPTIONS_FILENAME)
+            # Require the RW3 sentinel too, so we never write to some unrelated
+            # folder that merely happens to contain an options2.dat.
+            if os.path.isfile(candidate) and os.path.isfile(
+                os.path.join(game_dir, RW3_SENTINEL)
+            ):
+                return candidate
+    return None
+
+
 def find_options_file():
-    """Walk upward from each search root to find options2.dat."""
+    """Find options2.dat: walk up from the tool, then ask Steam."""
+    # 1. Upward walk -- works when the tool lives inside the install tree.
     for start in _search_roots():
         cur = start
         while True:
@@ -61,7 +151,8 @@ def find_options_file():
             if parent == cur:
                 break
             cur = parent
-    return None
+    # 2. Steam library lookup -- works when the tool lives anywhere.
+    return _find_via_steam()
 
 
 def _pause():
@@ -76,8 +167,9 @@ def run(disable, options_path):
     path = options_path or find_options_file()
     if not path or not os.path.isfile(path):
         print("ERROR: Could not find options2.dat.")
-        print("Place this tool inside your Rift Wizard 3 install (e.g. in the mod")
-        print("folder), or pass --options <path to options2.dat>.")
+        print("Auto-detection looks for a Steam copy of Rift Wizard 3. If you")
+        print("installed it elsewhere, run this tool from inside the game folder,")
+        print("or pass --options <path to options2.dat>.")
         return 1
 
     try:

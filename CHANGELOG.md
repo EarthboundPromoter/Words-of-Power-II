@@ -5,6 +5,15 @@ an early work-in-progress RW3 port — expect frequent changes.
 
 ## Unreleased
 
+### Changed
+- **The mod-enabler tool now finds your game on its own.** `enable_screen_reader`
+  (and the bundled `enable_screen_reader.exe`) used to have to sit inside your Rift
+  Wizard 3 folder to work — it found your settings by looking in the folders above
+  itself. It now also locates your Steam copy of the game automatically, so you can
+  run it from anywhere: your Desktop, Downloads, wherever. If the game is installed
+  somewhere unusual, you can still run the tool from inside the game folder, or point
+  it straight at your settings with `--options <path to options2.dat>`.
+
 ### Fixed
 - **When you teleport yourself, the game now tells you where you landed.** Self-teleports
   — Blink, the Teleporter, and Lightning Form's teleport-when-you-cast-a-lightning-spell —
