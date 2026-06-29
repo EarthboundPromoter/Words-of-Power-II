@@ -108,10 +108,16 @@ def _render_equipment_chain(chain, wizard_team, show_coords):
             equipment_name, chain, wizard_team, show_coords,
         )
 
-    # Claim all chain records regardless of which path rendered, so
-    # subsequent producers (orphan) don't re-scan or double-claim.
-    for rec in chain:
-        _claim(rec)
+    # claim==render: only claim the chain when we actually rendered a line.
+    # A chain that produced nothing (a no-op tick, or one whose only effects
+    # were claimed by crisis) is left UNclaimed so orphan's standalone-death /
+    # spawn passes can still surface any non-wizard death/spawn inside it
+    # instead of it being silently swallowed (mirrors orphan's own discipline).
+    # Records a higher-precedence producer owns are never re-marked.
+    if lines:
+        for rec in chain:
+            if not _is_claimed_by_other(rec):
+                _claim(rec)
 
     return lines
 
@@ -360,6 +366,12 @@ def _render_equipment_direct_chain(equipment_name, chain,
                 heal_groups[key] = []
             heal_groups[key].append(target)
         elif et == 'EventOnBuffApply':
+            # A wizard-facing buff/debuff crisis already owns (e.g. a gear tick
+            # that curses the wizard) is claimed at the child record by crisis,
+            # not at the equipment_tick root — so skip it here to avoid speaking
+            # it twice (crisis "Wizard cursed" + equipment "applied ...").
+            if _is_claimed_by_other(rec):
+                continue
             target = payload.get('target') or {}
             if _is_wizard_snap(target):
                 buff = payload.get('buff') or {}
@@ -413,10 +425,14 @@ def _render_equipment_direct_chain(equipment_name, chain,
         if not bname:
             continue
         target_str = _name_with_coord(target, wizard_team, show_coords)
+        # "applied {Name} to {target}" — grammatical for every buff name. The
+        # earlier "{equipment} {name.lower()} {target}" verb form broke on
+        # non-past-tense names ("Stone Mask petrify Goblin").
         if turns and turns > 0:
-            lines.append(f"{equipment_name} {bname.lower()} {target_str}, {turns} turns.")
+            lines.append(
+                f"{equipment_name} applied {bname} to {target_str}, {turns} turns.")
         else:
-            lines.append(f"{equipment_name} {bname.lower()} {target_str}.")
+            lines.append(f"{equipment_name} applied {bname} to {target_str}.")
 
     if spawns:
         lines.extend(_format_equipment_spawn_lines(

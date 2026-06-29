@@ -69,16 +69,19 @@ def test_equipment_chain_debuff_apply():
         {
             'sequence': 11, 'parent': 10,
             'event_type': 'EventOnBuffApply',
+            # 'Petrify' (not past-tense) — the verb-form rendering used to
+            # produce "Stone Mask petrify Aelf"; the "applied {Name} to" form
+            # reads grammatically for any buff name.
             'payload': {
                 'target': _enemy_snap(name='Aelf', x=3, y=4),
-                'buff': {'name': 'Petrified', 'turns_left': 3,
+                'buff': {'name': 'Petrify', 'turns_left': 3,
                          'stack_type': 0, 'buff_type': 2},
             },
             'marks': [],
         },
     ]
     lines = _render_equipment_chain(chain, wizard_team=0, show_coords=True)
-    assert lines == ["Stone Mask petrified Aelf (3,4), 3 turns."]
+    assert lines == ["Stone Mask applied Petrify to Aelf (3,4), 3 turns."]
 
 
 def test_equipment_chain_damage_to_enemies():
