@@ -179,6 +179,42 @@ def test_is_nonplayer_cast_root_with_parent_skipped():
 
 
 def test_action_chain_single_target_cast():
+    """Enemy cast at a NON-wizard target renders normally."""
+    chain = _enemy_cast_chain(
+        10, _enemy_snap(name='Aelf', x=3, y=4),
+        'Lightning Bolt', _enemy_snap(uid=999, name='Bone Shambler', x=12, y=12),
+        damage=6, dtype='Lightning',
+    )
+    line = _render_action_chain(chain, wizard_team=0, show_coords=True, movement_verbose=True)
+    assert line == "Aelf (3,4) cast Lightning Bolt at Bone Shambler (12,12), 6 Lightning."
+
+
+def _mark_crisis(chain):
+    """Stamp crisis_v1 on the wizard-target damage records — crisis runs
+    first in the pipeline, so by orphan's turn it owns wizard damage."""
+    for rec in chain:
+        p = rec.get('payload') or {}
+        if rec.get('event_type') == 'EventOnDamaged' \
+                and (p.get('target') or {}).get('is_player_controlled'):
+            rec.setdefault('marks', []).append('crisis_v1')
+    return chain
+
+
+def test_action_chain_wizard_only_attack_dropped():
+    """B2: an enemy cast whose ONLY effect was crisis-claimed wizard damage is
+    dropped from the orphan body (crisis owns it) — no double-narration."""
+    chain = _mark_crisis(_enemy_cast_chain(
+        10, _enemy_snap(name='Aelf', x=3, y=4),
+        'Lightning Bolt', _wizard_snap(),
+        damage=6, dtype='Lightning',
+    ))
+    line = _render_action_chain(chain, wizard_team=0, show_coords=True, movement_verbose=True)
+    assert line is None
+
+
+def test_action_chain_wizard_damage_rendered_when_crisis_off():
+    """claim==render: if crisis did NOT claim the wizard hit (crisis disabled),
+    orphan must still render it rather than drop it silently."""
     chain = _enemy_cast_chain(
         10, _enemy_snap(name='Aelf', x=3, y=4),
         'Lightning Bolt', _wizard_snap(),
@@ -227,9 +263,9 @@ def test_action_chain_ally_caster_prefixed():
 # ---- _render_collapsed_action (cross-chain collapse) ----
 
 
-def test_collapsed_action_three_aelves_at_wizard():
-    """Three Aelves all cast Lightning Bolt at Wizard for 6 each — collapse."""
-    target = _wizard_snap()
+def test_collapsed_action_three_aelves_at_enemy():
+    """Three Aelves all cast Lightning Bolt at a non-wizard target — collapse."""
+    target = _enemy_snap(uid=999, name='Bone Shambler', x=10, y=10)
     items = []
     for i, x in enumerate([3, 4, 5]):
         chain = _enemy_cast_chain(
@@ -239,7 +275,22 @@ def test_collapsed_action_three_aelves_at_wizard():
         items.append((chain[0], chain))
     line = _render_collapsed_action(items, wizard_team=0, show_coords=True, movement_verbose=True)
     assert line == ("3 Aelves at (3,4), (4,4), (5,4) cast Lightning Bolt at "
-                    "Wizard (10,10), 6 Lightning each.")
+                    "Bone Shambler (10,10), 6 Lightning each.")
+
+
+def test_collapsed_action_three_aelves_at_wizard_dropped():
+    """B2: a collapsed group of crisis-claimed identical hits on the wizard is
+    crisis's — the orphan body drops it."""
+    target = _wizard_snap()
+    items = []
+    for i, x in enumerate([3, 4, 5]):
+        chain = _mark_crisis(_enemy_cast_chain(
+            10 + i * 3, _enemy_snap(uid=200 + i, name='Aelf', x=x, y=4),
+            'Lightning Bolt', target, damage=6, dtype='Lightning',
+        ))
+        items.append((chain[0], chain))
+    line = _render_collapsed_action(items, wizard_team=0, show_coords=True, movement_verbose=True)
+    assert line is None
 
 
 # ---- _build_action_signature ----
@@ -254,9 +305,9 @@ def test_signature_single_target_chain_returns_tuple():
     sig = _build_action_signature(chain)
     assert sig is not None
     # (caster_name, caster_tier, spell_name, melee, kind, target_id,
-    #  dtype, damage)
+    #  target_name, dtype, damage)
     assert sig == ('Aelf', 'minion', 'Lightning Bolt', False, 'damage',
-                   100, 'Lightning', 6)
+                   100, 'Wizard', 'Lightning', 6)
 
 
 def _movement_chain(seq_start, caster, spell_name, dest_x, dest_y):
@@ -632,9 +683,11 @@ def test_producer_orders_enemies_first_then_allies():
     def noop(_): pass
 
     target = _enemy_snap(uid=999, name='Bone Shambler', x=12, y=12)
+    # Enemy targets a NON-wizard (an ally) so its cast line renders — a
+    # wizard-only attack would be dropped (B2) and defeat the ordering check.
     enemy_chain = _enemy_cast_chain(
         10, _enemy_snap(name='Aelf', x=3, y=4),
-        'Lightning Bolt', _wizard_snap(),
+        'Lightning Bolt', _ally_snap(uid=400, name='Spark Spirit', x=9, y=9),
         damage=6, dtype='Lightning',
     )
     ally_chain = _enemy_cast_chain(
@@ -674,3 +727,126 @@ def test_producer_skips_records_claimed_by_crisis():
     # Note: this test only verifies the gate; the actual mark-precedence
     # behavior is enforced via the pipeline-level crisis-runs-first ordering.
     assert "Aelf" not in section[1]
+
+
+# ---- §4.2 embedded foreign-source damage (reactive gear during enemy cast) ----
+
+
+def test_action_chain_foreign_proc_attributed_to_its_source():
+    caster = _enemy_snap(name='Aelf')
+    imp = _enemy_snap(uid=202, name='Imp', x=7, y=7)
+    ogre = _enemy_snap(uid=201, name='Ogre', x=6, y=6)
+    chain = [
+        {'sequence': 1, 'parent': None, 'event_type': 'cast_begin',
+         'payload': {'caster': caster,
+                     'spell': {'name': 'Lightning Bolt', 'melee': False},
+                     'is_player': False, 'pay_costs': True}, 'marks': []},
+        {'sequence': 2, 'parent': 1, 'event_type': 'EventOnDamaged',
+         'payload': {'target': imp, 'damage': 6, 'damage_type': 'Lightning',
+                     'source_name': 'Lightning Bolt'}, 'marks': []},
+        # Player's reactive gear ("Thorns") fires during the cast, hitting Ogre.
+        {'sequence': 3, 'parent': 2, 'event_type': 'EventOnDamaged',
+         'payload': {'target': ogre, 'damage': 3, 'damage_type': 'Physical',
+                     'source_name': 'Thorns', 'source_owner_name': 'Wizard',
+                     'source_is_buff': True, 'source_buff_type': 3},
+         'marks': []},
+    ]
+    line = _render_action_chain(chain, wizard_team=0, show_coords=False,
+                                movement_verbose=False)
+    # Caster line names only its own spell + own target.
+    assert "Aelf cast Lightning Bolt at Imp, 6 Lightning." in line
+    # Foreign proc attributed to Thorns, not folded into Lightning Bolt.
+    assert "Wizard deals 3 Physical to Ogre with Thorns." in line
+
+
+def test_action_chain_no_foreign_unchanged():
+    # A pure enemy cast (own damage only) renders exactly as before.
+    chain = _enemy_cast_chain(
+        10, _enemy_snap(name='Aelf'), 'Lightning Bolt',
+        _enemy_snap(uid=205, name='Imp', x=7, y=7),
+        damage=6, dtype='Lightning')
+    line = _render_action_chain(chain, wizard_team=0, show_coords=False,
+                                movement_verbose=False)
+    assert line == "Aelf cast Lightning Bolt at Imp, 6 Lightning."
+    assert "with" not in line  # no foreign clause appended
+
+
+# ---- §4.3 bare-root procs (gear firing outside any chain) ----
+
+
+def test_bare_proc_damage_claimed_and_voiced():
+    p = _OrphanProducer()
+    def noop(_): pass
+    bare = {'sequence': 5, 'parent': None, 'event_type': 'EventOnDamaged',
+            'payload': {'target': _enemy_snap(name='Ogre'), 'damage': 3,
+                        'damage_type': 'Fire',
+                        'source_name': 'Searing Eye Stone',
+                        'source_owner_name': 'Wizard',
+                        'source_is_buff': True, 'source_buff_type': 3},
+            'marks': []}
+    section = p.fire([bare], show_coords=False, movement_verbose=False,
+                     log_fn=noop, telemetry=None)
+    assert "Wizard deals 3 Fire to Ogre with Searing Eye Stone." in section[1]
+    assert ORPHAN_MARK in bare['marks']
+
+
+def test_bare_proc_heal_claimed_and_voiced():
+    p = _OrphanProducer()
+    def noop(_): pass
+    bare = {'sequence': 5, 'parent': None, 'event_type': 'EventOnHealed',
+            'payload': {'target': _ally_snap(name='Goatia'), 'heal_amount': 4,
+                        'source_name': 'Wild Healing Staff',
+                        'source_owner_name': 'Wizard',
+                        'source_is_buff': True, 'source_buff_type': 3},
+            'marks': []}
+    section = p.fire([bare], show_coords=False, movement_verbose=False,
+                     log_fn=noop, telemetry=None)
+    assert "Wizard heals Goatia for 4 with Wild Healing Staff." in section[1]
+    assert ORPHAN_MARK in bare['marks']
+
+
+def test_bare_proc_on_wizard_skipped():
+    # Wizard-targeted bare effects belong to crisis; orphan skips them.
+    p = _OrphanProducer()
+    def noop(_): pass
+    bare = {'sequence': 5, 'parent': None, 'event_type': 'EventOnDamaged',
+            'payload': {'target': _wizard_snap(), 'damage': 3,
+                        'damage_type': 'Fire', 'source_name': 'X',
+                        'source_owner_name': 'Goblin',
+                        'source_is_buff': False, 'source_buff_type': None},
+            'marks': []}
+    section = p.fire([bare], show_coords=False, movement_verbose=False,
+                     log_fn=noop, telemetry=None)
+    assert section[1] == ""
+    assert ORPHAN_MARK not in bare['marks']
+
+
+def test_bare_proc_already_claimed_skipped():
+    p = _OrphanProducer()
+    def noop(_): pass
+    bare = {'sequence': 5, 'parent': None, 'event_type': 'EventOnDamaged',
+            'payload': {'target': _enemy_snap(name='Ogre'), 'damage': 3,
+                        'damage_type': 'Fire', 'source_name': 'X',
+                        'source_owner_name': 'Wizard',
+                        'source_is_buff': True, 'source_buff_type': 3},
+            'marks': ['digest_v1']}
+    section = p.fire([bare], show_coords=False, movement_verbose=False,
+                     log_fn=noop, telemetry=None)
+    assert section[1] == ""
+    assert ORPHAN_MARK not in bare['marks']
+
+
+def test_bare_section_ignores_parented_damage():
+    # A damage event WITH a parent is not a bare root; the bare section
+    # leaves it to its chain's handling.
+    p = _OrphanProducer()
+    def noop(_): pass
+    rec = {'sequence': 5, 'parent': 4, 'event_type': 'EventOnDamaged',
+           'payload': {'target': _enemy_snap(name='Ogre'), 'damage': 3,
+                       'damage_type': 'Fire', 'source_name': 'X',
+                       'source_owner_name': 'Wizard',
+                       'source_is_buff': True, 'source_buff_type': 3},
+           'marks': []}
+    section = p.fire([rec], show_coords=False, movement_verbose=False,
+                     log_fn=noop, telemetry=None)
+    assert "Ogre" not in section[1]

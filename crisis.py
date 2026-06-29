@@ -71,6 +71,52 @@ def _has_crisis_mark(record):
     return CRISIS_MARK in (record.get('marks') or [])
 
 
+def _walk_to_root(record, idx):
+    """Walk parent links to the absolute chain root (parent is None).
+    `idx` maps sequence -> record (digest.build_record_index). Used by
+    the wizard-POSITIVE guard (heal / buff-gain) and the B4 chain-caster
+    walk; damage and shield collapse never consult it."""
+    cur = record
+    guard = 0
+    while cur is not None and guard < 100000:
+        guard += 1
+        parent_seq = cur.get('parent')
+        if parent_seq is None:
+            return cur
+        cur = idx.get(parent_seq)
+    return cur
+
+
+def _chain_caster_name(record, idx):
+    """Name the actor at the root of this record's causation chain — the
+    enemy whose cast/aura produced a wizard-facing non-damage effect
+    (debuff, external displace). Used by the B4 attribution path as the
+    fallback when the buff didn't carry its own source.
+
+    cast_begin root -> the caster; buff_tick/equipment_tick root -> the
+    aura/gear owner; anything else (cloud_tick, bare event) -> None
+    (anonymous, matching the original design's floor). Never names the
+    wizard as the applier of an effect on the wizard — a deferred reaction
+    whose chain roots in the player's own keypress must not read as
+    self-inflicted."""
+    root = _walk_to_root(record, idx)
+    if root is None:
+        return None
+    et = root.get('event_type')
+    payload = root.get('payload') or {}
+    if et == 'cast_begin':
+        caster = payload.get('caster') or {}
+        if caster.get('is_player_controlled'):
+            return None
+        return caster.get('name')
+    if et in ('buff_tick', 'equipment_tick'):
+        owner = payload.get('owner') or {}
+        if owner.get('is_player_controlled'):
+            return None
+        return owner.get('name')
+    return None
+
+
 # ----------------------------------------------------------------------
 # Per-category render helpers — pure functions over journal record dicts.
 # Each returns the rendered line string, or None if the record doesn't
@@ -78,8 +124,45 @@ def _has_crisis_mark(record):
 # ----------------------------------------------------------------------
 
 
+# Generic attack names the game hardcodes for basic melee/ranged
+# (CommonContent.py:39 "Melee Attack", :128 "Ranged Attack") — pure
+# boilerplate shared by ~160 monsters. When the source is one of these we
+# name just the attacker, not "{Attacker}'s Melee Attack". Named attacks
+# (breaths, bolts, "Bow") are meaningful and earn the possessive.
+_GENERIC_ATTACK_NAMES = ("Melee Attack", "Ranged Attack")
+
+
+def _attacker_phrase(payload):
+    """The 'from X' object for a wizard-damage line.
+
+    - "{Attacker}'s {attack}" (e.g. "Storm Drake's Storm Breath") when the
+      source has a distinct attacking owner and a meaningful attack name.
+    - "{Attacker}" alone when the attack name is generic boilerplate
+      (basic melee/ranged) — adds the attacker without the noise token.
+    - "{source}" (e.g. "Bleed") for DOT / temp-buff sources, whose owner is
+      the afflicted unit rather than an attacker, and for ownerless or
+      self-sourced damage.
+    """
+    source = payload.get('source_name')
+    owner = payload.get('source_owner_name')
+    # Bless/curse buff sources (DOTs): owner is the victim, not an attacker.
+    is_temp_buff = bool(payload.get('source_is_buff')) and \
+        payload.get('source_buff_type') in (1, 2)
+    target = payload.get('target') or {}
+    if (owner and not is_temp_buff
+            and owner != source
+            and owner != target.get('name')):
+        if source and source not in _GENERIC_ATTACK_NAMES:
+            return f"{owner}'s {source}"
+        return owner
+    return source
+
+
 def _render_damage_taken(record):
-    """EventOnDamaged where target is wizard. Wizard-prefix form."""
+    """EventOnDamaged where target is wizard. Wizard-prefix form. Names the
+    attacker (source.owner) plus the specific attack when meaningful — see
+    _attacker_phrase. This path is NOT chain-gated: wizard damage, including
+    in-chain self-damage, always speaks."""
     if record.get('event_type') != 'EventOnDamaged':
         return None
     payload = record.get('payload') or {}
@@ -88,20 +171,21 @@ def _render_damage_taken(record):
         return None
     damage = payload.get('damage')
     dtype = payload.get('damage_type')
-    source = payload.get('source_name')
     if damage is None or damage <= 0:
         # Defensive: shielded / 0-damage hits surface elsewhere; skip here.
         return None
     dtype_str = f" {dtype}" if dtype else ""
-    if source:
-        return f"Wizard took {damage}{dtype_str} from {source}."
+    attacker = _attacker_phrase(payload)
+    if attacker:
+        return f"Wizard took {damage}{dtype_str} from {attacker}."
     return f"Wizard took {damage}{dtype_str}."
 
 
-def _render_buff_applied(record):
+def _render_buff_applied(record, caster_name=None):
     """EventOnBuffApply where target is wizard AND buff is a debuff (curse).
     Self-buffs on wizard go to the orphan producer's equipment passives /
-    digest's Side, not crisis."""
+    digest's Side, not crisis. `caster_name` (B4) names the applier when
+    known — appended as ", by {caster}"; omitted (anonymous) when None."""
     if record.get('event_type') != 'EventOnBuffApply':
         return None
     payload = record.get('payload') or {}
@@ -121,9 +205,10 @@ def _render_buff_applied(record):
         return None
     turns = buff.get('turns_left')
     adj = _DEBUFF_PHRASING.get(name, name.lower())
+    by = f", by {caster_name}" if caster_name else ""
     if turns and turns > 0:
-        return f"Wizard {adj}, {turns} turns."
-    return f"Wizard {adj}."
+        return f"Wizard {adj}, {turns} turns{by}."
+    return f"Wizard {adj}{by}."
 
 
 def _render_buff_faded(record):
@@ -157,9 +242,13 @@ def _render_wizard_death(record):
     return "Wizard died."
 
 
-def _render_displaced(record):
+def _render_displaced(record, caster_name=None):
     """EventOnMoved where target is wizard AND teleport=True. Sudden
-    positional change by external cause (push, enemy teleport)."""
+    positional change by EXTERNAL cause (push, enemy teleport). The
+    player's own Blink / gear teleport is filtered out by the out-of-chain
+    guard at the call site (B3) — this branch only renders external
+    displacement. `caster_name` (B4) names the pusher when the chain-walk
+    found one; moves carry no buff.source, so this is chain-walk only."""
     if record.get('event_type') != 'EventOnMoved':
         return None
     payload = record.get('payload') or {}
@@ -170,7 +259,8 @@ def _render_displaced(record):
         return None
     x = unit.get('x')
     y = unit.get('y')
-    return f"Wizard displaced to ({x},{y})."
+    by = f" by {caster_name}" if caster_name else ""
+    return f"Wizard displaced to ({x},{y}){by}."
 
 
 def _render_cloud_on_wizard(record, wizard_pos):
@@ -205,6 +295,67 @@ def _render_cloud_on_wizard(record, wizard_pos):
     if duration_after is not None and duration_after > 0:
         return f"In {cloud_name}, {duration_after} turns left."
     return f"In {cloud_name}."
+
+
+def _render_wizard_shield_lost(record):
+    """EventOnShieldRemoved where target is wizard. The game decrements the
+    shield BEFORE raising the event (Level.py:4050 precedes 4055), so the
+    snapshot's `shields` is the post-loss remaining count. Always crisis
+    (a shielded hit is otherwise silent — the player must know they're under
+    fire); not chain-gated."""
+    if record.get('event_type') != 'EventOnShieldRemoved':
+        return None
+    payload = record.get('payload') or {}
+    target = payload.get('target') or {}
+    if not _is_wizard_snap(target):
+        return None
+    remaining = target.get('shields')
+    if remaining:
+        return f"Wizard shield lost, {remaining} remaining."
+    return "Wizard last shield lost."
+
+
+def _render_wizard_healed(record):
+    """EventOnHealed where target is wizard. Covers OUT-OF-CHAIN heals (regen
+    ticks, ally heal-auras) that no other producer claims; the chain-aware
+    guard in fire() leaves in-chain (digest Side) and equipment-sourced heals
+    to those producers."""
+    if record.get('event_type') != 'EventOnHealed':
+        return None
+    payload = record.get('payload') or {}
+    target = payload.get('target') or {}
+    if not _is_wizard_snap(target):
+        return None
+    amount = payload.get('heal_amount')
+    if not amount or amount <= 0:
+        return None
+    source = payload.get('source_name')
+    if source:
+        return f"Wizard healed {amount} from {source}."
+    return f"Wizard healed {amount}."
+
+
+def _render_wizard_buff_gained(record):
+    """EventOnBuffApply where target is wizard and the buff is NOT a curse
+    (buff_type != 2; curses are owned by _handle_wizard_debuff_apply). Covers
+    OUT-OF-CHAIN self-buffs no other producer claims; the guard in fire()
+    leaves in-chain (digest Side) and equipment-sourced buffs to them."""
+    if record.get('event_type') != 'EventOnBuffApply':
+        return None
+    payload = record.get('payload') or {}
+    target = payload.get('target') or {}
+    if not _is_wizard_snap(target):
+        return None
+    buff = payload.get('buff') or {}
+    if buff.get('buff_type') == 2:
+        return None
+    name = buff.get('name')
+    if not name:
+        return None
+    turns = buff.get('turns_left')
+    if turns and turns > 0:
+        return f"Wizard gained {name}, {turns} turns."
+    return f"Wizard gained {name}."
 
 
 # ----------------------------------------------------------------------
@@ -274,7 +425,8 @@ class _CrisisProducer:
         finite duration."""
         return float('inf') if not turns else turns
 
-    def fire(self, journal_records, wizard_unit, log_fn, telemetry=None):
+    def fire(self, journal_records, wizard_unit, log_fn, telemetry=None,
+             damage_summed=False):
         """Walk journal records since last fire. Identify wizard-target
         events. Stamp marks. Compose Wizard-prefix lines.
 
@@ -286,6 +438,8 @@ class _CrisisProducer:
                 None if wizard is unavailable (e.g., between levels).
             log_fn: callable(str) for diagnostic logging.
             telemetry: optional telemetry module reference.
+            damage_summed: cosmetic flag for repeated-hit collapse (B1) —
+                False reports per-hit value with a multiplier, True the total.
 
         Returns:
             (priority, text) tuple. text is empty string if no crisis
@@ -325,25 +479,57 @@ class _CrisisProducer:
         # down in the same turn.
         announced = set()
 
-        # Wizard damage first — DOT ticks summed per source so a stacked
-        # Bleed reads its true per-turn total.
-        damage_lines = self._compose_damage_taken(new_records)
+        # Wizard damage first — DOT ticks summed per source, repeated
+        # identical direct hits collapsed (B1).
+        damage_lines = self._compose_damage_taken(new_records, damage_summed)
         if damage_lines:
             lines.extend(damage_lines)
             categories_present.add('damage_taken')
 
+        # Chain-aware guard for wizard-facing POSITIVES (heal / buff-gain)
+        # ONLY. Crisis claims a positive only when it is neither inside a
+        # player-keypress chain (digest's) nor an equipment_tick chain
+        # (equipment's). Damage and shield below are unconditional and do
+        # NOT use this. Lazy digest import mirrors the pipeline's pattern.
+        import digest as _digest
+        _idx = _digest.build_record_index(journal_records)
+
+        def _positive_out_of_chain(rec):
+            if _digest.walk_to_keypress_root(rec, _idx) is not None:
+                return False
+            root = _walk_to_root(rec, _idx)
+            if root is not None and root.get('event_type') == 'equipment_tick':
+                return False
+            return True
+
+        # B5: a debuff re-applied this turn fires a fade (EventOnBuffRemove)
+        # plus a fresh apply. Names with BOTH a wizard fade and a later wizard
+        # apply this turn are refresh churn — suppress the fade so the pair
+        # doesn't read "Blind faded. Wizard blind." every re-application. The
+        # apply is still high-water-gated, so a same-duration refresh stays
+        # silent and only a real escalation speaks.
+        refreshed_names = self._refresh_churn_names(new_records)
+
         for rec in new_records:
             if self._handle_wizard_debuff_apply(
-                    rec, lines, categories_present, announced):
+                    rec, lines, categories_present, announced, _idx):
                 continue
             line = _render_buff_faded(rec)
             if line:
+                _claim(rec)
+                bname = ((rec.get('payload') or {}).get('buff') or {}).get('name')
+                if bname in refreshed_names:
+                    # Refresh churn: the debuff fades and re-applies the same
+                    # turn. Suppress the fade AND keep the high-water mark, so
+                    # the paired re-apply is still gated by severity — a flat
+                    # re-up stays silent, only a real escalation speaks.
+                    continue
+                # Genuine fade: the debuff is gone. Drop its high-water mark so
+                # a fresh application later re-announces from scratch, sync the
+                # resist low-water, and speak.
+                self._forget_debuff(rec)
                 lines.append(line)
                 categories_present.add('buff_faded')
-                # The debuff is gone — drop its high-water mark so a fresh
-                # application later re-announces from scratch.
-                self._forget_debuff(rec)
-                _claim(rec)
                 continue
             line = _render_wizard_death(rec)
             if line:
@@ -351,18 +537,47 @@ class _CrisisProducer:
                 categories_present.add('wizard_death')
                 _claim(rec)
                 continue
-            line = _render_displaced(rec)
-            if line:
-                lines.append(line)
-                categories_present.add('displaced')
-                _claim(rec)
-                continue
+            # Displacement is crisis only when EXTERNAL (B3): the player's own
+            # Blink / gear teleport is in-chain and owned by the digest, so
+            # abstain on it (neither line nor claim). Only an enemy push or
+            # teleport surfaces, named with its cause when the walk finds one.
+            if (rec.get('event_type') == 'EventOnMoved'
+                    and _positive_out_of_chain(rec)):
+                line = _render_displaced(rec, _chain_caster_name(rec, _idx))
+                if line:
+                    lines.append(line)
+                    categories_present.add('displaced')
+                    _claim(rec)
+                    continue
             line = _render_cloud_on_wizard(rec, wizard_pos)
             if line:
                 lines.append(line)
                 categories_present.add('cloud_on_tile')
                 _claim(rec)
                 continue
+            # Shield loss — always crisis (a shielded hit is otherwise
+            # silent); not chain-gated.
+            line = _render_wizard_shield_lost(rec)
+            if line:
+                lines.append(line)
+                categories_present.add('shield_lost')
+                _claim(rec)
+                continue
+            # Wizard-facing positives — only when out-of-chain (in-chain ->
+            # digest Side; equipment_tick -> equipment producer).
+            if _positive_out_of_chain(rec):
+                line = _render_wizard_healed(rec)
+                if line:
+                    lines.append(line)
+                    categories_present.add('wizard_healed')
+                    _claim(rec)
+                    continue
+                line = _render_wizard_buff_gained(rec)
+                if line:
+                    lines.append(line)
+                    categories_present.add('buff_gained')
+                    _claim(rec)
+                    continue
 
         # HP threshold — check after damage events processed so the
         # threshold reflects post-turn HP. Wizard reference required.
@@ -428,15 +643,26 @@ class _CrisisProducer:
         self._last_threshold_index = idx
         return f"Wizard at {cur_hp} HP, {label}."
 
-    def _compose_damage_taken(self, new_records):
-        """Wizard damage lines. DOT ticks (source is a buff, so the journal
-        captured source_turns_left) are summed per (source, type) so a
-        3-stack Bleed reads "Wizard took 9 Physical from Bleed." instead of
-        three identical ticks; all other damage renders per event, unchanged.
-        Claims the records it consumes."""
+    def _compose_damage_taken(self, new_records, damage_summed=False):
+        """Wizard damage lines, collapsed (B1).
+
+        DOT ticks (source is a buff, so source_turns_left is set) sum per
+        (source, type) so a 3-stack Bleed reads one "Wizard took 9 Physical
+        from Bleed." line. Non-DOT direct hits collapse by
+        (attacker phrase, dtype, damage) — identical repeated hits (three
+        Ravens pecking for 3 each) become one line with a count, instead of
+        N copies. Varying magnitude splits into separate groups (the variance
+        is information — resist/vulnerability — so it is preserved, not summed
+        away). `damage_summed` is the cosmetic flag: False (default) keeps the
+        per-hit value with a multiplier ("3 from Raven's Peck, 3 times");
+        True reports the total ("9 from Raven's Peck"). Claims what it
+        consumes."""
         lines = []
         dot_totals = {}   # (source, dtype) -> summed damage
         dot_order = []
+        # Non-DOT direct hits: (attacker_phrase, dtype, damage) -> count.
+        hit_counts = {}
+        hit_order = []
         for rec in new_records:
             if rec.get('event_type') != 'EventOnDamaged':
                 continue
@@ -447,7 +673,19 @@ class _CrisisProducer:
             damage = payload.get('damage')
             if damage is None or damage <= 0:
                 continue
-            if payload.get('source_turns_left') is not None:
+            # A DOT sits on the VICTIM (its buff.owner is the wizard), so its
+            # per-turn ticks sum. An attacker-owned damage aura (DamageAuraBuff)
+            # also has turns_left (every Buff defaults turns_left=0), but its
+            # owner is the ENEMY, not the wizard — so turns_left alone would
+            # misclassify aura hits as the wizard's own DOT and sum them across
+            # separate aura-bearers. Gate the DOT branch on the source actually
+            # sitting on the wizard; everything else collapses as a direct hit
+            # (which names the attacker via _attacker_phrase).
+            is_dot = (
+                payload.get('source_turns_left') is not None
+                and payload.get('source_owner_name') == target.get('name')
+            )
+            if is_dot:
                 # DOT tick — aggregate by source and damage type.
                 key = (payload.get('source_name'), payload.get('damage_type'))
                 if key not in dot_totals:
@@ -456,10 +694,28 @@ class _CrisisProducer:
                 dot_totals[key] += damage
                 _claim(rec)
             else:
-                line = _render_damage_taken(rec)
-                if line:
-                    lines.append(line)
-                    _claim(rec)
+                # Direct hit — collapse identical (attacker, dtype, damage).
+                attacker = _attacker_phrase(payload)
+                dtype = payload.get('damage_type')
+                key = (attacker, dtype, damage)
+                if key not in hit_counts:
+                    hit_order.append(key)
+                    hit_counts[key] = 0
+                hit_counts[key] += 1
+                _claim(rec)
+        for key in hit_order:
+            attacker, dtype, damage = key
+            count = hit_counts[key]
+            dtype_str = f" {dtype}" if dtype else ""
+            frm = f" from {attacker}" if attacker else ""
+            if count == 1:
+                lines.append(f"Wizard took {damage}{dtype_str}{frm}.")
+            elif damage_summed:
+                lines.append(f"Wizard took {damage * count}{dtype_str}{frm}.")
+            else:
+                lines.append(
+                    f"Wizard took {damage}{dtype_str}{frm}, {count} times."
+                )
         for key in dot_order:
             source, dtype = key
             total = dot_totals[key]
@@ -470,7 +726,33 @@ class _CrisisProducer:
                 lines.append(f"Wizard took {total}{dtype_str}.")
         return lines
 
-    def _handle_wizard_debuff_apply(self, rec, lines, categories, announced):
+    @staticmethod
+    def _refresh_churn_names(new_records):
+        """Buff names that this turn have BOTH a wizard-target fade
+        (EventOnBuffRemove) AND a wizard-target apply (EventOnBuffApply) —
+        i.e. a re-application that RW3 expressed as remove+apply rather than a
+        silent refresh. The fade line for these is suppressed (B5) so the pair
+        doesn't narrate 'X faded. Wizard X.' on every re-up. Unit-removed
+        fades (death cleanup) are not churn and don't count."""
+        faded = set()
+        applied = set()
+        for rec in new_records:
+            payload = rec.get('payload') or {}
+            target = payload.get('target') or {}
+            if not _is_wizard_snap(target):
+                continue
+            name = (payload.get('buff') or {}).get('name')
+            if not name:
+                continue
+            et = rec.get('event_type')
+            if et == 'EventOnBuffRemove' and not payload.get('is_unit_removed'):
+                faded.add(name)
+            elif et == 'EventOnBuffApply':
+                applied.add(name)
+        return faded & applied
+
+    def _handle_wizard_debuff_apply(self, rec, lines, categories, announced,
+                                    idx=None):
         """Claim and conditionally voice an EventOnBuffApply whose target is
         the wizard and whose buff is a debuff (curse). Returns True if the
         record was ours (claimed), False to let other branches try it.
@@ -506,7 +788,13 @@ class _CrisisProducer:
         severity = self._severity(buff.get('turns_left'))
         prev = self._debuff_high.get(name)
         if prev is None or severity > prev:
-            line = _render_buff_applied(rec)
+            # B4: name the applier. Prefer the buff's own source (set at
+            # capture, deferred-proof) and fall back to the chain root's
+            # caster; anonymous when neither resolves.
+            caster = buff.get('source_caster')
+            if not caster and idx is not None:
+                caster = _chain_caster_name(rec, idx)
+            line = _render_buff_applied(rec, caster)
             if line:
                 lines.append(line)
                 categories.add('debuff_applied')

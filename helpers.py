@@ -44,6 +44,61 @@ def classify_resist_outcome(damage_pre, damage_post, target_resist_pct=None):
     return 'normal'
 
 
+# ---- Source attribution (game combat-log convention) ----
+
+# Buff-type integers mirror Level.BUFF_TYPE_* (Level.py:1024-1028). Kept as
+# local constants so this module stays import-pure (no Level dependency,
+# testable outside the game). Stable game constants.
+_BUFF_TYPE_BLESS = 1
+_BUFF_TYPE_CURSE = 2
+
+
+def source_attributed_line(kind, *, amount, dtype, target_name,
+                           source_name, source_owner_name,
+                           source_is_buff, source_buff_type):
+    """Render one damage/heal line the way RW3's own combat log attributes
+    it (Level.deal_damage, Level.py:4064-4072).
+
+    The game's branch: an effect reads ACTIVELY — "{owner} deals N dtype to
+    {target} with {source}" — when the source has an owner AND is not a
+    BLESS/CURSE buff; otherwise PASSIVELY — "{target} took N dtype from
+    {source}". Equipment (buff_type ITEM) is NOT a temp buff, so a gear hit
+    reads actively with the wizard as owner and the item named as the
+    instrument; a spell reads actively with its caster as owner; a DOT
+    (bless/curse buff source) reads passively, named by the buff.
+
+    Self-collapse: when the owner and target are the same unit (self-heal,
+    self-hit), the active form would read "Wizard ... to Wizard", so we fall
+    back to the passive form ("Wizard healed N from {source}"). Compared by
+    name — adequate for our sites (the only self case is the wizard); a
+    rare same-name enemy-on-enemy pair would collapse cosmetically, which is
+    acceptable.
+
+    `kind` is 'damage' or 'heal'. Returns the sentence BODY with no trailing
+    period — callers punctuate per their section style. All inputs are
+    primitives from the journal payload (source_owner_name / source_is_buff /
+    source_buff_type land via journal._source_attribution); pure and
+    Level-free for testing. The word "damage" is intentionally omitted
+    (house style; owner-approved)."""
+    src = source_name or "unknown"
+    is_temp_buff = bool(source_is_buff) and source_buff_type in (
+        _BUFF_TYPE_BLESS, _BUFF_TYPE_CURSE
+    )
+    active = (
+        bool(source_owner_name)
+        and not is_temp_buff
+        and source_owner_name != target_name
+    )
+    dtype_str = f" {dtype}" if dtype else ""
+    if kind == 'heal':
+        if active:
+            return f"{source_owner_name} heals {target_name} for {amount} with {src}"
+        return f"{target_name} healed {amount} from {src}"
+    if active:
+        return f"{source_owner_name} deals {amount}{dtype_str} to {target_name} with {src}"
+    return f"{target_name} took {amount}{dtype_str} from {src}"
+
+
 # ---- Direction & Spatial Helpers ----
 
 def _cardinal_direction(dx, dy):

@@ -30,6 +30,8 @@ from digest import (
     gather_chain_events,
     is_player_keypress_cast,
     walk_to_keypress_root,
+    _build_target_hits,
+    _format_streamlined_side,
 )
 
 
@@ -1522,7 +1524,7 @@ def test_compose_digest_streamlined_with_inline_side():
     ]
     expected = (
         "Cast Magic Missile, killed Grey Gorgon (5,5), 65 Arcane. "
-        "Healed 1 HP. Arcane Frenzy applied, now 1 stack."
+        "Healed 1 HP from Stoneeater Amulet. Arcane Frenzy applied, now 1 stack."
     )
     assert compose_digest(chain) == expected
 
@@ -2406,3 +2408,117 @@ def test_compose_digest_includes_debuffs_in_full_output():
     out = compose_digest(chain)
     assert "Goblin (3,4) poisoned, 5 turns." in out
     assert "1 surviving" in out
+
+
+# ---- §4.4(a) streamlined-side heals split per source ----
+
+
+def test_streamlined_side_splits_heals_per_source():
+    w = _wizard_caster_snap()
+    chain = [
+        _heal_event(2, 1, w, source='Regeneration', amount=3),
+        _heal_event(3, 1, w, source='Stone Mask', amount=5),
+        _heal_event(4, 1, w, source='Regeneration', amount=2),
+    ]
+    out = _format_streamlined_side(chain)
+    assert "Healed 5 HP from Regeneration" in out  # 3 + 2 summed per source
+    assert "Healed 5 HP from Stone Mask" in out
+
+
+def test_streamlined_side_heal_unknown_source_fallback():
+    w = _wizard_caster_snap()
+    out = _format_streamlined_side([_heal_event(2, 1, w, source=None, amount=4)])
+    assert "Healed 4 HP" in out
+    assert "from" not in out
+
+
+# ---- §4.4(b) _build_target_hits LIFO pairing (nested deal_damage) ----
+
+
+def _pre(seq, tgt, source, dtype, dmg):
+    return {'sequence': seq, 'parent': None,
+            'event_type': 'EventOnPreDamaged',
+            'payload': {'target': tgt, 'source_name': source,
+                        'damage_type': dtype, 'damage_pre_resist': dmg,
+                        'damage_post_resist': dmg, 'resisted': False},
+            'marks': []}
+
+
+def _dmg(seq, tgt, amount):
+    return {'sequence': seq, 'parent': None, 'event_type': 'EventOnDamaged',
+            'payload': {'target': tgt, 'damage': amount}, 'marks': []}
+
+
+def test_build_target_hits_lifo_nested_pairing():
+    # Nested deal_damage on one target: Pre(outer), Pre(inner), Dmg(inner),
+    # Dmg(outer). LIFO pairs each Damaged with the most-recent pre, so no
+    # hit is dropped and attribution stays correct.
+    tgt = {'id': 777, 'name': 'Ogre'}
+    chain = [
+        _pre(1, tgt, 'Fireball', 'Fire', 10),
+        _pre(2, tgt, 'Thorns', 'Physical', 3),
+        _dmg(3, tgt, 3),    # inner -> Thorns
+        _dmg(4, tgt, 10),   # outer -> Fireball
+    ]
+    hits = _build_target_hits(chain)[777]
+    assert len(hits) == 2  # neither hit dropped
+    assert hits[0]['spell'] == 'Thorns' and hits[0]['dtype'] == 'Physical'
+    assert hits[1]['spell'] == 'Fireball' and hits[1]['dtype'] == 'Fire'
+
+
+def test_build_target_hits_simple_pair_unchanged():
+    tgt = {'id': 778, 'name': 'Imp'}
+    chain = [_pre(1, tgt, 'Fireball', 'Fire', 8), _dmg(2, tgt, 8)]
+    hits = _build_target_hits(chain)[778]
+    assert len(hits) == 1
+    assert hits[0]['spell'] == 'Fireball'
+    assert hits[0]['damage_dealt'] == 8
+
+
+def test_build_target_hits_excludes_wizard():
+    """REGRESSION: a retaliation hit on the wizard inside the player's own
+    cast chain (Thorns) must NOT enter the digest's per-target hits — crisis
+    owns wizard damage-taken. Otherwise the digest re-narrates it as a
+    Surviving/Killed line alongside crisis (double narration)."""
+    wiz = {'id': 100, 'name': 'Wizard', 'is_player_controlled': True,
+           'tier': 'wizard'}
+    enemy = {'id': 778, 'name': 'Ogre', 'is_player_controlled': False}
+    chain = [
+        _pre(1, enemy, 'Magic Missile', 'Arcane', 30), _dmg(2, enemy, 30),
+        _pre(3, wiz, 'Thorns', 'Physical', 3), _dmg(4, wiz, 3),
+    ]
+    hits = _build_target_hits(chain)
+    assert 100 not in hits          # wizard excluded
+    assert 778 in hits              # enemy still present
+
+
+def test_killed_section_excludes_wizard_death():
+    """REGRESSION: wizard death in a player chain is crisis's ('Wizard
+    died.'), not a digest 'N killed: Wizard' line."""
+    wiz = _target_snap(100, name='Wizard', tier='wizard')
+    enemy = _target_snap(778, name='Ogre', tier='minion')
+    chain = [
+        _pre_damage(1, None, enemy, spell='Magic Missile', dmg_pre=65, dmg_post=65),
+        _damage_full(2, None, enemy, spell='Magic Missile', damage=65),
+        _death(3, None, enemy),
+        # Wizard dies to retaliation in the same chain.
+        _pre_damage(4, None, wiz, spell='Thorns', dtype='Physical', dmg_pre=99, dmg_post=99),
+        _damage_full(5, None, wiz, spell='Thorns', dtype='Physical', damage=99),
+        _death(6, None, wiz, killing_source='Thorns'),
+    ]
+    out = compose_killed_section(chain)
+    assert 'Wizard' not in out
+    assert '1 killed' in out        # only the Ogre counts
+    assert 'Ogre' in out
+
+
+def test_surviving_section_excludes_wizard():
+    """REGRESSION: a non-fatal retaliation hit on the wizard is crisis's, not
+    a digest Surviving line."""
+    wiz = _target_snap(100, name='Wizard', tier='wizard', cur_hp=20, max_hp=50)
+    chain = [
+        _pre_damage(1, None, wiz, spell='Thorns', dtype='Physical', dmg_pre=3, dmg_post=3),
+        _damage_full(2, None, wiz, spell='Thorns', dtype='Physical', damage=3),
+    ]
+    out = compose_surviving_section(chain)
+    assert 'Wizard' not in out

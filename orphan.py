@@ -25,7 +25,7 @@ else last. This producer respects all prior marks and stamps `orphan_v1`
 on records it renders.
 """
 
-from helpers import _pluralize
+from helpers import _pluralize, source_attributed_line
 
 
 ORPHAN_MARK = "orphan_v1"
@@ -262,13 +262,47 @@ def _build_action_signature(chain):
     dtype = dpayload.get('damage_type')
     damage = dpayload.get('damage')
 
+    # target name is in the key alongside id() as insurance: CPython can reuse
+    # a freed unit's id() within a turn (spawn-die-spawn), and a same-name
+    # discriminator keeps a reallocated id from mis-collapsing two distinct
+    # targets into one line.
     return (caster_name, caster_tier, spell_name, melee,
-            'damage', target_id, dtype, damage)
+            'damage', target_id, target.get('name'), dtype, damage)
+
+
+def _render_foreign_damage(records, wizard_team, show_coords):
+    """Render damage whose source differs from the enclosing chain's caster
+    (e.g. a player's reactive gear proc firing DURING an enemy cast)
+    attributed to its OWN source, via the game-convention helper — instead
+    of being folded into the caster's spell line. Wizard-targeted foreign
+    damage belongs to crisis, so it is skipped here."""
+    lines = []
+    for r in records:
+        p = r.get('payload') or {}
+        target = p.get('target') or {}
+        if _is_wizard_snap(target):
+            continue
+        target_str = _name_with_coord(target, wizard_team, show_coords)
+        line = source_attributed_line(
+            'damage',
+            amount=p.get('damage'),
+            dtype=p.get('damage_type'),
+            target_name=target_str,
+            source_name=p.get('source_name'),
+            source_owner_name=p.get('source_owner_name'),
+            source_is_buff=p.get('source_is_buff'),
+            source_buff_type=p.get('source_buff_type'),
+        )
+        if line:
+            lines.append(line + ".")
+    return lines
 
 
 def _render_action_chain(chain, wizard_team, show_coords, movement_verbose):
-    """Render a single non-player action chain as one line.
-    Picks the verb and target form based on the chain's content."""
+    """Render a single non-player action chain. Normally one line; if the
+    chain carries embedded foreign-source damage (a reactive gear proc fired
+    during this cast), those hits are attributed to their own source and
+    appended as separate sentences."""
     if not chain:
         return None
     root = chain[0]
@@ -278,12 +312,63 @@ def _render_action_chain(chain, wizard_team, show_coords, movement_verbose):
     spell_name = spell.get('name') or 'attack'
     melee = bool(spell.get('melee'))
     caster_id = caster.get('id')
+    caster_name = caster.get('name')
 
-    # Find damage events; group by target for multi-target rendering.
-    damage_events = [
-        r for r in chain if r.get('event_type') == 'EventOnDamaged'
-    ]
+    # Partition damage: the cast's OWN damage carries source_name == the
+    # cast's spell (or the caster); anything else is a foreign proc that
+    # must be attributed to its own source, not folded into the spell line.
+    # Wizard-targeted damage belongs to crisis (claim==render) — exclude it
+    # from BOTH buckets so the orphan body never re-narrates a wizard hit.
+    own_damage = []
+    foreign_damage = []
+    wizard_damage_seen = False
+    for r in chain:
+        if r.get('event_type') != 'EventOnDamaged':
+            continue
+        p = r.get('payload') or {}
+        if _is_wizard_snap(p.get('target') or {}):
+            # Exclude wizard damage ONLY when crisis actually claimed it
+            # (claim==render). If crisis is disabled, the hit is unclaimed and
+            # orphan must still render it rather than drop it silently.
+            if _is_claimed_by_other(r):
+                wizard_damage_seen = True
+                continue
+        sname = p.get('source_name')
+        if sname is None or sname == spell_name or sname == caster_name:
+            own_damage.append(r)
+        else:
+            foreign_damage.append(r)
 
+    # B2: a cast whose ONLY effect was wizard damage (crisis's) and that did
+    # not also move the caster is fully redundant with the crisis line — drop
+    # it. (A cast that repositioned the caster still renders its movement; an
+    # AoE that also hit non-wizard targets renders those.)
+    caster_moved = any(
+        r.get('event_type') == 'EventOnMoved'
+        and ((r.get('payload') or {}).get('unit') or {}).get('id') == caster_id
+        for r in chain
+    )
+    if wizard_damage_seen and not own_damage and not foreign_damage \
+            and not caster_moved:
+        return None
+
+    main = _render_cast_line(chain, caster, spell_name, melee, caster_id,
+                             own_damage, wizard_team, show_coords,
+                             movement_verbose)
+    foreign_lines = _render_foreign_damage(
+        foreign_damage, wizard_team, show_coords)
+    parts = [p for p in ([main] + foreign_lines) if p]
+    if not parts:
+        return None
+    return " ".join(parts)
+
+
+def _render_cast_line(chain, caster, spell_name, melee, caster_id,
+                      damage_events, wizard_team, show_coords,
+                      movement_verbose):
+    """The caster's own action line (verb + targets), over the chain's OWN
+    damage events. Extracted verbatim from the original _render_action_chain
+    so no-foreign chains render byte-identically."""
     # Movement-via-cast: chain has EventOnMoved on the caster but no
     # damage (Frog Hop, Dash, Blink-style enemy spells). Verbose flag
     # controls whether the caster's pre-move starting position is
@@ -419,8 +504,12 @@ def _render_action_section(records, idx, wizard_team, show_coords,
                 (ally_lines if is_ally else enemy_lines).append(line)
         for root, chain in items:
             for rec in chain:
-                _claim(rec)
-                claimed.append(rec)
+                # claim==render: never re-mark a record a higher-precedence
+                # producer (crisis) already owns — the wizard-damage child of
+                # an enemy cast is crisis's, not ours.
+                if not _is_claimed_by_other(rec):
+                    _claim(rec)
+                    claimed.append(rec)
 
     for root, chain in standalone_chains:
         is_ally = _is_ally(root)
@@ -429,8 +518,9 @@ def _render_action_section(records, idx, wizard_team, show_coords,
         if line:
             (ally_lines if is_ally else enemy_lines).append(line)
         for rec in chain:
-            _claim(rec)
-            claimed.append(rec)
+            if not _is_claimed_by_other(rec):
+                _claim(rec)
+                claimed.append(rec)
 
     return enemy_lines + ally_lines, claimed
 
@@ -503,6 +593,12 @@ def _render_collapsed_action(items, wizard_team, show_coords, movement_verbose):
     # Damage collapsed form (existing behavior).
     dpayload = damage_events[0].get('payload') or {}
     target = dpayload.get('target') or {}
+    # B2: a collapsed group of identical hits on the wizard is crisis's —
+    # drop it from the orphan body (crisis collapses the same hits itself),
+    # but only when crisis actually claimed it (claim==render; crisis-off
+    # falls through to render here).
+    if _is_wizard_snap(target) and _is_claimed_by_other(damage_events[0]):
+        return None
     damage = dpayload.get('damage', 0)
     dtype = dpayload.get('damage_type')
     dtype_str = f" {dtype}" if dtype else ""
@@ -577,8 +673,11 @@ def _render_status_ticks(records, idx, wizard_team, show_coords):
                 if turns > acc['turns']:
                     acc['turns'] = turns
         for rec in chain:
-            _claim(rec)
-            claimed.append(rec)
+            # claim==render: a buff-tick chain on the wizard has its damage
+            # child owned by crisis; don't double-mark it.
+            if not _is_claimed_by_other(rec):
+                _claim(rec)
+                claimed.append(rec)
 
     dot_groups = {}
     dot_order = []
@@ -683,6 +782,50 @@ def _render_status_ticks(records, idx, wizard_team, show_coords):
 # ======================================================================
 
 
+def _render_bare_effect_section(records, wizard_team, show_coords):
+    """Render bare-root damage/heal effects that no chain claimed — e.g. a
+    reactive gear proc that fired outside any cast/buff-advance context, so
+    its EventOnDamaged/EventOnHealed has parent=None and is owned by no
+    producer. Without this they fall through the whole pipeline and are
+    silently lost. Wizard-targeted effects belong to crisis and are skipped.
+    Source-attributed via the game-convention helper. Returns
+    (lines, claimed_records)."""
+    lines = []
+    claimed = []
+    for r in records:
+        et = r.get('event_type')
+        if et not in ('EventOnDamaged', 'EventOnHealed'):
+            continue
+        if r.get('parent') is not None:
+            continue
+        if _is_claimed_by_other(r) or _has_mark(r, ORPHAN_MARK):
+            continue
+        p = r.get('payload') or {}
+        target = p.get('target') or {}
+        if _is_wizard_snap(target):
+            continue
+        target_str = _name_with_coord(target, wizard_team, show_coords)
+        if et == 'EventOnDamaged':
+            line = source_attributed_line(
+                'damage', amount=p.get('damage'), dtype=p.get('damage_type'),
+                target_name=target_str, source_name=p.get('source_name'),
+                source_owner_name=p.get('source_owner_name'),
+                source_is_buff=p.get('source_is_buff'),
+                source_buff_type=p.get('source_buff_type'))
+        else:  # EventOnHealed
+            line = source_attributed_line(
+                'heal', amount=p.get('heal_amount'), dtype=None,
+                target_name=target_str, source_name=p.get('source_name'),
+                source_owner_name=p.get('source_owner_name'),
+                source_is_buff=p.get('source_is_buff'),
+                source_buff_type=p.get('source_buff_type'))
+        if line:
+            lines.append(line + ".")
+            _claim(r)
+            claimed.append(r)
+    return lines, claimed
+
+
 class _OrphanProducer:
     """Stateful across calls: tracks the highest journal sequence
     processed. Fires once per turn boundary. Returns a tagged section
@@ -733,8 +876,13 @@ class _OrphanProducer:
         tick_lines, tick_claimed = _render_status_ticks(
             new_records, idx, wizard_team, show_coords
         )
+        # Bare-root procs (gear that fired outside any chain) — claimed last,
+        # after action/status sections have taken their chains.
+        bare_lines, _bare_claimed = _render_bare_effect_section(
+            new_records, wizard_team, show_coords
+        )
 
-        all_lines = action_lines + tick_lines
+        all_lines = action_lines + tick_lines + bare_lines
         text = " ".join(all_lines).strip()
 
         if telemetry is not None:

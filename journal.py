@@ -210,6 +210,34 @@ def _buff_resist_penalties(buff):
     return out
 
 
+def _buff_source_caster(buff):
+    """Name the unit that applied this buff, IF the effect happened to set a
+    `source` back-reference on it.
+
+    NOTE: there is no general `Buff.source` field in RW3 — the base Buff does
+    not define one, and a source scan shows `.source` is set almost entirely
+    on units/clouds (summon origin) rather than on debuffs applied to a
+    victim. So for the vast majority of enemy debuffs this returns None and
+    the crisis producer relies on its chain-walk fallback (the actual live
+    path), then anonymous. This hook is kept for the rare effect that DOES
+    set `buff.source` (e.g. a player equipment buff) — there it yields the
+    applier directly and is immune to the deferred-cast chain gap. Resolves
+    `.caster` (a Spell) then `.owner` (a Buff/Item); never names the bearer
+    as its own applier (self-buffs)."""
+    src = getattr(buff, 'source', None)
+    if src is None:
+        return None
+    caster = getattr(src, 'caster', None)
+    if caster is None:
+        caster = getattr(src, 'owner', None)
+    name = _name_or(caster)
+    # Don't attribute a buff to the unit it sits on (self-applied).
+    owner = getattr(buff, 'owner', None)
+    if name is not None and owner is not None and name == _name_or(owner):
+        return None
+    return name
+
+
 def _snapshot_buff(buff):
     """Snapshot the fields downstream consumers need from a Buff.
 
@@ -218,9 +246,11 @@ def _snapshot_buff(buff):
     read this to filter and route applies appropriately. `agency` feeds
     the crisis Model-A cadence (per-turn countdown for control debuffs).
     `resist_penalty` feeds the crisis class-4 read (effective resist total
-    when a debuff lowers the owner's resistances)."""
+    when a debuff lowers the owner's resistances). `source_caster` feeds the
+    crisis B4 non-damage attribution (who applied this debuff), when the
+    game set buff.source."""
     if buff is None:
-        return {'id': None, 'name': None, 'agency': None}
+        return {'id': None, 'name': None, 'agency': None, 'source_caster': None}
     return {
         'id': id(buff),
         'name': getattr(buff, 'name', None),
@@ -229,6 +259,7 @@ def _snapshot_buff(buff):
         'buff_type': getattr(buff, 'buff_type', None),
         'agency': _buff_agency(buff),
         'resist_penalty': _buff_resist_penalties(buff),
+        'source_caster': _buff_source_caster(buff),
     }
 
 
@@ -264,6 +295,35 @@ def _name_or(value, fallback=None):
         return fallback
     name = getattr(value, 'name', None)
     return name if isinstance(name, str) else fallback
+
+
+def _source_attribution(source):
+    """Capture the fields a renderer needs to reproduce the game's own
+    attribution branch (Level.deal_damage, Level.py:4044/4064): the
+    acting unit's name and whether the source is a temp buff (bless/curse)
+    vs equipment vs a spell.
+
+    The game renders an effect ACTIVELY — "{owner} deals N to {target}
+    with {source}" — when `source.owner` is set AND the source is not a
+    BLESS/CURSE buff; otherwise PASSIVELY — "{target} takes N from
+    {source}". Equipment (BUFF_TYPE_ITEM) is NOT a temp buff, so a gear
+    hit reads actively with the wizard as owner and the item as source.
+
+    Read off the live source object at event-fire time; only primitives
+    are stored. `source_name` itself is captured separately by each
+    builder and remains the grouping/dedup key — these fields are
+    display-layer only (never used as collapse keys)."""
+    if source is None:
+        return {
+            'source_owner_name': None,
+            'source_is_buff': False,
+            'source_buff_type': None,
+        }
+    return {
+        'source_owner_name': _name_or(getattr(source, 'owner', None)),
+        'source_is_buff': isinstance(source, Level.Buff),
+        'source_buff_type': getattr(source, 'buff_type', None),
+    }
 
 
 def _stack_count_for(unit, buff):
@@ -313,6 +373,7 @@ def _payload_damaged(event):
         'source_name': _name_or(source),
         'source_unit_id': id(source.owner) if getattr(source, 'owner', None) is not None else None,
         'source_turns_left': getattr(source, 'turns_left', None) if source is not None else None,
+        **_source_attribution(source),
     }
 
 
@@ -350,6 +411,7 @@ def _payload_pre_damaged(event):
         'source_name': _name_or(event.source),
         'source_unit_id': id(event.source.owner) if getattr(event.source, 'owner', None) is not None else None,
         'target_resist_pct': target_resist_pct,
+        **_source_attribution(event.source),
     }
 
 
@@ -376,6 +438,7 @@ def _payload_healed(event):
         'target': _snapshot_unit(event.unit),
         'heal_amount': abs(raw) if raw is not None else None,
         'source_name': _name_or(event.source),
+        **_source_attribution(event.source),
     }
 
 

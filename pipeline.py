@@ -77,7 +77,8 @@ def fire_pipeline(tts, log_fn, cfg, wizard_unit, telemetry=None):
         section = _safe_fire(
             'crisis',
             lambda: _crisis.producer.fire(
-                journal.records, wizard_unit, log_fn, telemetry=telemetry
+                journal.records, wizard_unit, log_fn, telemetry=telemetry,
+                damage_summed=getattr(cfg, 'crisis_damage_summed', False),
             ),
             log_fn,
         )

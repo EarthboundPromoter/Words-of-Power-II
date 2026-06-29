@@ -21,6 +21,10 @@ from crisis import (
     _render_damage_taken,
     _render_displaced,
     _render_wizard_death,
+    _attacker_phrase,
+    _render_wizard_shield_lost,
+    _render_wizard_healed,
+    _render_wizard_buff_gained,
     _CrisisProducer,
 )
 
@@ -139,6 +143,176 @@ def test_damage_taken_skips_zero_damage():
 def test_damage_taken_skips_non_damage_event():
     rec = {'event_type': 'EventOnHealed', 'payload': {}}
     assert _render_damage_taken(rec) is None
+
+
+# ---- attacker naming on damage taken (_attacker_phrase) ----
+
+
+def _dmg_payload(source='Storm Breath', owner='Storm Drake',
+                 is_buff=False, buff_type=None, damage=8, dtype='Lightning'):
+    return {
+        'target': _wizard_snap(), 'damage': damage, 'damage_type': dtype,
+        'source_name': source, 'source_owner_name': owner,
+        'source_is_buff': is_buff, 'source_buff_type': buff_type,
+    }
+
+
+def _dmg_rec(payload, sequence=1):
+    return {'sequence': sequence, 'parent': None,
+            'event_type': 'EventOnDamaged', 'payload': payload, 'marks': []}
+
+
+def test_attacker_named_attack_uses_possessive():
+    assert _render_damage_taken(_dmg_rec(_dmg_payload())) == \
+        "Wizard took 8 Lightning from Storm Drake's Storm Breath."
+
+
+def test_attacker_generic_melee_names_attacker_only():
+    payload = _dmg_payload(source='Melee Attack', owner='Goblin',
+                           damage=6, dtype='Physical')
+    assert _render_damage_taken(_dmg_rec(payload)) == \
+        "Wizard took 6 Physical from Goblin."
+
+
+def test_attacker_dot_temp_buff_names_source_only():
+    # Bleed (curse buff) ticking on the wizard: owner is the victim, so name
+    # the buff, never "Wizard's Bleed".
+    payload = _dmg_payload(source='Bleed', owner='Wizard', is_buff=True,
+                           buff_type=2, damage=3, dtype='Physical')
+    assert _render_damage_taken(_dmg_rec(payload)) == \
+        "Wizard took 3 Physical from Bleed."
+
+
+def test_attacker_no_owner_unchanged():
+    # Legacy/ownerless record (no source_owner_name) -> original phrasing.
+    rec = _damage_record(_wizard_snap(), damage=4, dtype='Physical',
+                         source='Spikes')
+    assert _render_damage_taken(rec) == "Wizard took 4 Physical from Spikes."
+
+
+# ---- _render_wizard_shield_lost ----
+
+
+def _shield_record(target, remaining=2, sequence=30):
+    snap = dict(target)
+    snap['shields'] = remaining
+    return {'sequence': sequence, 'parent': None,
+            'event_type': 'EventOnShieldRemoved',
+            'payload': {'target': snap}, 'marks': []}
+
+
+def test_shield_lost_with_remaining():
+    assert _render_wizard_shield_lost(_shield_record(_wizard_snap(), 2)) == \
+        "Wizard shield lost, 2 remaining."
+
+
+def test_shield_last_lost():
+    assert _render_wizard_shield_lost(_shield_record(_wizard_snap(), 0)) == \
+        "Wizard last shield lost."
+
+
+def test_shield_lost_non_wizard_ignored():
+    assert _render_wizard_shield_lost(_shield_record(_enemy_snap(), 1)) is None
+
+
+# ---- _render_wizard_healed ----
+
+
+def _heal_record(target, amount=5, source='Regeneration', sequence=40,
+                 parent=None):
+    return {'sequence': sequence, 'parent': parent,
+            'event_type': 'EventOnHealed',
+            'payload': {'target': target, 'heal_amount': amount,
+                        'source_name': source}, 'marks': []}
+
+
+def test_wizard_healed_with_source():
+    assert _render_wizard_healed(_heal_record(_wizard_snap())) == \
+        "Wizard healed 5 from Regeneration."
+
+
+def test_wizard_healed_no_source():
+    assert _render_wizard_healed(_heal_record(_wizard_snap(), source=None)) == \
+        "Wizard healed 5."
+
+
+def test_wizard_healed_zero_ignored():
+    assert _render_wizard_healed(_heal_record(_wizard_snap(), amount=0)) is None
+
+
+def test_wizard_healed_non_wizard_ignored():
+    assert _render_wizard_healed(_heal_record(_enemy_snap())) is None
+
+
+# ---- _render_wizard_buff_gained ----
+
+
+def test_wizard_buff_gained_bless():
+    rec = _buff_record('EventOnBuffApply', _wizard_snap(), name='Blessed',
+                       buff_type=1, turns_left=10)
+    assert _render_wizard_buff_gained(rec) == "Wizard gained Blessed, 10 turns."
+
+
+def test_wizard_buff_gained_no_turns():
+    rec = _buff_record('EventOnBuffApply', _wizard_snap(), name='Blessed',
+                       buff_type=1, turns_left=0)
+    assert _render_wizard_buff_gained(rec) == "Wizard gained Blessed."
+
+
+def test_wizard_buff_gained_curse_ignored():
+    # Curses (type 2) are owned by _handle_wizard_debuff_apply, not here.
+    rec = _buff_record('EventOnBuffApply', _wizard_snap(), name='Petrified',
+                       buff_type=2, turns_left=3)
+    assert _render_wizard_buff_gained(rec) is None
+
+
+def test_wizard_buff_gained_non_wizard_ignored():
+    rec = _buff_record('EventOnBuffApply', _enemy_snap(), name='Blessed',
+                       buff_type=1)
+    assert _render_wizard_buff_gained(rec) is None
+
+
+# ---- chain-aware guard on positives (heal / buff-gain) via fire() ----
+
+
+def _cast_begin_root(spell='Fireball', sequence=1):
+    return {'sequence': sequence, 'parent': None, 'event_type': 'cast_begin',
+            'payload': {'is_player': True, 'spell': {'name': spell}},
+            'marks': []}
+
+
+def test_out_of_chain_heal_claimed_and_voiced():
+    p = _CrisisProducer()
+    def noop(_): pass
+    heal = _heal_record(_wizard_snap(), amount=5, source='Regeneration')
+    section = p.fire([heal], _StubWizard(50, 50), noop, telemetry=None)
+    assert "Wizard healed 5 from Regeneration." in section[1]
+    assert _has_crisis_mark(heal)
+
+
+def test_in_chain_heal_not_claimed_by_crisis():
+    # Heal parented to a player keypress cast -> digest's; crisis abstains.
+    p = _CrisisProducer()
+    def noop(_): pass
+    root = _cast_begin_root()
+    heal = _heal_record(_wizard_snap(), amount=5, source='Fireball',
+                        sequence=2, parent=1)
+    section = p.fire([root, heal], _StubWizard(50, 50), noop, telemetry=None)
+    assert "healed" not in section[1].lower()
+    assert not _has_crisis_mark(heal)
+
+
+def test_equipment_tick_heal_not_claimed_by_crisis():
+    # Heal parented to an equipment_tick -> equipment producer's; crisis abstains.
+    p = _CrisisProducer()
+    def noop(_): pass
+    eq = {'sequence': 1, 'parent': None, 'event_type': 'equipment_tick',
+          'payload': {}, 'marks': []}
+    heal = _heal_record(_wizard_snap(), amount=5, source='Stone Mask',
+                        sequence=2, parent=1)
+    section = p.fire([eq, heal], _StubWizard(50, 50), noop, telemetry=None)
+    assert "healed" not in section[1].lower()
+    assert not _has_crisis_mark(heal)
 
 
 # ---- _render_buff_applied (debuff on wizard) ----
@@ -645,14 +819,15 @@ def test_resist_still_positive_no_line():
 
 
 def _dot_damage(source, damage=3, dtype='Physical', turns=4, seq=10):
-    """A DOT-tick EventOnDamaged on the wizard (source is a buff, so the
-    journal captured source_turns_left)."""
+    """A DOT-tick EventOnDamaged on the wizard. A real DOT buff sits on the
+    wizard, so its source_owner_name is the wizard — that owner==target check
+    is how the producer tells a true DOT from an attacker-owned damage aura."""
     return {
         'sequence': seq, 'parent': None, 'event_type': 'EventOnDamaged',
         'payload': {
             'target': _wizard_snap(), 'damage': damage,
             'damage_type': dtype, 'source_name': source,
-            'source_turns_left': turns,
+            'source_turns_left': turns, 'source_owner_name': 'Wizard',
         },
         'marks': [],
     }
@@ -681,8 +856,10 @@ def test_wizard_distinct_dot_sources_not_merged():
     assert "Wizard took 1 Poison from Poisoned." in s[1]
 
 
-def test_wizard_nondot_damage_not_summed():
-    """Non-DOT hits (no buff source) render per event, never summed."""
+def test_wizard_nondot_identical_hits_collapse_with_multiplier():
+    """B1: repeated identical non-DOT hits collapse to ONE line with a
+    count multiplier (default), keeping the per-hit value — not summed,
+    not N copies."""
     p = _CrisisProducer()
     w = _StubWizardBuffs()
     r1 = _damage_record(_wizard_snap(), damage=5, dtype='Fire', source='Imp')
@@ -690,4 +867,232 @@ def test_wizard_nondot_damage_not_summed():
     r2 = _damage_record(_wizard_snap(), damage=5, dtype='Fire', source='Imp')
     r2['sequence'] = 11
     s = p.fire([r1, r2], w, _noop)
-    assert s[1].count("Wizard took 5 Fire from Imp.") == 2
+    assert "Wizard took 5 Fire from Imp, 2 times." in s[1]
+    # Default is per-hit value with multiplier, NOT a sum.
+    assert "10" not in s[1]
+    assert s[1].count("Wizard took") == 1
+
+
+def test_wizard_nondot_identical_hits_summed_flag():
+    """B1: with crisis_damage_summed, identical hits report the total."""
+    p = _CrisisProducer()
+    w = _StubWizardBuffs()
+    r1 = _damage_record(_wizard_snap(), damage=5, dtype='Fire', source='Imp')
+    r1['sequence'] = 10
+    r2 = _damage_record(_wizard_snap(), damage=5, dtype='Fire', source='Imp')
+    r2['sequence'] = 11
+    s = p.fire([r1, r2], w, _noop, damage_summed=True)
+    assert "Wizard took 10 Fire from Imp." in s[1]
+    assert "times" not in s[1]
+
+
+def _dot_record(source='Bleed', damage=3, dtype='Physical', owner='Wizard',
+                turns_left=2, sequence=10):
+    """A buff-sourced damage record: source_turns_left set, owner names the
+    bearer. owner='Wizard' => DOT on the victim; owner=<enemy> => an
+    attacker-owned damage aura."""
+    return {
+        'sequence': sequence, 'parent': None, 'event_type': 'EventOnDamaged',
+        'payload': {
+            'target': _wizard_snap(), 'damage': damage, 'damage_type': dtype,
+            'source_name': source, 'source_turns_left': turns_left,
+            'source_owner_name': owner, 'source_is_buff': True,
+            'source_buff_type': 2,
+        },
+        'marks': [],
+    }
+
+
+def test_dot_on_wizard_sums():
+    """A true DOT (buff sits on the wizard) sums its stacks per turn."""
+    p = _CrisisProducer()
+    w = _StubWizardBuffs()
+    r1 = _dot_record(source='Bleed', damage=3, owner='Wizard', sequence=10)
+    r2 = _dot_record(source='Bleed', damage=3, owner='Wizard', sequence=11)
+    r3 = _dot_record(source='Bleed', damage=3, owner='Wizard', sequence=12)
+    s = p.fire([r1, r2, r3], w, _noop)
+    assert "Wizard took 9 Physical from Bleed." in s[1]
+
+
+def test_damage_aura_not_summed_as_dot():
+    """REGRESSION: an attacker-owned DamageAuraBuff also has turns_left, but
+    its owner is the ENEMY, not the wizard. It must NOT be summed as a wizard
+    DOT — it collapses as a counted direct hit instead."""
+    p = _CrisisProducer()
+    w = _StubWizardBuffs()
+    # Two separate enemies each carry 'Toxic Aura' hitting the wizard for 10.
+    a1 = _dot_record(source='Toxic Aura', damage=10, dtype='Poison',
+                     owner='Spider', sequence=10)
+    a2 = _dot_record(source='Toxic Aura', damage=10, dtype='Poison',
+                     owner='Spider', sequence=11)
+    s = p.fire([a1, a2], w, _noop)
+    # Not summed to 20; collapsed with a count instead.
+    assert "20" not in s[1]
+    assert "Wizard took 10 Poison from Toxic Aura, 2 times." in s[1]
+
+
+def test_wizard_nondot_varying_magnitude_not_merged():
+    """B1: hits of differing magnitude stay separate (resist/vuln info)."""
+    p = _CrisisProducer()
+    w = _StubWizardBuffs()
+    r1 = _damage_record(_wizard_snap(), damage=5, dtype='Fire', source='Imp')
+    r1['sequence'] = 10
+    r2 = _damage_record(_wizard_snap(), damage=8, dtype='Fire', source='Imp')
+    r2['sequence'] = 11
+    s = p.fire([r1, r2], w, _noop)
+    assert "Wizard took 5 Fire from Imp." in s[1]
+    assert "Wizard took 8 Fire from Imp." in s[1]
+
+
+# ---- B4: non-damage caster attribution ----
+
+
+def _wizard_debuff_record(name='Blind', turns_left=3, sequence=10, parent=None,
+                          source_caster=None):
+    return {
+        'sequence': sequence, 'parent': parent,
+        'event_type': 'EventOnBuffApply',
+        'payload': {
+            'target': _wizard_snap(),
+            'buff': {'name': name, 'buff_type': 2, 'turns_left': turns_left,
+                     'agency': None, 'resist_penalty': {},
+                     'source_caster': source_caster},
+        },
+        'marks': [],
+    }
+
+
+def _enemy_cast_root(caster_name='Raven Mage', sequence=1):
+    return {
+        'sequence': sequence, 'parent': None, 'event_type': 'cast_begin',
+        'payload': {
+            'is_player': False,
+            'caster': _enemy_snap(name=caster_name),
+            'spell': {'name': 'Mass Blindness'},
+        },
+        'marks': [],
+    }
+
+
+def test_b4_debuff_caster_from_buff_source():
+    """B4: applier named directly from buff.source_caster (deferred-proof)."""
+    p = _CrisisProducer()
+    rec = _wizard_debuff_record(source_caster='Raven Mage')
+    s = p.fire([rec], _StubWizardBuffs(), _noop)
+    assert "Wizard blind, 3 turns, by Raven Mage." in s[1]
+
+
+def test_b4_debuff_caster_from_chain_walk():
+    """B4: when buff.source is unset, name the chain root's caster."""
+    p = _CrisisProducer()
+    root = _enemy_cast_root('Raven Mage', sequence=1)
+    rec = _wizard_debuff_record(sequence=2, parent=1, source_caster=None)
+    s = p.fire([root, rec], _StubWizardBuffs(), _noop)
+    assert "Wizard blind, 3 turns, by Raven Mage." in s[1]
+
+
+def test_b4_debuff_anonymous_when_no_source():
+    """B4: no source, no walkable cast root -> anonymous (design floor)."""
+    p = _CrisisProducer()
+    rec = _wizard_debuff_record(sequence=5, parent=None, source_caster=None)
+    s = p.fire([rec], _StubWizardBuffs(), _noop)
+    assert "Wizard blind, 3 turns." in s[1]
+    assert "by" not in s[1]
+
+
+# ---- B3: external-only displacement ----
+
+
+def _wizard_teleport_record(sequence=10, parent=None, x=8, y=12):
+    return {
+        'sequence': sequence, 'parent': parent,
+        'event_type': 'EventOnMoved',
+        'payload': {'unit': _wizard_snap(x=x, y=y), 'teleport': True},
+        'marks': [],
+    }
+
+
+def test_b3_external_displace_announced_and_claimed():
+    """B3: an enemy push (out-of-chain teleport) surfaces and is claimed."""
+    p = _CrisisProducer()
+    rec = _wizard_teleport_record(sequence=10, parent=None)
+    s = p.fire([rec], _StubWizard(50, 50), _noop)
+    assert "Wizard displaced to (8,12)." in s[1]
+    assert _has_crisis_mark(rec)
+
+
+def test_b3_own_blink_suppressed():
+    """B3: the player's own Blink (in player-keypress chain) is NOT a crisis
+    displace — digest owns it. Crisis neither lines nor claims it."""
+    p = _CrisisProducer()
+    root = _cast_begin_root(spell='Blink', sequence=1)  # is_player=True root
+    rec = _wizard_teleport_record(sequence=2, parent=1)
+    s = p.fire([root, rec], _StubWizard(50, 50), _noop)
+    assert "displaced" not in s[1]
+    assert not _has_crisis_mark(rec)
+
+
+def test_b3_external_displace_with_caster():
+    """B3+B4: an enemy teleport names its cause from the chain root."""
+    p = _CrisisProducer()
+    root = _enemy_cast_root('Raven Mage', sequence=1)
+    rec = _wizard_teleport_record(sequence=2, parent=1)
+    s = p.fire([root, rec], _StubWizard(50, 50), _noop)
+    assert "Wizard displaced to (8,12) by Raven Mage." in s[1]
+
+
+# ---- B5: fade / re-apply churn ----
+
+
+def test_b5_fade_suppressed_when_reapplied_same_turn():
+    """B5: a debuff that fades AND re-applies in one turn suppresses the fade
+    line (the pair would otherwise read 'X faded. Wizard X.')."""
+    p = _CrisisProducer()
+    fade = _buff_record('EventOnBuffRemove', _wizard_snap(), name='Blind',
+                        buff_type=2, sequence=10)
+    apply = _wizard_debuff_record(name='Blind', turns_left=3, sequence=11)
+    s = p.fire([fade, apply], _StubWizardBuffs(), _noop)
+    assert "faded" not in s[1]
+
+
+def test_b5_genuine_fade_still_speaks():
+    """B5: a fade with no same-turn re-apply still narrates normally."""
+    p = _CrisisProducer()
+    fade = _buff_record('EventOnBuffRemove', _wizard_snap(), name='Blind',
+                        buff_type=2, sequence=10)
+    s = p.fire([fade], _StubWizardBuffs(), _noop)
+    assert "Wizard's Blind faded." in s[1]
+
+
+def test_b5_repeated_reblind_silent_after_first():
+    """B5 (the log-1279 case): already blind, then fade+re-apply churn at the
+    same duration on later turns stays SILENT — no fade line, and the re-apply
+    is gated by the severity high-water set on first onset."""
+    p = _CrisisProducer()
+    w = _StubWizardBuffs(buffs=[_StubBuff('Blind', 3)])
+    # Turn 1: fresh blind — announces.
+    s1 = p.fire([_wizard_debuff_record(name='Blind', turns_left=3, sequence=10)],
+                w, _noop)
+    assert "Wizard blind, 3 turns." in s1[1]
+    # Turn 2: fade + re-apply at the same duration — fully silent.
+    fade = _buff_record('EventOnBuffRemove', _wizard_snap(), name='Blind',
+                        buff_type=2, sequence=20)
+    apply = _wizard_debuff_record(name='Blind', turns_left=3, sequence=21)
+    s2 = p.fire([fade, apply], w, _noop)
+    assert "faded" not in s2[1]
+    assert "blind" not in s2[1].lower()
+
+
+def test_b5_reblind_longer_duration_escalates():
+    """B5: a re-apply at a LONGER duration still escalates (magnitude rides
+    the shown channel), even through churn."""
+    p = _CrisisProducer()
+    w = _StubWizardBuffs(buffs=[_StubBuff('Blind', 5)])
+    p.fire([_wizard_debuff_record(name='Blind', turns_left=3, sequence=10)],
+           w, _noop)
+    fade = _buff_record('EventOnBuffRemove', _wizard_snap(), name='Blind',
+                        buff_type=2, sequence=20)
+    apply = _wizard_debuff_record(name='Blind', turns_left=6, sequence=21)
+    s2 = p.fire([fade, apply], w, _noop)
+    assert "Wizard blind, 6 turns." in s2[1]
+    assert "faded" not in s2[1]

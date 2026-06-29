@@ -349,6 +349,12 @@ def _build_target_hits(chain):
                    'resisted', 'shielded'}.
     """
     hits_by_target = {}
+    # Per-target STACK of pending PreDamaged. deal_damage nests (a PreDamaged
+    # handler can deal damage to the same target before the outer hit
+    # resolves), so a Damaged/ShieldRemoved pairs with the MOST RECENT
+    # pending pre — LIFO. A single slot dropped the outer hit; a FIFO queue
+    # would mispair inner vs outer. Normal (non-nested) hits leave exactly
+    # one item on the stack, so this matches the prior behavior exactly.
     pending_pre_by_target = {}
 
     for r in chain:
@@ -358,11 +364,20 @@ def _build_target_hits(chain):
         target_id = target.get('id')
         if target_id is None:
             continue
+        # claim==render: wizard damage-taken is crisis's lane, never the
+        # digest's. A retaliation hit on the wizard during the player's own
+        # cast (Thorns, etc.) parents into this keypress chain; excluding it
+        # here stops the digest re-narrating it as a Killed/Surviving line
+        # alongside crisis. The mod registers a global EventOnPreDamaged
+        # handler, so the wizard's in-chain hits DO produce paired records.
+        if target.get('is_player_controlled'):
+            continue
 
         if et == 'EventOnPreDamaged':
-            pending_pre_by_target[target_id] = r
+            pending_pre_by_target.setdefault(target_id, []).append(r)
         elif et == 'EventOnDamaged':
-            pre = pending_pre_by_target.pop(target_id, None)
+            stack = pending_pre_by_target.get(target_id)
+            pre = stack.pop() if stack else None
             if pre is None:
                 continue
             pre_payload = pre.get('payload') or {}
@@ -376,7 +391,8 @@ def _build_target_hits(chain):
                 'shielded': False,
             })
         elif et == 'EventOnShieldRemoved':
-            pre = pending_pre_by_target.pop(target_id, None)
+            stack = pending_pre_by_target.get(target_id)
+            pre = stack.pop() if stack else None
             if pre is None:
                 continue
             pre_payload = pre.get('payload') or {}
@@ -507,7 +523,13 @@ def compose_killed_section(chain):
     Per design_digest_phrasing.md the no-range-form rule applies: variable
     hit counts split into sub-classes per exact count.
     """
-    deaths = [r for r in chain if r.get('event_type') == 'EventOnDeath']
+    # Wizard death is crisis's ("Wizard died."), not a digest kill line.
+    deaths = [
+        r for r in chain
+        if r.get('event_type') == 'EventOnDeath'
+        and not ((r.get('payload') or {}).get('target') or {}).get(
+            'is_player_controlled')
+    ]
     if not deaths:
         return ""
 
@@ -1518,9 +1540,9 @@ def _format_streamlined_side(chain):
     """Render side effects as inline period-separated sentences without
     'Side.' label or 'Heals:' / 'Buffs:' sub-labels.
 
-    Heals use the verb-led short form 'Healed N HP' per spec example —
-    the standard 'Source N HP' cause-first form gets compressed here
-    because the streamlined context already names the player's action.
+    Heals use the verb-led short form 'Healed N HP from {source}', split
+    per source so each heal is attributed the way the game's combat log
+    attributes it (a summed source-blind total would drop that signal).
     Buffs keep their standard phrasing.
     """
     wizard_id = _find_wizard_id(chain)
@@ -1529,17 +1551,29 @@ def _format_streamlined_side(chain):
 
     sentences = []
 
-    # Heals — sum across all sources, render as "Healed N HP".
-    total_healed = 0
+    # Heals — per source (the game attributes each heal to its source).
+    heals_by_source = {}
+    heal_order = []
     for r in chain:
         if r.get('event_type') != 'EventOnHealed':
             continue
         p = r.get('payload') or {}
         if (p.get('target') or {}).get('id') != wizard_id:
             continue
-        total_healed += p.get('heal_amount') or 0
-    if total_healed > 0:
-        sentences.append(f"Healed {total_healed} HP")
+        amount = p.get('heal_amount') or 0
+        if amount <= 0:
+            continue
+        source = p.get('source_name') or 'Unknown'
+        if source not in heals_by_source:
+            heal_order.append(source)
+            heals_by_source[source] = 0
+        heals_by_source[source] += amount
+    for source in heal_order:
+        amt = heals_by_source[source]
+        if source and source != 'Unknown':
+            sentences.append(f"Healed {amt} HP from {source}")
+        else:
+            sentences.append(f"Healed {amt} HP")
 
     # Buffs — same phrasing as standard form, no sub-label.
     buff_applies = {}
@@ -1689,8 +1723,16 @@ def _claim_chain(chain, mark):
     re-narrating events the digest has already covered. Per phase-1
     decision #4 in design_rw2_data_model.md: marks are advisory and
     additive; no central coordinator.
+
+    claim==render: a wizard-facing record inside the player's keypress
+    chain (e.g. retaliation damage taken mid-cast) is claimed by crisis,
+    which runs first and renders it in the foregrounded lane. The digest
+    does NOT render wizard damage-taken, so it must not re-mark a
+    crisis-owned record — that would trip the double-claim watchdog.
     """
     for rec in chain:
+        if 'crisis_v1' in (rec.get('marks') or []):
+            continue
         marks = rec.setdefault('marks', [])
         if mark not in marks:
             marks.append(mark)

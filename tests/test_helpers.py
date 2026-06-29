@@ -17,7 +17,7 @@ from helpers import (_cardinal_direction, _bearing_index, _direction_offset, _pl
                      _make_collective_group,
                      _compress_path, _classify_unreachable, _walkable_neighbors,
                      _point_xy,
-                     classify_resist_outcome)
+                     classify_resist_outcome, source_attributed_line)
 
 
 def test_classify_resist_immune_at_100_pct():
@@ -48,6 +48,91 @@ def test_classify_resist_vulnerable_negative_resist():
 
 def test_classify_resist_normal():
     assert classify_resist_outcome(30, 30, target_resist_pct=0) == 'normal'
+
+
+# ---- source_attributed_line (game combat-log attribution) ----
+
+def _sal(kind='damage', amount=3, dtype='Acid', target_name='Ogre',
+         source_name='Acidifier', source_owner_name='Wizard',
+         source_is_buff=True, source_buff_type=3):
+    """Default args = an equipment (buff_type ITEM=3) hit on an enemy."""
+    return source_attributed_line(
+        kind, amount=amount, dtype=dtype, target_name=target_name,
+        source_name=source_name, source_owner_name=source_owner_name,
+        source_is_buff=source_is_buff, source_buff_type=source_buff_type)
+
+
+def test_sal_gear_damage_active():
+    # Equipment (ITEM=3) has owner=Wizard and is not a temp buff -> active.
+    assert _sal() == "Wizard deals 3 Acid to Ogre with Acidifier"
+
+
+def test_sal_enemy_spell_damage_active():
+    # Spell source: not a buff, has a caster owner -> active, names both.
+    assert _sal(source_name='Fireball', source_owner_name='Goblin',
+                target_name='Wizard', amount=6, dtype='Fire',
+                source_is_buff=False, source_buff_type=None) \
+        == "Goblin deals 6 Fire to Wizard with Fireball"
+
+
+def test_sal_dot_damage_passive():
+    # Curse buff (CURSE=2) source ticking on its owner -> passive, by buff.
+    assert _sal(source_name='Bleed', source_owner_name='Ogre',
+                target_name='Ogre', amount=3, dtype='Physical',
+                source_is_buff=True, source_buff_type=2) \
+        == "Ogre took 3 Physical from Bleed"
+
+
+def test_sal_temp_buff_passive_with_distinct_owner():
+    # A bless/curse buff is "temp" -> passive even when owner != target,
+    # isolating the temp-buff branch from the self-collapse branch.
+    assert _sal(source_name='Poison', source_owner_name='Caster',
+                target_name='Victim', amount=2, dtype='Poison',
+                source_is_buff=True, source_buff_type=1) \
+        == "Victim took 2 Poison from Poison"
+
+
+def test_sal_no_owner_passive():
+    assert _sal(source_name='Spikes', source_owner_name=None,
+                target_name='Ogre', amount=4, dtype='Physical',
+                source_is_buff=False, source_buff_type=None) \
+        == "Ogre took 4 Physical from Spikes"
+
+
+def test_sal_heal_active_ally():
+    assert _sal(kind='heal', source_name='Wild Healing Staff',
+                source_owner_name='Wizard', target_name='Goblin',
+                amount=4, dtype=None, source_is_buff=True, source_buff_type=3) \
+        == "Wizard heals Goblin for 4 with Wild Healing Staff"
+
+
+def test_sal_heal_self_collapse():
+    # owner == target (wizard self-heal from gear) -> passive form.
+    assert _sal(kind='heal', source_name='Stone Mask',
+                source_owner_name='Wizard', target_name='Wizard',
+                amount=5, dtype=None, source_is_buff=True, source_buff_type=3) \
+        == "Wizard healed 5 from Stone Mask"
+
+
+def test_sal_heal_passive_no_owner():
+    assert _sal(kind='heal', source_name='Regeneration',
+                source_owner_name=None, target_name='Wizard',
+                amount=5, dtype=None, source_is_buff=True, source_buff_type=1) \
+        == "Wizard healed 5 from Regeneration"
+
+
+def test_sal_damage_no_dtype_omits_type():
+    assert _sal(dtype=None, source_name='Thorns', source_owner_name='Wizard',
+                target_name='Ogre', amount=2, source_is_buff=True,
+                source_buff_type=3) \
+        == "Wizard deals 2 to Ogre with Thorns"
+
+
+def test_sal_missing_source_name_unknown():
+    assert _sal(source_name=None, source_owner_name=None,
+                target_name='Ogre', amount=1, dtype='Fire',
+                source_is_buff=False, source_buff_type=None) \
+        == "Ogre took 1 Fire from unknown"
 
 
 def test_classify_resist_no_pct_falls_back_to_resisted():

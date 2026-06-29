@@ -159,6 +159,14 @@ _SETTINGS_SCHEMA = [
      "# Reserved for users who want continuous DOT awareness during\n"
      "# multi-DOT pile-ons.\n"
      "# Default: false"),
+    ('Composer', 'crisis_damage_summed', 'false',
+     "# How repeated identical hits on the wizard in one turn are read.\n"
+     "# When false (default), the per-hit value is kept with a multiplier:\n"
+     "# 'Wizard took 3 Physical from Raven's Peck, 3 times.' When true, the\n"
+     "# total is reported instead: 'Wizard took 9 Physical from Raven's\n"
+     "# Peck.' Hits of differing magnitude are never merged either way (the\n"
+     "# variance is resist/vulnerability information).\n"
+     "# Default: false"),
     ('Composer', 'movement_verbose', 'false',
      "# Verbose rendering for enemy movement abilities (Frog Hop, Dash,\n"
      "# Blink-style spells). When false (default), movement chains\n"
@@ -261,6 +269,7 @@ class _Cfg:
         'Composer', 'legacy_batcher_combat_enabled', fallback=True
     )
     dot_renotify_enabled = _settings.getboolean('Composer', 'dot_renotify_enabled', fallback=False)
+    crisis_damage_summed = _settings.getboolean('Composer', 'crisis_damage_summed', fallback=False)
     movement_verbose = _settings.getboolean('Composer', 'movement_verbose', fallback=False)
 
 cfg = _Cfg()
@@ -274,6 +283,17 @@ log(f"[Settings] equipment_enabled = {cfg.equipment_enabled}")
 log(f"[Settings] legacy_batcher_combat_enabled = {cfg.legacy_batcher_combat_enabled}")
 log(f"[Settings] dot_renotify_enabled = {cfg.dot_renotify_enabled}")
 log(f"[Settings] movement_verbose = {cfg.movement_verbose}")
+
+
+def _legacy_combat_off():
+    """True when the legacy batcher's COMBAT narration is disabled — the new
+    composer pipeline (crisis/digest/orphan) owns it. Gates ONLY the handler
+    branches the pipeline replaces; sole-source branches that no producer
+    covers (ambient non-player deaths, spawns, ambient heals/shields, the
+    charge-threshold warning, item pickups, cooldown-ready, buff-fade
+    warnings, soul jar, enters-LoS) keep speaking, as does the per-hit HP
+    readout. Flip via settings.ini [Composer] legacy_batcher_combat_enabled."""
+    return not cfg.legacy_batcher_combat_enabled
 
 # ============================================================================
 # TTS INTEGRATION — Tolk
@@ -1483,6 +1503,8 @@ def on_spell_cast(event):
                 return
             if not spell_name or not caster_name:
                 return
+            if _legacy_combat_off():
+                return  # orphan composes enemy casts
             text = f"{caster_name} casts {spell_name}"
             # Summon casts → collapsed (grouped by caster×spell at flush)
             is_summon = spell_name.lower().startswith('summon')
@@ -1510,7 +1532,8 @@ def on_spell_cast(event):
         # Digest-covered: the digest's Cast section will announce this.
         # Charge threshold check below is NOT suppressed — player needs
         # charge warnings regardless.
-        if not _digest_suppress('on_spell_cast.player', spell=_name(event.spell)):
+        if (not _digest_suppress('on_spell_cast.player', spell=_name(event.spell))
+                and not _legacy_combat_off()):
             batcher.speak_immediate(text)
         try:
             _telemetry.emit('cast_target',
@@ -1563,7 +1586,8 @@ def on_damaged(event):
                 label = caster or spell_name or "unknown"
             text = f"{label}: {dmg} {dtype} damage"
             log(f"[Damage IN] {_log_ctx()} {text}")
-            batcher.speak_immediate(text)
+            if not _legacy_combat_off():  # crisis composes wizard damage
+                batcher.speak_immediate(text)
             _schedule_hp_announcement(unit)
             try:
                 _so = getattr(event.source, 'owner', None)
@@ -1597,7 +1621,8 @@ def on_damaged(event):
             coord_tag = f" ({unit.x},{unit.y})" if cfg.show_coordinates else ""
             text = f"{spell_name}: {_name(unit)}{coord_tag}, {dmg} {dtype}{resist_tag}{soul_tag}"
             log(f"[Damage OUT] {_log_ctx()} {text}")
-            batcher.speak_queued(text)
+            if not _legacy_combat_off():  # digest composes player damage-out
+                batcher.speak_queued(text)
             try:
                 _telemetry.emit('damage_out_detail',
                                 spell=spell_name,
@@ -1623,6 +1648,8 @@ def on_damaged(event):
                                 target=target_name,
                                 dmg=dmg, dtype=dtype):
                 return
+            if _legacy_combat_off():
+                return  # orphan composes ambient/enemy-turn damage
             source_name = caster or spell_name or "unknown"
             if caster:
                 fallback = f"{caster} hits {target_name}, {dmg} {dtype}"
@@ -1725,7 +1752,8 @@ def on_healed(event):
             if source:
                 text = f"Healed {amount} by {source}"
             log(f"[Heal] {_log_ctx()} {text}")
-            batcher.speak_queued(text)
+            if not _legacy_combat_off():  # crisis/digest compose wizard heals
+                batcher.speak_queued(text)
         else:
             # Non-player healed (enemy Satyr healing allies, etc.)
             is_minion = getattr(event.unit, 'team', None) == Level.TEAM_PLAYER
@@ -1784,7 +1812,8 @@ def on_buff_apply(event):
         if turns and turns > 0:
             text += f", {turns} turns"
         log(f"[Buff+] {_log_ctx()} {text}")
-        batcher.speak_queued(text)
+        if not _legacy_combat_off():  # crisis/digest compose wizard buffs
+            batcher.speak_queued(text)
     except Exception as e:
         log(f"[Buff+] Error: {e}")
 
@@ -1811,7 +1840,8 @@ def on_buff_remove(event):
                 # Duration ran out naturally
                 text = f"Channel complete: {spell_name}"
             log(f"[Buff-] {_log_ctx()} {text}")
-            batcher.speak_queued(text)
+            if not _legacy_combat_off():  # crisis composes wizard buff fades
+                batcher.speak_queued(text)
             return
 
         btype = getattr(buff, 'buff_type', 0)
@@ -1823,7 +1853,8 @@ def on_buff_remove(event):
         else:
             return
         log(f"[Buff-] {_log_ctx()} {text}")
-        batcher.speak_queued(text)
+        if not _legacy_combat_off():  # crisis composes wizard buff fades
+            batcher.speak_queued(text)
     except Exception as e:
         log(f"[Buff-] Error: {e}")
 
@@ -1906,7 +1937,8 @@ def on_shield_removed(event):
             else:
                 text = "Last shield lost"
             log(f"[Shield] {_log_ctx()} {text}")
-            batcher.speak_immediate(text)
+            if not _legacy_combat_off():  # crisis composes wizard shield loss
+                batcher.speak_immediate(text)
         else:
             # Digest-covered: shield-break events on non-player targets
             # in chain are folded into the digest's Surviving line as
