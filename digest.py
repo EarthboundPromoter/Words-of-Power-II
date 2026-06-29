@@ -1013,6 +1013,46 @@ def compose_spawned_section(chain):
 
 
 # ----------------------------------------------------------------------
+# Moved section — the wizard's own in-chain self-displacement.
+#
+# Lightning Form (teleport on a Lightning cast), Blink, Teleport, and the
+# Teleporter item all relocate the wizard via EventOnMoved(wizard,
+# teleport=True) INSIDE the player's keypress chain. Crisis deliberately
+# abstains on in-chain moves — its B3 guard hands them to the digest (see
+# crisis.py:_positive_out_of_chain) — so this section is where ownership
+# actually lives. Without it the relocation is spoken by no producer: the
+# Lightning Form / Blink "silent teleport" bug.
+#
+# Scope is wizard-only and teleport-only by design:
+# - teleport=False is a normal adjacent step (noise), never rendered.
+# - a moved NON-wizard in the chain (e.g. enemies pulled by the wizard's
+#   own Ice Vortex) is out of scope here — that's a separate enhancement.
+# Multi-step self-pulls fire one EventOnMoved per step; the LAST record
+# carries the final destination, so we collapse to it.
+# ----------------------------------------------------------------------
+
+
+def compose_moved_section(chain):
+    """Compose 'Teleported to (x,y).' for an in-chain wizard self-teleport,
+    or '' if the chain holds no wizard teleport. Collapses a multi-step
+    self-pull to its final destination."""
+    dest = None
+    for r in chain:
+        if r.get('event_type') != 'EventOnMoved':
+            continue
+        payload = r.get('payload') or {}
+        if not payload.get('teleport'):
+            continue
+        unit = payload.get('unit') or {}
+        if not unit.get('is_player_controlled'):
+            continue
+        dest = (unit.get('x'), unit.get('y'))
+    if dest is None:
+        return ""
+    return f"Teleported to ({dest[0]},{dest[1]})."
+
+
+# ----------------------------------------------------------------------
 # Debuffs / Buffs applied sections — non-wizard buff applies in chain,
 # split by buff_type so debuffs and buffs render in their own sections.
 #
@@ -1448,9 +1488,11 @@ def compose_digest(chain):
     has_spawns = bool(compose_spawned_section(chain))
     has_debuffs = bool(compose_debuffs_applied_section(chain))
     has_buffs = bool(compose_buffs_applied_section(chain))
+    has_move = bool(compose_moved_section(chain))
 
     if (cast_count == 1 and damage_count <= 1
-            and not has_spawns and not has_debuffs and not has_buffs):
+            and not has_spawns and not has_debuffs and not has_buffs
+            and not has_move):
         return _compose_streamlined(chain)
     return _compose_standard(chain)
 
@@ -1467,6 +1509,7 @@ def _compose_standard(chain):
     debuffs = compose_debuffs_applied_section(chain)
     buffs = compose_buffs_applied_section(chain)
     spawned = compose_spawned_section(chain)
+    moved = compose_moved_section(chain)
     side = compose_side_section(chain)
 
     parts = []
@@ -1489,6 +1532,13 @@ def _compose_standard(chain):
             parts.append(buffs)
         if spawned:
             parts.append(spawned)
+
+    # The wizard's own relocation trails the outcome sections: cast →
+    # effects → "and you ended up here". Kept independent of the No-damage
+    # guard above so a teleport that landed no hits still reports both
+    # ("Cast Lightning Bolt. No damage. Teleported to (13,4).").
+    if moved:
+        parts.append(moved)
 
     if side:
         parts.append(side)

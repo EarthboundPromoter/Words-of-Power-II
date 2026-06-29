@@ -3,6 +3,22 @@
 All notable changes to **Words of Power II** are listed here, newest first. This is
 an early work-in-progress RW3 port — expect frequent changes.
 
+## Unreleased
+
+### Fixed
+- **When you teleport yourself, the game now tells you where you landed.** Self-teleports
+  — Blink, the Teleporter, and Lightning Form's teleport-when-you-cast-a-lightning-spell —
+  used to be completely silent: you'd cast Lightning Bolt and be moved across the map with
+  no spoken sign you'd moved at all. Your cast now ends with "Teleported to (x,y)."
+- **Being shoved or dragged is more reliably announced.** A forced relocation that moves
+  you by swapping places (rather than a straight push) was silent before; it now speaks,
+  named with its cause. A multi-tile pull now reports a single final destination instead of
+  one line per tile crossed.
+- **Character sheet no longer leaks stray "True"/"False" or reads the wrong thing.** The
+  post-purchase character-sheet summary is only spoken when you're actually on the sheet,
+  the confirm prompt is read through the normal text cleaner, and a selection with nothing
+  describable now says "Nothing selected" instead of leaking a raw value.
+
 ## 2026-06-29 — 0.2.0
 
 A large rewrite of how combat is narrated. The enemy turn is now spoken as a single,

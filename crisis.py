@@ -243,19 +243,31 @@ def _render_wizard_death(record):
 
 
 def _render_displaced(record, caster_name=None):
-    """EventOnMoved where target is wizard AND teleport=True. Sudden
-    positional change by EXTERNAL cause (push, enemy teleport). The
-    player's own Blink / gear teleport is filtered out by the out-of-chain
-    guard at the call site (B3) — this branch only renders external
-    displacement. `caster_name` (B4) names the pusher when the chain-walk
-    found one; moves carry no buff.source, so this is chain-walk only."""
+    """EventOnMoved where target is wizard, by an EXTERNAL cause (push,
+    pull, enemy teleport, force-swap). The player's own Blink / Lightning
+    Form / gear teleport is filtered out by the out-of-chain guard at the
+    call site (B3) and owned by the digest — this branch only renders
+    external displacement. `caster_name` (B4) names the pusher when the
+    chain-walk found one; moves carry no buff.source, so this is
+    chain-walk only.
+
+    Render gate: teleport=True (pushes/pulls/enemy teleports all set it)
+    OR a caster was found. The OR catches the force-swap case — the unit
+    swapped INTO a vacated tile gets EventOnMoved with teleport=False
+    (Level.py:3043), so a teleport-only gate would silently drop a wizard
+    that was force-swapped by an enemy effect. A teleport=False move with
+    NO caster is an ordinary manual step (parent=None, out-of-chain) and
+    must stay silent — hence requiring the caster on the non-teleport
+    path. The flee/normal-move swap residual (teleport=False, parent=None,
+    indistinguishable from a manual step) is out of scope — it needs the
+    relocation-aware adjacency-tracker rework, not a gate tweak."""
     if record.get('event_type') != 'EventOnMoved':
         return None
     payload = record.get('payload') or {}
     unit = payload.get('unit') or {}
     if not _is_wizard_snap(unit):
         return None
-    if not payload.get('teleport'):
+    if not payload.get('teleport') and not caster_name:
         return None
     x = unit.get('x')
     y = unit.get('y')
@@ -510,6 +522,19 @@ class _CrisisProducer:
         # silent and only a real escalation speaks.
         refreshed_names = self._refresh_churn_names(new_records)
 
+        # Collapse multi-step forced relocation: a pull/push fires one
+        # EventOnMoved per tile stepped (CommonContent.pull, teleport=True
+        # each), so an N-tile pull would otherwise speak N "Wizard
+        # displaced" lines. Only the final destination matters — find the
+        # last out-of-chain wizard move this turn; earlier ones are claimed
+        # silently in the loop below.
+        last_displaced = None
+        for rec in new_records:
+            if (rec.get('event_type') == 'EventOnMoved'
+                    and _is_wizard_snap((rec.get('payload') or {}).get('unit'))
+                    and _positive_out_of_chain(rec)):
+                last_displaced = rec
+
         for rec in new_records:
             if self._handle_wizard_debuff_apply(
                     rec, lines, categories_present, announced, _idx):
@@ -538,11 +563,18 @@ class _CrisisProducer:
                 _claim(rec)
                 continue
             # Displacement is crisis only when EXTERNAL (B3): the player's own
-            # Blink / gear teleport is in-chain and owned by the digest, so
-            # abstain on it (neither line nor claim). Only an enemy push or
-            # teleport surfaces, named with its cause when the walk finds one.
+            # Blink / Lightning Form / gear teleport is in-chain and owned by
+            # the digest (compose_moved_section), so abstain on it. Only an
+            # enemy push / pull / teleport / force-swap surfaces here, named
+            # with its cause when the walk finds one.
             if (rec.get('event_type') == 'EventOnMoved'
                     and _positive_out_of_chain(rec)):
+                # Intermediate step of a multi-step pull: claim, no line —
+                # only last_displaced (the final tile) speaks.
+                if (rec is not last_displaced
+                        and _is_wizard_snap((rec.get('payload') or {}).get('unit'))):
+                    _claim(rec)
+                    continue
                 line = _render_displaced(rec, _chain_caster_name(rec, _idx))
                 if line:
                     lines.append(line)

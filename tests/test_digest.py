@@ -22,6 +22,7 @@ from digest import (
     compose_debuffs_applied_section,
     compose_digest,
     compose_killed_section,
+    compose_moved_section,
     compose_side_section,
     compose_spawned_section,
     compose_surviving_section,
@@ -314,6 +315,90 @@ def _unit_added(seq, parent_seq, unit_snap):
         },
         'marks': [],
     }
+
+
+def _wizard_moved(seq, parent_seq, x, y, teleport=True, is_player=True):
+    """Fake EventOnMoved record for the wizard's own in-chain teleport.
+    Payload shape mirrors journal._payload_moved: unit snapshot (x/y are
+    the destination) plus the teleport flag."""
+    return {
+        'sequence': seq,
+        'parent': parent_seq,
+        'event_type': 'EventOnMoved',
+        'payload': {
+            'unit': {
+                'id': _WIZARD_ID,
+                'name': 'Wizard',
+                'x': x,
+                'y': y,
+                'is_player_controlled': is_player,
+                'tier': 'wizard' if is_player else 'minion',
+            },
+            'teleport': teleport,
+        },
+        'marks': [],
+    }
+
+
+# ---- compose_moved_section (wizard in-chain self-teleport) ----
+
+def test_moved_section_renders_wizard_teleport():
+    chain = [_player_cast(1, "Blink"), _wizard_moved(2, 1, 8, 12)]
+    assert compose_moved_section(chain) == "Teleported to (8,12)."
+
+
+def test_moved_section_empty_without_teleport():
+    # A normal in-chain step (teleport=False) is noise, never rendered.
+    chain = [_player_cast(1, "Lightning Bolt"),
+             _wizard_moved(2, 1, 8, 12, teleport=False)]
+    assert compose_moved_section(chain) == ""
+
+
+def test_moved_section_empty_with_no_move():
+    chain = [_player_cast(1, "Magic Missile")]
+    assert compose_moved_section(chain) == ""
+
+
+def test_moved_section_ignores_nonwizard_move():
+    # Enemies relocated inside the wizard's chain (e.g. an Ice Vortex pull)
+    # are out of scope for this section — wizard-only.
+    chain = [_player_cast(1, "Ice Vortex"),
+             _wizard_moved(2, 1, 3, 3, is_player=False)]
+    assert compose_moved_section(chain) == ""
+
+
+def test_moved_section_collapses_multistep_to_final():
+    # A multi-step self-pull fires one EventOnMoved per tile; only the
+    # final destination is spoken.
+    chain = [
+        _player_cast(1, "Lightning Form"),
+        _wizard_moved(2, 1, 10, 7),
+        _wizard_moved(3, 1, 8, 9),
+        _wizard_moved(4, 1, 5, 12),
+    ]
+    assert compose_moved_section(chain) == "Teleported to (5,12)."
+
+
+def test_compose_digest_appends_teleport_clause_no_damage():
+    # The Lightning Form bug: a Lightning Bolt that hit nothing but
+    # relocated the wizard must report BOTH the empty hit and the move.
+    chain = [_player_cast(1, "Lightning Bolt"), _wizard_moved(2, 1, 13, 4)]
+    out = compose_digest(chain)
+    assert out == "Cast Lightning Bolt. No damage. Teleported to (13,4)."
+
+
+def test_compose_digest_appends_teleport_clause_after_kills():
+    # T59-style: the bolt killed a target AND teleported the wizard. The
+    # relocation trails the outcome sections.
+    tgt = _target_snap(901, name="Satyr", cur_hp=0, max_hp=19)
+    hits, _ = _hit_then_die(2, 1, tgt, spell="Lightning Bolt",
+                            dtype="Lightning", dmg_pre=12, dmg_post=12)
+    chain = [_player_cast(1, "Lightning Bolt"), *hits,
+             _wizard_moved(9, 1, 5, 12)]
+    out = compose_digest(chain)
+    assert out.startswith("Cast Lightning Bolt.")
+    assert out.endswith("Teleported to (5,12).")
+    assert "killed" in out
 
 
 # ---- is_player_keypress_cast ----

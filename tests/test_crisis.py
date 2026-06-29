@@ -1023,13 +1023,55 @@ def test_b3_external_displace_announced_and_claimed():
 
 def test_b3_own_blink_suppressed():
     """B3: the player's own Blink (in player-keypress chain) is NOT a crisis
-    displace — digest owns it. Crisis neither lines nor claims it."""
+    displace — the digest owns it via compose_moved_section. Crisis neither
+    lines nor claims it."""
     p = _CrisisProducer()
     root = _cast_begin_root(spell='Blink', sequence=1)  # is_player=True root
     rec = _wizard_teleport_record(sequence=2, parent=1)
     s = p.fire([root, rec], _StubWizard(50, 50), _noop)
     assert "displaced" not in s[1]
     assert not _has_crisis_mark(rec)
+
+
+def test_b3_forced_swap_teleport_false_with_caster():
+    """#2: a force-swap relocates the wizard via EventOnMoved with
+    teleport=False (the swapped-into unit; Level.py:3043). With an external
+    caster in the chain it must still surface — a teleport-only gate would
+    drop it. Named with its cause."""
+    p = _CrisisProducer()
+    root = _enemy_cast_root('Cyclops', sequence=1)
+    rec = _wizard_teleport_record(sequence=2, parent=1)
+    rec['payload']['teleport'] = False
+    s = p.fire([root, rec], _StubWizard(50, 50), _noop)
+    assert "Wizard displaced to (8,12) by Cyclops." in s[1]
+    assert _has_crisis_mark(rec)
+
+
+def test_b3_manual_step_teleport_false_no_caster_silent():
+    """#2 guard: a manual step (teleport=False, parent=None, no caster) is
+    out-of-chain but must stay silent — it is NOT a forced relocation."""
+    p = _CrisisProducer()
+    rec = _wizard_teleport_record(sequence=10, parent=None)
+    rec['payload']['teleport'] = False
+    s = p.fire([rec], _StubWizard(50, 50), _noop)
+    assert "displaced" not in s[1]
+    assert not _has_crisis_mark(rec)
+
+
+def test_b3_multistep_pull_collapses_to_final():
+    """#1: a multi-step pull fires one EventOnMoved per tile. Only the final
+    destination speaks; intermediate steps are claimed silently."""
+    p = _CrisisProducer()
+    root = _enemy_cast_root('Ice Lizard', sequence=1)
+    step1 = _wizard_teleport_record(sequence=2, parent=1, x=10, y=7)
+    step2 = _wizard_teleport_record(sequence=3, parent=1, x=9, y=8)
+    step3 = _wizard_teleport_record(sequence=4, parent=1, x=8, y=9)
+    s = p.fire([root, step1, step2, step3], _StubWizard(50, 50), _noop)
+    joined = s[1]
+    assert joined.count("displaced") == 1
+    assert "Wizard displaced to (8,9) by Ice Lizard." in joined
+    assert _has_crisis_mark(step1) and _has_crisis_mark(step2)
+    assert _has_crisis_mark(step3)
 
 
 def test_b3_external_displace_with_caster():
