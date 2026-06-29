@@ -979,6 +979,81 @@ def _render_status_ticks(records, idx, wizard_team, show_coords):
                 f"{len(members)} {prefix}{plural}{coords} {buff_name}:"
                 f" {damage}{dtype_str} each{turns_str}{killed}."))
 
+    # Cloud ticks on non-wizard targets (R1). Off-tile cloud damage on
+    # allies/enemies was previously silent — crisis claims only the
+    # wizard's-tile cloud. Fold like DOTs: 'Goblin in Storm Cloud: 4
+    # Lightning', collapse by (cloud, dtype, damage), death capstone if it
+    # kills. NO per-turn duration renotify — the agency rule reserves the
+    # stay/leave countdown for the wizard's own tile; ambient units get the
+    # damage only.
+    cloud_tick_roots = [
+        r for r in records
+        if r.get('event_type') == 'cloud_tick'
+        and not _is_claimed_by_other(r)
+        and not _has_mark(r, ORPHAN_MARK)
+    ]
+    cloud_per_target = {}   # (cloud_name, target_id, dtype) -> accumulator
+    cloud_pt_order = []
+    cloud_dead_ids = set()
+    for root in cloud_tick_roots:
+        chain = _gather_chain(records, root, idx)
+        cloud_dead_ids.update(_deaths_in_chain(chain))
+        cloud_name = (root.get('payload') or {}).get('cloud_name') or 'cloud'
+        for rec in chain:
+            if rec.get('event_type') != 'EventOnDamaged':
+                continue
+            payload = rec.get('payload') or {}
+            target = payload.get('target') or {}
+            if _is_wizard_snap(target):
+                continue
+            damage = payload.get('damage') or 0
+            dtype = payload.get('damage_type')
+            key = (cloud_name, target.get('id'), dtype)
+            acc = cloud_per_target.get(key)
+            if acc is None:
+                cloud_pt_order.append(key)
+                cloud_per_target[key] = {
+                    'target': target, 'cloud_name': cloud_name,
+                    'dtype': dtype, 'damage': damage,
+                }
+            else:
+                acc['damage'] += damage
+        for rec in chain:
+            if not _is_claimed_by_other(rec):
+                _claim(rec)
+                claimed.append(rec)
+
+    cloud_groups = {}
+    cloud_order = []
+    for key in cloud_pt_order:
+        acc = cloud_per_target[key]
+        t = acc['target']
+        died = t.get('id') in cloud_dead_ids
+        sig = (acc['cloud_name'], t.get('name'), t.get('tier'),
+               acc['dtype'], acc['damage'], died)
+        if sig not in cloud_groups:
+            cloud_order.append(sig)
+            cloud_groups[sig] = []
+        cloud_groups[sig].append(t)
+
+    for sig in cloud_order:
+        cloud_name, target_name, _tier, dtype, damage, died = sig
+        members = cloud_groups[sig]
+        dtype_str = f" {dtype}" if dtype else ""
+        if len(members) == 1:
+            killed = _killed_suffix(1 if died else 0)
+            target_str = _name_with_coord(members[0], wizard_team, show_coords)
+            out_items.append(_make_item(RANK_STATUS, [members[0]],
+                f"{target_str} in {cloud_name}: {damage}{dtype_str}{killed}."))
+        else:
+            killed = _killed_suffix(len(members) if died else 0)
+            plural = _pluralize(target_name or 'enemy')
+            prefix = _team_prefix(members[0], wizard_team)
+            coords = _coord_list(members, show_coords)
+            out_items.append(_make_item(RANK_STATUS, members,
+                f"{len(members)} {prefix}{plural}{coords} in {cloud_name}:"
+                f" {damage}{dtype_str} each{killed}."))
+
     # Buff fades on non-wizard targets — natural duration expiry.
     fade_roots = [
         r for r in records

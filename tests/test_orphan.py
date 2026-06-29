@@ -1179,3 +1179,58 @@ def test_large_wave_uses_directional_locality():
     # Past the cap: a directional summary, not a coord list.
     assert "7 Bats spawned, north." in text
     assert "Bats spawned at (" not in text
+
+
+# ---- Stage C: cloud_tick fold (R1) ----
+
+
+def _cloud_tick_chain(seq, cloud_name, target, damage, dtype, dur=3):
+    """A cloud_tick root + its EventOnDamaged child on a non-wizard target."""
+    return [
+        {'sequence': seq, 'parent': None, 'event_type': 'cloud_tick',
+         'payload': {'cloud_name': cloud_name, 'x': target.get('x'),
+                     'y': target.get('y'), 'duration_before_tick': dur,
+                     'duration_after_tick': dur - 1}, 'marks': []},
+        {'sequence': seq + 1, 'parent': seq, 'event_type': 'EventOnDamaged',
+         'payload': {'target': target, 'damage': damage, 'damage_type': dtype,
+                     'source_name': cloud_name}, 'marks': []},
+    ]
+
+
+def test_cloud_tick_on_enemy_folds_like_dot():
+    g = _enemy_snap(uid=200, name='Goblin', x=3, y=4)
+    records = _cloud_tick_chain(10, 'Storm Cloud', g, 4, 'Lightning')
+    idx = _build_index(records)
+    lines = _tick_lines(records, idx)
+    assert lines == ["Goblin (3,4) in Storm Cloud: 4 Lightning."]
+
+
+def test_cloud_tick_collapses_across_targets():
+    records = []
+    seq = 10
+    for uid, x in ((200, 3), (201, 5)):
+        g = _enemy_snap(uid=uid, name='Goblin', x=x, y=4)
+        records.extend(_cloud_tick_chain(seq, 'Blizzard', g, 4, 'Ice'))
+        seq += 10
+    idx = _build_index(records)
+    lines = _tick_lines(records, idx)
+    assert len(lines) == 1
+    assert lines[0].startswith("2 Goblins")
+    assert "in Blizzard: 4 Ice each" in lines[0]
+
+
+def test_cloud_tick_kill_capstones():
+    g = _enemy_snap(uid=200, name='Imp', x=3, y=4)
+    records = _cloud_tick_chain(10, 'Storm Cloud', g, 9, 'Lightning')
+    records.append(_death_rec(12, 10, g))
+    idx = _build_index(records)
+    lines = _tick_lines(records, idx)
+    assert lines == ["Imp (3,4) in Storm Cloud: 9 Lightning, killed."]
+
+
+def test_cloud_tick_skips_wizard():
+    """Wizard-tile cloud is crisis territory; orphan skips it."""
+    records = _cloud_tick_chain(10, 'Storm Cloud', _wizard_snap(), 4, 'Lightning')
+    idx = _build_index(records)
+    lines = _tick_lines(records, idx)
+    assert lines == []
