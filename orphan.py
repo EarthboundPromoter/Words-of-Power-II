@@ -60,23 +60,28 @@ def _make_item(rank, anchors, text):
 
 
 def _item_spatial(item, wx, wy):
-    """Return (in_los, distance) for a line-item from its NEAREST anchor.
+    """Return (in_los, distance) for a line-item.
 
-    Nearest = smallest Chebyshev distance to the wizard (P1: the closest
-    member of a collapsed group is the most tactically relevant). in_los is
-    that nearest anchor's capture-time can_see_wizard (None -> out of sight).
-    No usable anchor -> (out of sight, far)."""
-    best_d = None
-    best_los = False
+    A line is in sight if ANY of its anchors was visible when it fired (P1/P8:
+    a visible member must lead, never get buried behind the gate by a closer
+    hidden one). distance is the nearest VISIBLE anchor when the line is in
+    sight, else the nearest anchor overall — so an in-sight collapsed group
+    still sorts by its nearest seen member. No usable anchor -> (out, far)."""
+    best_any = None   # nearest Chebyshev over all anchors
+    best_vis = None   # nearest over in-sight anchors
     for a in item.get('anchors') or []:
         d = chebyshev_distance(a.get('x'), a.get('y'), wx, wy)
         dk = d if d is not None else _FAR_DISTANCE
-        if best_d is None or dk < best_d:
-            best_d = dk
-            best_los = bool(a.get('can_see_wizard'))
-    if best_d is None:
+        if best_any is None or dk < best_any:
+            best_any = dk
+        if a.get('can_see_wizard'):
+            if best_vis is None or dk < best_vis:
+                best_vis = dk
+    if best_any is None:
         return (False, _FAR_DISTANCE)
-    return (best_los, best_d)
+    if best_vis is not None:
+        return (True, best_vis)
+    return (False, best_any)
 
 
 def _assemble_items(items, wizard_pos, los_grouping):
@@ -487,6 +492,12 @@ def _buff_churn_pairs(records):
         if et == 'EventOnBuffRemove':
             faded.add(key)
         elif et == 'EventOnBuffApply':
+            # Only a genuine fresh re-apply pairs with a fade into churn. A
+            # synthesized duration refresh (is_refresh) or spawn-time passive
+            # activation (is_silent_activate) must not form a false pair that
+            # eats an unrelated real fade of the same-named buff.
+            if p.get('is_refresh') or p.get('is_silent_activate'):
+                continue
             applied.add(key)
     return faded & applied
 
@@ -565,25 +576,44 @@ def _render_action_chain(chain, wizard_team, show_coords, movement_verbose,
         else:
             foreign_damage.append(r)
 
-    # B2: a cast whose ONLY effect was wizard damage (crisis's) and that did
-    # not also move the caster is fully redundant with the crisis line — drop
-    # it. (A cast that repositioned the caster still renders its movement; an
-    # AoE that also hit non-wizard targets renders those.)
     caster_moved = any(
         r.get('event_type') == 'EventOnMoved'
         and ((r.get('payload') or {}).get('unit') or {}).get('id') == caster_id
         for r in chain
     )
-    if wizard_damage_seen and not own_damage and not foreign_damage \
-            and not caster_moved:
-        return None
 
-    # Deaths in this chain ride their cause line (the own-damage clause, or a
-    # foreign-proc clause). A death whose target took no rendered damage in
-    # this chain (e.g. a status/transformation death triggered by the cast)
-    # falls through to a short standalone "died" sentence.
+    # Deaths/spawns in this chain ride their cause line (capstone), so compute
+    # them BEFORE the redundancy guard — a cast that only "hit the wizard" by
+    # the damage measure may still have killed or summoned a NON-wizard unit,
+    # which must never be swallowed.
     deaths = _deaths_in_chain(chain)
     dead_ids = set(deaths)
+    nonwizard_deaths = any(not _is_wizard_snap(s) for s in deaths.values())
+    spawns = _chain_spawns(chain)  # already excludes wizard + Soul Jar
+    nonwizard_buff = any(
+        r.get('event_type') == 'EventOnBuffApply'
+        and not _is_wizard_snap((r.get('payload') or {}).get('target') or {})
+        for r in chain
+    )
+    wizard_buff_claimed = any(
+        r.get('event_type') == 'EventOnBuffApply'
+        and _is_wizard_snap((r.get('payload') or {}).get('target') or {})
+        and _is_claimed_by_other(r)
+        for r in chain
+    )
+
+    # B2 redundancy guard: a cast whose every PLAYER-relevant effect is already
+    # owned by crisis (wizard damage AND/OR a wizard-targeted buff/debuff) and
+    # that produced no non-wizard content is fully redundant with the crisis
+    # line — drop it (crisis owns the wizard-facing attribution). The guard now
+    # tests wizard BUFFS too (a pure control-debuff cast on the wizard used to
+    # double: crisis "Wizard blind" + orphan "Enemy cast Mass Blindness"), and
+    # explicitly preserves any non-wizard death / spawn / buff so those never
+    # go silent.
+    if (wizard_damage_seen or wizard_buff_claimed) \
+            and not own_damage and not foreign_damage and not caster_moved \
+            and not nonwizard_deaths and not spawns and not nonwizard_buff:
+        return None
 
     main = _render_cast_line(chain, caster, spell_name, melee, caster_id,
                              own_damage, wizard_team, show_coords,
@@ -603,15 +633,12 @@ def _render_action_chain(chain, wizard_team, show_coords, movement_verbose,
     ]
 
     # On-cast summon capstone — names the wave the cast produced (closes the
-    # long-standing "enemy summons unnarrated" gap). Only when the cast line
-    # itself rendered, so the spawn rides a visible cause.
+    # long-standing "enemy summons unnarrated" gap).
     spawn_lines = []
-    if main:
-        spawn_phrase = _render_spawn_phrase(
-            _chain_spawns(chain), wizard_team, show_coords, wizard_pos,
-            spawn_coord_cap)
-        if spawn_phrase:
-            spawn_lines.append(spawn_phrase + ".")
+    spawn_phrase = _render_spawn_phrase(
+        spawns, wizard_team, show_coords, wizard_pos, spawn_coord_cap)
+    if spawn_phrase:
+        spawn_lines.append(spawn_phrase + ".")
 
     parts = [p for p in ([main] + foreign_lines + death_lines + spawn_lines)
              if p]
@@ -771,14 +798,17 @@ def _render_action_section(records, idx, wizard_team, show_coords,
                        for item in group]
         if line:
             out_items.append(_make_item(_rank(is_ally), anchors, line))
-        for root, chain in group:
-            for rec in chain:
-                # claim==render: never re-mark a record a higher-precedence
-                # producer (crisis) already owns — the wizard-damage child of
-                # an enemy cast is crisis's, not ours.
-                if not _is_claimed_by_other(rec):
-                    _claim(rec)
-                    claimed.append(rec)
+        # claim==render: only claim the chain when we actually rendered a line.
+        # A dropped (None) chain leaves its records — notably any non-wizard
+        # EventOnDeath / EventOnUnitAdded — UNclaimed so the standalone-death
+        # and spawn passes can still surface them instead of silently swallowing
+        # them. Records a higher-precedence producer owns are never re-marked.
+        if line:
+            for root, chain in group:
+                for rec in chain:
+                    if not _is_claimed_by_other(rec):
+                        _claim(rec)
+                        claimed.append(rec)
 
     for root, chain in standalone_chains:
         is_ally = _is_ally(root)
@@ -788,10 +818,10 @@ def _render_action_section(records, idx, wizard_team, show_coords,
         if line:
             anchors = [(chain[0].get('payload') or {}).get('caster')]
             out_items.append(_make_item(_rank(is_ally), anchors, line))
-        for rec in chain:
-            if not _is_claimed_by_other(rec):
-                _claim(rec)
-                claimed.append(rec)
+            for rec in chain:
+                if not _is_claimed_by_other(rec):
+                    _claim(rec)
+                    claimed.append(rec)
 
     return out_items, claimed
 
@@ -1075,8 +1105,14 @@ def _render_status_ticks(records, idx, wizard_team, show_coords):
 
     # Buff fades on non-wizard targets — natural duration expiry. A fade that
     # is half of a same-turn STACK_REPLACE churn is suppressed (its re-apply
-    # is suppressed too), so the refresh reads as no change.
+    # is suppressed too), so the refresh reads as no change. A Frozen fade is
+    # also suppressed when an EventOnUnfrozen covers the same unit — the
+    # unfreeze section renders 'Frozen broke', so both firing would double it.
     churn = _buff_churn_pairs(records)
+    unfrozen_ids = {
+        ((r.get('payload') or {}).get('target') or {}).get('id')
+        for r in records if r.get('event_type') == 'EventOnUnfrozen'
+    }
     fade_roots = [
         r for r in records
         if r.get('event_type') == 'EventOnBuffRemove'
@@ -1104,6 +1140,11 @@ def _render_status_ticks(records, idx, wizard_team, show_coords):
         if (target.get('id'), bname) in churn:
             # Half of a STACK_REPLACE refresh; suppress (claim so it doesn't
             # fall through to the legacy batcher).
+            _claim(rec)
+            claimed.append(rec)
+            continue
+        if bname == 'Frozen' and target.get('id') in unfrozen_ids:
+            # The unfreeze section renders 'Frozen broke' for this unit.
             _claim(rec)
             claimed.append(rec)
             continue

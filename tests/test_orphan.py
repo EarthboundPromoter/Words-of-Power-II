@@ -1344,3 +1344,124 @@ def test_buff_apply_collapses_across_targets():
                      log_fn=noop, telemetry=None)
     assert "3 Goblins" in section[1]
     assert "Frozen, 2 turns." in section[1]
+
+
+# ---- Adversarial-review regression fixes ----
+
+
+def test_item_spatial_any_visible_member_in_sight():
+    """Mixed-visibility collapsed group: a closer HIDDEN member must not bury a
+    farther VISIBLE one — the line is in-sight, anchored on the nearest visible
+    member."""
+    near_hidden = {'x': 9, 'y': 9, 'can_see_wizard': False}   # dist 1, hidden
+    far_seen = {'x': 4, 'y': 4, 'can_see_wizard': True}       # dist 6, seen
+    item = _make_item(RANK_ENEMY_ACTION, [near_hidden, far_seen], "group.")
+    in_los, dist = _item_spatial(item, 10, 10)
+    assert in_los is True
+    assert dist == 6  # nearest VISIBLE member, not the hidden dist-1 one
+
+
+def test_b2_keeps_nonwizard_death_when_cast_hits_wizard():
+    """A cast that hits the wizard (crisis-claimed) AND kills a non-wizard via a
+    non-damage death must NOT swallow the death (review C1)."""
+    p = _OrphanProducer()
+
+    def noop(_): pass
+
+    goblin = _enemy_snap(uid=300, name='Goblin', x=5, y=5)
+    chain = [
+        {'sequence': 10, 'parent': None, 'event_type': 'cast_begin',
+         'payload': {'caster': _enemy_snap(name='Lich', x=2, y=2),
+                     'spell': {'name': 'Doom', 'melee': False},
+                     'is_player': False, 'pay_costs': True}, 'marks': []},
+        {'sequence': 11, 'parent': 10, 'event_type': 'EventOnDamaged',
+         'payload': {'target': _wizard_snap(), 'damage': 6,
+                     'damage_type': 'Dark', 'source_name': 'Doom'},
+         'marks': ['crisis_v1']},
+        _death_rec(12, 10, goblin),  # non-wizard death, no non-wizard damage
+    ]
+    section = p.fire(chain, show_coords=True, movement_verbose=False,
+                     log_fn=noop, telemetry=None)
+    assert "Goblin (5,5) died." in section[1]
+
+
+def test_b2_keeps_nonwizard_spawn_when_cast_hits_wizard():
+    """A cast that hits the wizard AND summons must not swallow the spawn."""
+    p = _OrphanProducer()
+
+    def noop(_): pass
+
+    chain = [
+        {'sequence': 10, 'parent': None, 'event_type': 'cast_begin',
+         'payload': {'caster': _enemy_snap(name='Lich', x=2, y=2),
+                     'spell': {'name': 'Dark Rite', 'melee': False},
+                     'is_player': False, 'pay_costs': True}, 'marks': []},
+        {'sequence': 11, 'parent': 10, 'event_type': 'EventOnDamaged',
+         'payload': {'target': _wizard_snap(), 'damage': 6,
+                     'damage_type': 'Dark', 'source_name': 'Dark Rite'},
+         'marks': ['crisis_v1']},
+        _spawn_rec(12, 10, _enemy_snap(uid=400, name='Skeleton', x=3, y=3)),
+    ]
+    section = p.fire(chain, show_coords=True, movement_verbose=False,
+                     log_fn=noop, telemetry=None)
+    assert "Skeleton spawned" in section[1]
+
+
+def test_wizard_only_debuff_cast_dropped():
+    """A pure control-debuff cast on the wizard is crisis's; orphan must NOT
+    also render 'Enemy cast Mass Blindness' (review C3)."""
+    p = _OrphanProducer()
+
+    def noop(_): pass
+
+    chain = [
+        {'sequence': 10, 'parent': None, 'event_type': 'cast_begin',
+         'payload': {'caster': _enemy_snap(name='Raven Mage', x=2, y=2),
+                     'spell': {'name': 'Mass Blindness', 'melee': False},
+                     'is_player': False, 'pay_costs': True}, 'marks': []},
+        {'sequence': 11, 'parent': 10, 'event_type': 'EventOnBuffApply',
+         'payload': {'target': _wizard_snap(),
+                     'buff': {'name': 'Blind', 'turns_left': 3, 'buff_type': 2},
+                     'stack_count_after': 1}, 'marks': ['crisis_v1']},
+    ]
+    section = p.fire(chain, show_coords=True, movement_verbose=False,
+                     log_fn=noop, telemetry=None)
+    assert section[1] == ""
+
+
+def test_frozen_break_no_double_with_fade():
+    """An ambient Frozen shatter renders 'Frozen broke' only — not also
+    'Frozen faded' (review: Agent A double)."""
+    p = _OrphanProducer()
+
+    def noop(_): pass
+
+    g = _enemy_snap(uid=200, name='Goblin', x=3, y=4)
+    records = [
+        {'sequence': 10, 'parent': None, 'event_type': 'EventOnBuffRemove',
+         'payload': {'target': g, 'buff': {'name': 'Frozen', 'turns_left': 0}},
+         'marks': []},
+        {'sequence': 11, 'parent': None, 'event_type': 'EventOnUnfrozen',
+         'payload': {'target': g, 'damage_type': 'Fire'}, 'marks': []},
+    ]
+    section = p.fire(records, show_coords=True, movement_verbose=False,
+                     log_fn=noop, telemetry=None)
+    assert "Frozen broke." in section[1]
+    assert "faded" not in section[1]
+
+
+def test_silent_activate_apply_does_not_eat_real_fade():
+    """A spawn-time passive activation (is_silent_activate) of a buff must not
+    form a false churn pair that suppresses an unrelated real fade of the same
+    buff name (review fix #5)."""
+    g = _enemy_snap(uid=200, name='Goblin', x=3, y=4)
+    records = [
+        {'sequence': 10, 'parent': None, 'event_type': 'EventOnBuffRemove',
+         'payload': {'target': g, 'buff': {'name': 'Haste', 'turns_left': 0}},
+         'marks': []},
+        _buff_apply_rec(11, None, g, 'Haste', buff_type=1,
+                        is_silent_activate=True),
+    ]
+    idx = _build_index(records)
+    lines = _tick_lines(records, idx)
+    assert "Goblin (3,4) Haste faded." in lines
