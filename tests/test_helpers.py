@@ -17,7 +17,68 @@ from helpers import (_cardinal_direction, _bearing_index, _direction_offset, _pl
                      _make_collective_group,
                      _compress_path, _classify_unreachable, _walkable_neighbors,
                      _point_xy,
-                     classify_resist_outcome, source_attributed_line)
+                     classify_resist_outcome, source_attributed_line,
+                     chebyshev_distance, format_spawn_locality,
+                     _spawn_direction_summary)
+
+
+def _m(x, y):
+    """A minimal spawn-member snapshot."""
+    return {'x': x, 'y': y}
+
+
+def test_chebyshev_basic():
+    assert chebyshev_distance(0, 0, 3, 4) == 4
+    assert chebyshev_distance(5, 5, 5, 5) == 0
+    assert chebyshev_distance(2, 2, -1, 0) == 3
+
+
+def test_chebyshev_none_on_missing():
+    assert chebyshev_distance(None, 0, 1, 1) is None
+
+
+def test_spawn_locality_exact_coords_under_cap():
+    members = [_m(4, 4), _m(5, 3)]
+    out = format_spawn_locality(members, 0, 0, show_coords=True, cap=5)
+    assert out == " at (4,4), (5,3)"
+
+
+def test_spawn_locality_clusters_over_cap():
+    # 6 spawns all north of wizard at (10,10): y < 10 is north.
+    members = [_m(10, 10 - d) for d in range(1, 7)]
+    out = format_spawn_locality(members, 10, 10, show_coords=True, cap=5)
+    assert out == ", north"
+
+
+def test_spawn_locality_two_directions():
+    # 5 north, 3 southeast of wizard at (10,10).
+    north = [_m(10, 10 - d) for d in range(1, 6)]
+    se = [_m(10 + d, 10 + d) for d in range(1, 4)]
+    out = format_spawn_locality(north + se, 10, 10, show_coords=True, cap=4)
+    assert out == ", 5 north, 3 southeast"
+
+
+def test_spawn_locality_scattered_on_even_spread():
+    # Evenly around the wizard: no two directions hold the bulk.
+    pts = [(10, 8), (12, 8), (12, 10), (12, 12), (10, 12),
+           (8, 12), (8, 10), (8, 8)]
+    members = [_m(x, y) for x, y in pts]
+    out = format_spawn_locality(members, 10, 10, show_coords=True, cap=4)
+    assert out == ", scattered"
+
+
+def test_spawn_locality_coords_off_single_offset():
+    out = format_spawn_locality([_m(13, 10)], 10, 10, show_coords=False, cap=5)
+    assert out == ", 3 east"
+
+
+def test_spawn_direction_summary_remainder():
+    # 5 north, 2 east, 1 south -> top two hold 7/8 >= 60%, 1 more.
+    pts = ([(10, 10 - d) for d in range(1, 6)]
+           + [(10 + d, 10) for d in range(1, 3)]
+           + [(10, 11)])
+    out = _spawn_direction_summary(pts, 10, 10)
+    assert out == "5 north, 2 east, 1 more"
 
 
 def test_classify_resist_immune_at_100_pct():

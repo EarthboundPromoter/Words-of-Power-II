@@ -133,6 +133,27 @@ def _classify_tier(unit):
     return 'minion'
 
 
+def _can_see_wizard(unit):
+    """Whether the wizard can see this unit, captured at event-fire time for
+    the orphan composer's in-LoS / out-of-LoS ordering. Capture-time (not
+    render-time) so the value reflects the moment the unit acted — a unit that
+    fired while visible then slipped away still reads as in-sight for that
+    action. Returns None when undeterminable (no level/player yet); the
+    composer treats None as out-of-sight for ordering."""
+    level = getattr(unit, 'level', None)
+    if level is None:
+        return None
+    player = getattr(level, 'player_unit', None)
+    if player is None:
+        return None
+    try:
+        if unit is player:
+            return True
+        return bool(level.can_see(player.x, player.y, unit.x, unit.y))
+    except Exception:
+        return None
+
+
 def _snapshot_unit(unit):
     """Snapshot the fields downstream consumers need from a Unit.
 
@@ -157,6 +178,7 @@ def _snapshot_unit(unit):
         'is_boss': bool(getattr(unit, 'is_boss', False)),
         'is_lair': bool(getattr(unit, 'is_lair', False)),
         'parent_id': id(parent) if parent is not None else None,
+        'can_see_wizard': _can_see_wizard(unit),
     }
 
 

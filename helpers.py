@@ -142,6 +142,73 @@ def _direction_offset(dx, dy):
         return f"{ady} {ns} {adx} {ew}"
     return f"{adx} {ew} {ady} {ns}"
 
+
+def chebyshev_distance(x1, y1, x2, y2):
+    """8-directional grid distance (max of the axis deltas). None if any
+    coordinate is missing. Used by the orphan composer to proximity-order
+    ambient lines by their subject's distance from the wizard."""
+    if None in (x1, y1, x2, y2):
+        return None
+    return max(abs(x1 - x2), abs(y1 - y2))
+
+
+def _spawn_direction_summary(pts, wx, wy):
+    """Top-two-direction coverage summary of points relative to (wx, wy).
+    Bin into 8 compass slices; if only one slice is populated return that
+    direction; if the two heaviest hold the bulk (>= 60%) return
+    '5 north, 3 southeast' (+ 'N more' for the remainder); otherwise
+    'scattered'. Returns '' if positions are unusable. The 60% bulk gate is
+    the reliable scatter detector — it fires 'scattered' exactly when no two
+    directions dominate (even spread)."""
+    if wx is None or wy is None:
+        return ""
+    bins = {}
+    total = 0
+    for x, y in pts:
+        d = _cardinal_direction(x - wx, y - wy)
+        if not d:
+            continue  # same tile as the wizard
+        bins[d] = bins.get(d, 0) + 1
+        total += 1
+    if total == 0:
+        return ""
+    ranked = sorted(bins.items(), key=lambda kv: (-kv[1], kv[0]))
+    if len(ranked) == 1:
+        return ranked[0][0]
+    top = ranked[:2]
+    top_sum = top[0][1] + top[1][1]
+    if top_sum < 0.6 * total:
+        return "scattered"
+    parts = [f"{c} {d}" for d, c in top]
+    rest = total - top_sum
+    if rest > 0:
+        parts.append(f"{rest} more")
+    return ", ".join(parts)
+
+
+def format_spawn_locality(members, wx, wy, show_coords, cap):
+    """Locality clause for a spawn/cluster line, appended after
+    '{count} {type}'. Scale-tiered (per the S11 summon-extent survey):
+    - coords-on and count <= cap: exact ' at (x,y), (x,y), ...'.
+    - coords-off and count == 1: precise offset ', N dir M dir'.
+    - otherwise (count > cap, or coords-off multi): ', ' + directional summary
+      (top-two-direction with a 'scattered' fallback).
+    `cap` is the player-tunable spawn_coord_cap (0 = always cluster). Returns
+    '' when there are no usable positions. Shared by the orphan (enemy) and
+    digest (player) spawn rendering so the grammar is uniform."""
+    pts = [(m.get('x'), m.get('y')) for m in members
+           if m.get('x') is not None and m.get('y') is not None]
+    if not pts:
+        return ""
+    n = len(pts)
+    if show_coords and n <= cap:
+        return " at " + ", ".join(f"({x},{y})" for x, y in pts)
+    if not show_coords and n == 1 and wx is not None and wy is not None:
+        return ", " + _direction_offset(pts[0][0] - wx, pts[0][1] - wy)
+    summary = _spawn_direction_summary(pts, wx, wy)
+    return (", " + summary) if summary else ""
+
+
 # ---- Text Processing ----
 
 def _pluralize(name):
