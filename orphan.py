@@ -25,11 +25,132 @@ else last. This producer respects all prior marks and stamps `orphan_v1`
 on records it renders.
 """
 
-from helpers import _pluralize, source_attributed_line
+from helpers import _pluralize, source_attributed_line, chebyshev_distance
 
 
 ORPHAN_MARK = "orphan_v1"
 PRIORITY_STANDARD_ORPHAN = 200
+
+# Line-item ranks (the orphan body's sub-structure, P1/P6): enemy actions
+# lead, then ally actions, then status/ambient lines (DOTs, fades, deaths,
+# spawns, cloud ticks, buff-apply onsets), then bare-root procs. Within each
+# rank the producer orders by proximity to the wizard.
+RANK_ENEMY_ACTION = 0
+RANK_ALLY_ACTION = 1
+RANK_STATUS = 2
+RANK_BARE = 3
+
+# A line-item that has no usable spatial anchor sorts to the far end.
+_FAR_DISTANCE = 10 ** 6
+_OUT_OF_SIGHT = "Out of sight."
+
+
+def _make_item(rank, anchors, text):
+    """A composed orphan line plus the spatial metadata needed to order it.
+
+    `anchors` is the list of unit snapshots the line is "about" (the caster
+    for an action line, the target for a status line, all members for a
+    collapsed line). The producer reads `x`/`y` and the capture-time
+    `can_see_wizard` off the nearest anchor to compute the (in-sight,
+    distance) sort key. `text` is the already-rendered sentence(s)."""
+    return {'rank': rank, 'anchors': [a for a in anchors if a], 'text': text}
+
+
+def _item_spatial(item, wx, wy):
+    """Return (in_los, distance) for a line-item from its NEAREST anchor.
+
+    Nearest = smallest Chebyshev distance to the wizard (P1: the closest
+    member of a collapsed group is the most tactically relevant). in_los is
+    that nearest anchor's capture-time can_see_wizard (None -> out of sight).
+    No usable anchor -> (out of sight, far)."""
+    best_d = None
+    best_los = False
+    for a in item.get('anchors') or []:
+        d = chebyshev_distance(a.get('x'), a.get('y'), wx, wy)
+        dk = d if d is not None else _FAR_DISTANCE
+        if best_d is None or dk < best_d:
+            best_d = dk
+            best_los = bool(a.get('can_see_wizard'))
+    if best_d is None:
+        return (False, _FAR_DISTANCE)
+    return (best_los, best_d)
+
+
+def _assemble_items(items, wizard_pos, los_grouping):
+    """Order the composed line-items and join them into the orphan body.
+
+    With no wizard position (no spatial frame — e.g. between levels, or the
+    pure-text unit tests), fall back to a stable rank-sort that reproduces
+    the historical enemy->ally->status->bare order verbatim; no LoS gate.
+
+    With a wizard position, sort by (not in_los, rank, distance) so in-sight
+    leads, the sub-structure holds within each sight half, and proximity
+    orders within each rank. The 'Out of sight.' gate (R2) is then placed per
+    `los_grouping`: section (one global gate, default), block (per-rank gate),
+    or line (per-line tag)."""
+    items = [it for it in items if it.get('text')]
+    if not items:
+        return ""
+    if wizard_pos is None:
+        ordered = sorted(items, key=lambda it: it['rank'])
+        return " ".join(it['text'] for it in ordered)
+
+    wx, wy = wizard_pos
+    decorated = []
+    for it in items:
+        in_los, dist = _item_spatial(it, wx, wy)
+        decorated.append((not in_los, it['rank'], dist, it['text']))
+    decorated.sort(key=lambda d: (d[0], d[1], d[2]))
+
+    if los_grouping == 'line':
+        return _assemble_line(decorated)
+    if los_grouping == 'block':
+        return _assemble_block(decorated)
+    return _assemble_section(decorated)
+
+
+def _assemble_section(decorated):
+    """One global 'Out of sight.' gate between the in-sight and out-of-sight
+    halves (R2 default — fewest words, best P8 early-exit)."""
+    in_parts = [d[3] for d in decorated if not d[0]]
+    out_parts = [d[3] for d in decorated if d[0]]
+    parts = []
+    if in_parts:
+        parts.append(" ".join(in_parts))
+    if out_parts:
+        parts.append(_OUT_OF_SIGHT)
+        parts.append(" ".join(out_parts))
+    return " ".join(parts).strip()
+
+
+def _assemble_block(decorated):
+    """A gate before each rank's out-of-sight remainder, keeping each
+    sub-section (enemy / ally / status / bare) self-contained."""
+    by_rank = {}
+    rank_order = []
+    for out_flag, rank, _dist, text in decorated:
+        if rank not in by_rank:
+            rank_order.append(rank)
+            by_rank[rank] = ([], [])
+        (by_rank[rank][1] if out_flag else by_rank[rank][0]).append(text)
+    rank_order.sort()
+    parts = []
+    for rank in rank_order:
+        in_b, out_b = by_rank[rank]
+        parts.extend(in_b)
+        if out_b:
+            parts.append(_OUT_OF_SIGHT)
+            parts.extend(out_b)
+    return " ".join(parts).strip()
+
+
+def _assemble_line(decorated):
+    """Each out-of-sight line carries its own tag (pairs with per-line
+    direction once coords-off rendering lands)."""
+    parts = []
+    for out_flag, _rank, _dist, text in decorated:
+        parts.append(f"{text} {_OUT_OF_SIGHT}" if out_flag else text)
+    return " ".join(parts).strip()
 
 
 def _has_mark(record, mark):
@@ -453,11 +574,13 @@ def _render_cast_line(chain, caster, spell_name, melee, caster_id,
 
 def _render_action_section(records, idx, wizard_team, show_coords,
                             movement_verbose):
-    """Render the non-player actions section. Returns (lines, claimed_records).
+    """Render the non-player actions section. Returns (items, claimed_records).
 
     Walks for non-player cast_begin roots. Single-target chains collapse
-    across actors via signature; multi-target chains stay separate.
-    Within the section, enemies first, allies second."""
+    across actors via signature; multi-target chains stay separate. Each
+    rendered line is wrapped as a line-item with rank (enemy 0 / ally 1) and
+    the caster(s) as spatial anchors; the producer orders the items by
+    proximity. Returns [] when there are no non-player actions."""
     roots = [r for r in records if _is_nonplayer_cast_root(r)
              and not _is_claimed_by_other(r) and not _has_mark(r, ORPHAN_MARK)]
     if not roots:
@@ -485,24 +608,27 @@ def _render_action_section(records, idx, wizard_team, show_coords,
         team = caster.get('team')
         return wizard_team is not None and team == wizard_team
 
-    enemy_lines = []
-    ally_lines = []
+    out_items = []
+
+    def _rank(is_ally):
+        return RANK_ALLY_ACTION if is_ally else RANK_ENEMY_ACTION
 
     for sig in chain_order:
-        items = chains_by_sig[sig]
-        first_root, first_chain = items[0]
+        group = chains_by_sig[sig]
+        first_root, first_chain = group[0]
         is_ally = _is_ally(first_root)
-        if len(items) == 1:
+        if len(group) == 1:
             line = _render_action_chain(first_chain, wizard_team,
                                          show_coords, movement_verbose)
-            if line:
-                (ally_lines if is_ally else enemy_lines).append(line)
+            anchors = [(first_chain[0].get('payload') or {}).get('caster')]
         else:
-            line = _render_collapsed_action(items, wizard_team,
+            line = _render_collapsed_action(group, wizard_team,
                                              show_coords, movement_verbose)
-            if line:
-                (ally_lines if is_ally else enemy_lines).append(line)
-        for root, chain in items:
+            anchors = [(item[0].get('payload') or {}).get('caster')
+                       for item in group]
+        if line:
+            out_items.append(_make_item(_rank(is_ally), anchors, line))
+        for root, chain in group:
             for rec in chain:
                 # claim==render: never re-mark a record a higher-precedence
                 # producer (crisis) already owns — the wizard-damage child of
@@ -516,13 +642,14 @@ def _render_action_section(records, idx, wizard_team, show_coords,
         line = _render_action_chain(chain, wizard_team, show_coords,
                                      movement_verbose)
         if line:
-            (ally_lines if is_ally else enemy_lines).append(line)
+            anchors = [(chain[0].get('payload') or {}).get('caster')]
+            out_items.append(_make_item(_rank(is_ally), anchors, line))
         for rec in chain:
             if not _is_claimed_by_other(rec):
                 _claim(rec)
                 claimed.append(rec)
 
-    return enemy_lines + ally_lines, claimed
+    return out_items, claimed
 
 
 def _render_collapsed_action(items, wizard_team, show_coords, movement_verbose):
@@ -622,8 +749,9 @@ def _render_collapsed_action(items, wizard_team, show_coords, movement_verbose):
 
 def _render_status_ticks(records, idx, wizard_team, show_coords):
     """Compose status tick lines: DOT damage, buff fades, unfreeze events,
-    all on non-wizard targets. Returns (lines, claimed_records)."""
-    lines = []
+    all on non-wizard targets. Returns (items, claimed_records) — each line
+    wrapped as a rank-STATUS line-item anchored on its target(s)."""
+    out_items = []
     claimed = []
 
     # DOT ticks: walk for buff_tick chain roots. Each chain may contain
@@ -698,17 +826,15 @@ def _render_status_ticks(records, idx, wizard_team, show_coords):
         turns_str = f", {turns} turns left" if turns and turns > 0 else ""
         if len(members) == 1:
             target_str = _name_with_coord(members[0], wizard_team, show_coords)
-            lines.append(
-                f"{target_str} {buff_name}: {damage}{dtype_str}{turns_str}."
-            )
+            out_items.append(_make_item(RANK_STATUS, [members[0]],
+                f"{target_str} {buff_name}: {damage}{dtype_str}{turns_str}."))
         else:
             plural = _pluralize(target_name or 'enemy')
             prefix = _team_prefix(members[0], wizard_team)
             coords = _coord_list(members, show_coords)
-            lines.append(
+            out_items.append(_make_item(RANK_STATUS, members,
                 f"{len(members)} {prefix}{plural}{coords} {buff_name}:"
-                f" {damage}{dtype_str} each{turns_str}."
-            )
+                f" {damage}{dtype_str} each{turns_str}."))
 
     # Buff fades on non-wizard targets — natural duration expiry.
     fade_roots = [
@@ -748,14 +874,14 @@ def _render_status_ticks(records, idx, wizard_team, show_coords):
         members = fade_groups[sig]
         if len(members) == 1:
             target_str = _name_with_coord(members[0], wizard_team, show_coords)
-            lines.append(f"{target_str} {bname} faded.")
+            out_items.append(_make_item(RANK_STATUS, [members[0]],
+                f"{target_str} {bname} faded."))
         else:
             plural = _pluralize(target_name or 'enemy')
             prefix = _team_prefix(members[0], wizard_team)
             coords = _coord_list(members, show_coords)
-            lines.append(
-                f"{len(members)} {prefix}{plural}{coords} {bname} faded."
-            )
+            out_items.append(_make_item(RANK_STATUS, members,
+                f"{len(members)} {prefix}{plural}{coords} {bname} faded."))
 
     # Unfreeze events on non-wizard targets.
     unfreeze_records = [
@@ -770,11 +896,12 @@ def _render_status_ticks(records, idx, wizard_team, show_coords):
         if _is_wizard_snap(target):
             continue
         target_str = _name_with_coord(target, wizard_team, show_coords)
-        lines.append(f"{target_str} Frozen broke.")
+        out_items.append(_make_item(RANK_STATUS, [target],
+            f"{target_str} Frozen broke."))
         _claim(rec)
         claimed.append(rec)
 
-    return lines, claimed
+    return out_items, claimed
 
 
 # ======================================================================
@@ -789,8 +916,8 @@ def _render_bare_effect_section(records, wizard_team, show_coords):
     producer. Without this they fall through the whole pipeline and are
     silently lost. Wizard-targeted effects belong to crisis and are skipped.
     Source-attributed via the game-convention helper. Returns
-    (lines, claimed_records)."""
-    lines = []
+    (items, claimed_records) — rank-BARE line-items anchored on their target."""
+    out_items = []
     claimed = []
     for r in records:
         et = r.get('event_type')
@@ -820,10 +947,10 @@ def _render_bare_effect_section(records, wizard_team, show_coords):
                 source_is_buff=p.get('source_is_buff'),
                 source_buff_type=p.get('source_buff_type'))
         if line:
-            lines.append(line + ".")
+            out_items.append(_make_item(RANK_BARE, [target], line + "."))
             _claim(r)
             claimed.append(r)
-    return lines, claimed
+    return out_items, claimed
 
 
 class _OrphanProducer:
@@ -835,7 +962,8 @@ class _OrphanProducer:
         self._last_processed_seq = -1
 
     def fire(self, journal_records, show_coords, movement_verbose,
-              log_fn, telemetry=None):
+              log_fn, telemetry=None, wizard_pos=None,
+              los_grouping='section', spawn_coord_cap=5):
         """Compose the orphan section for this turn boundary.
 
         Args:
@@ -848,6 +976,15 @@ class _OrphanProducer:
                 When True, full from→to pairs preserved.
             log_fn: callable(str) for diagnostic logging.
             telemetry: optional telemetry module reference.
+            wizard_pos: (x, y) of the wizard, or None. When provided, the
+                composed lines are proximity/line-of-sight ordered (R2) and
+                gated by `los_grouping`. None → stable rank order, no LoS gate
+                (no spatial frame; legacy behavior, used between levels and by
+                the pure-text unit tests).
+            los_grouping: 'section' (default) | 'block' | 'line' — where the
+                'Out of sight.' transition(s) are spoken.
+            spawn_coord_cap: int — the spawn-locality coord/cluster threshold
+                (R1 spawn rendering; threaded to the spawn formatter).
 
         Returns:
             (priority, text) tuple. text is empty if no orphan content.
@@ -870,27 +1007,27 @@ class _OrphanProducer:
         idx = _build_index(journal_records)
         wizard_team = _find_wizard_team(journal_records)
 
-        action_lines, action_claimed = _render_action_section(
+        action_items, action_claimed = _render_action_section(
             new_records, idx, wizard_team, show_coords, movement_verbose
         )
-        tick_lines, tick_claimed = _render_status_ticks(
+        tick_items, tick_claimed = _render_status_ticks(
             new_records, idx, wizard_team, show_coords
         )
         # Bare-root procs (gear that fired outside any chain) — claimed last,
         # after action/status sections have taken their chains.
-        bare_lines, _bare_claimed = _render_bare_effect_section(
+        bare_items, _bare_claimed = _render_bare_effect_section(
             new_records, wizard_team, show_coords
         )
 
-        all_lines = action_lines + tick_lines + bare_lines
-        text = " ".join(all_lines).strip()
+        all_items = action_items + tick_items + bare_items
+        text = _assemble_items(all_items, wizard_pos, los_grouping)
 
         if telemetry is not None:
             try:
                 telemetry.emit(
                     'orphan_emit',
-                    action_lines=len(action_lines),
-                    status_tick_lines=len(tick_lines),
+                    action_lines=len(action_items),
+                    status_tick_lines=len(tick_items),
                     output=text,
                     empty=not bool(text),
                 )

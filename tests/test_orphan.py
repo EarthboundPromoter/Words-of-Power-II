@@ -23,10 +23,26 @@ from orphan import (
     _render_status_ticks,
     _team_prefix,
     _OrphanProducer,
+    _assemble_items,
+    _item_spatial,
+    _make_item,
+    RANK_ENEMY_ACTION,
+    RANK_ALLY_ACTION,
+    RANK_STATUS,
+    RANK_BARE,
 )
 
 
 # ---- Fixtures ----
+
+
+def _tick_lines(records, idx, wizard_team=0, show_coords=True):
+    """Extract the rendered text of each status-tick line-item. The section
+    now returns (items, claimed); these unit tests assert on the text."""
+    items, _claimed = _render_status_ticks(records, idx,
+                                            wizard_team=wizard_team,
+                                            show_coords=show_coords)
+    return [it['text'] for it in items]
 
 
 def _wizard_snap(team=0):
@@ -516,8 +532,7 @@ def test_status_ticks_dot_damage_on_enemy():
         },
     ]
     idx = _build_index(records)
-    lines, _claimed = _render_status_ticks(records, idx, wizard_team=0,
-                                           show_coords=True)
+    lines = _tick_lines(records, idx)
     assert lines == ["Goblin (3,4) Poisoned: 1 Poison, 3 turns left."]
 
 
@@ -552,8 +567,7 @@ def test_status_ticks_dot_stacks_sum_on_single_target():
     for i, turns in enumerate((4, 3, 2)):
         records.extend(_bleed_stack(10 + i * 10, g, turns))
     idx = _build_index(records)
-    lines, _claimed = _render_status_ticks(records, idx, wizard_team=0,
-                                           show_coords=True)
+    lines = _tick_lines(records, idx)
     assert lines == ["Goblin (3,4) Bleed: 9 Physical, 4 turns left."]
 
 
@@ -568,8 +582,7 @@ def test_status_ticks_dot_stacks_collapse_across_targets():
         records.extend(_bleed_stack(seq + 2, g, 3))
         seq += 10
     idx = _build_index(records)
-    lines, _claimed = _render_status_ticks(records, idx, wizard_team=0,
-                                           show_coords=True)
+    lines = _tick_lines(records, idx)
     assert len(lines) == 1
     assert lines[0].startswith("2 Goblins")
     assert "Bleed: 6 Physical each" in lines[0]
@@ -601,8 +614,7 @@ def test_status_ticks_skips_wizard_dot():
         },
     ]
     idx = _build_index(records)
-    lines, _claimed = _render_status_ticks(records, idx, wizard_team=0,
-                                           show_coords=True)
+    lines = _tick_lines(records, idx)
     assert lines == []
 
 
@@ -621,8 +633,7 @@ def test_status_ticks_buff_fade_on_enemy():
         },
     ]
     idx = _build_index(records)
-    lines, _claimed = _render_status_ticks(records, idx, wizard_team=0,
-                                           show_coords=True)
+    lines = _tick_lines(records, idx)
     assert lines == ["Aelf (3,4) Petrified faded."]
 
 
@@ -641,8 +652,7 @@ def test_status_ticks_buff_fade_skips_unit_removed():
         },
     ]
     idx = _build_index(records)
-    lines, _claimed = _render_status_ticks(records, idx, wizard_team=0,
-                                           show_coords=True)
+    lines = _tick_lines(records, idx)
     assert lines == []
 
 
@@ -659,8 +669,7 @@ def test_status_ticks_unfreeze():
         },
     ]
     idx = _build_index(records)
-    lines, _claimed = _render_status_ticks(records, idx, wizard_team=0,
-                                           show_coords=True)
+    lines = _tick_lines(records, idx)
     assert lines == ["Goblin (3,4) Frozen broke."]
 
 
@@ -850,3 +859,152 @@ def test_bare_section_ignores_parented_damage():
     section = p.fire([rec], show_coords=False, movement_verbose=False,
                      log_fn=noop, telemetry=None)
     assert "Ogre" not in section[1]
+
+
+# ---- Stage B: proximity + line-of-sight ordering (R2) ----
+
+
+def _anchor(x, y, los=True):
+    """A minimal anchor snapshot carrying just the spatial fields the
+    ordering layer reads."""
+    return {'x': x, 'y': y, 'can_see_wizard': los}
+
+
+def test_item_spatial_uses_nearest_anchor():
+    """A collapsed line's spatial key comes from its NEAREST member."""
+    wx, wy = 10, 10
+    # far member (dist 5) out of sight, near member (dist 1) in sight.
+    item = _make_item(RANK_ENEMY_ACTION,
+                      [_anchor(5, 5, los=False), _anchor(9, 9, los=True)],
+                      "two casters")
+    in_los, dist = _item_spatial(item, wx, wy)
+    assert dist == 1
+    assert in_los is True
+
+
+def test_item_spatial_missing_coords_sorts_far():
+    item = _make_item(RANK_STATUS, [{'x': None, 'y': None}], "no position")
+    in_los, dist = _item_spatial(item, 10, 10)
+    assert in_los is False
+    assert dist >= 10 ** 6
+
+
+def test_assemble_no_wizard_pos_is_rank_order():
+    """No spatial frame -> stable rank order, no 'Out of sight.' gate
+    (legacy behavior, byte-identical assembly)."""
+    items = [
+        _make_item(RANK_BARE, [_anchor(1, 1)], "bare."),
+        _make_item(RANK_STATUS, [_anchor(1, 1)], "status."),
+        _make_item(RANK_ENEMY_ACTION, [_anchor(1, 1)], "enemy."),
+        _make_item(RANK_ALLY_ACTION, [_anchor(1, 1)], "ally."),
+    ]
+    out = _assemble_items(items, wizard_pos=None, los_grouping='section')
+    assert out == "enemy. ally. status. bare."
+
+
+def test_assemble_in_sight_sorted_by_distance():
+    """Within a rank, nearer subject leads (P1)."""
+    items = [
+        _make_item(RANK_ENEMY_ACTION, [_anchor(2, 2)], "far enemy."),   # dist 8
+        _make_item(RANK_ENEMY_ACTION, [_anchor(9, 9)], "near enemy."),  # dist 1
+    ]
+    out = _assemble_items(items, wizard_pos=(10, 10), los_grouping='section')
+    assert out == "near enemy. far enemy."
+
+
+def test_assemble_rank_then_distance():
+    """Rank dominates distance: a far enemy action still precedes a near
+    status line (the sub-structure holds within the in-sight half)."""
+    items = [
+        _make_item(RANK_STATUS, [_anchor(9, 9)], "near status."),       # dist 1
+        _make_item(RANK_ENEMY_ACTION, [_anchor(2, 2)], "far enemy."),   # dist 8
+    ]
+    out = _assemble_items(items, wizard_pos=(10, 10), los_grouping='section')
+    assert out == "far enemy. near status."
+
+
+def test_assemble_section_gate():
+    """Out-of-sight lines land behind ONE 'Out of sight.' gate (default)."""
+    items = [
+        _make_item(RANK_ENEMY_ACTION, [_anchor(9, 9, los=True)], "in enemy."),
+        _make_item(RANK_ENEMY_ACTION, [_anchor(2, 2, los=False)], "out enemy."),
+        _make_item(RANK_STATUS, [_anchor(8, 8, los=False)], "out status."),
+    ]
+    out = _assemble_items(items, wizard_pos=(10, 10), los_grouping='section')
+    assert out == "in enemy. Out of sight. out enemy. out status."
+
+
+def test_assemble_block_gate_per_rank():
+    """block mode gates the out-of-sight remainder within each rank."""
+    items = [
+        _make_item(RANK_ENEMY_ACTION, [_anchor(9, 9, los=True)], "in enemy."),
+        _make_item(RANK_ENEMY_ACTION, [_anchor(2, 2, los=False)], "out enemy."),
+        _make_item(RANK_STATUS, [_anchor(8, 8, los=True)], "in status."),
+        _make_item(RANK_STATUS, [_anchor(1, 1, los=False)], "out status."),
+    ]
+    out = _assemble_items(items, wizard_pos=(10, 10), los_grouping='block')
+    assert out == ("in enemy. Out of sight. out enemy. "
+                   "in status. Out of sight. out status.")
+
+
+def test_assemble_line_gate_per_line():
+    """line mode tags each out-of-sight line individually; in-before-out
+    still holds."""
+    items = [
+        _make_item(RANK_ENEMY_ACTION, [_anchor(9, 9, los=True)], "in enemy."),
+        _make_item(RANK_ENEMY_ACTION, [_anchor(2, 2, los=False)], "out enemy."),
+    ]
+    out = _assemble_items(items, wizard_pos=(10, 10), los_grouping='line')
+    assert out == "in enemy. out enemy. Out of sight."
+
+
+def test_assemble_no_out_lines_no_gate():
+    """All in-sight -> no 'Out of sight.' anywhere."""
+    items = [
+        _make_item(RANK_ENEMY_ACTION, [_anchor(9, 9, los=True)], "in a."),
+        _make_item(RANK_STATUS, [_anchor(8, 8, los=True)], "in b."),
+    ]
+    out = _assemble_items(items, wizard_pos=(10, 10), los_grouping='section')
+    assert "Out of sight" not in out
+    assert out == "in a. in b."
+
+
+def test_assemble_none_los_treated_out_of_sight():
+    """A None can_see_wizard (undeterminable at capture) sorts out of sight."""
+    items = [
+        _make_item(RANK_ENEMY_ACTION, [_anchor(9, 9, los=True)], "in."),
+        _make_item(RANK_ENEMY_ACTION,
+                   [{'x': 2, 'y': 2, 'can_see_wizard': None}], "unknown."),
+    ]
+    out = _assemble_items(items, wizard_pos=(10, 10), los_grouping='section')
+    assert out == "in. Out of sight. unknown."
+
+
+def test_producer_proximity_orders_and_gates():
+    """End-to-end: producer fed wizard_pos orders by proximity and gates the
+    out-of-sight enemy behind 'Out of sight.'"""
+    p = _OrphanProducer()
+
+    def noop(_): pass
+
+    near = _enemy_snap(uid=201, name='Ogre', x=9, y=9)
+    near['can_see_wizard'] = True
+    far_seen = _enemy_snap(uid=202, name='Aelf', x=4, y=4)
+    far_seen['can_see_wizard'] = True
+    hidden = _enemy_snap(uid=203, name='Imp', x=2, y=2)
+    hidden['can_see_wizard'] = False
+    ally_t = _ally_snap(uid=400, name='Wolf', x=8, y=8)
+
+    records = (
+        _enemy_cast_chain(10, far_seen, 'Fireball', ally_t, 5, 'Fire')
+        + _enemy_cast_chain(20, near, 'Spark', ally_t, 3, 'Lightning')
+        + _enemy_cast_chain(30, hidden, 'Dark Bolt', ally_t, 4, 'Dark')
+    )
+    section = p.fire(records, show_coords=True, movement_verbose=False,
+                     log_fn=noop, telemetry=None, wizard_pos=(10, 10))
+    text = section[1]
+    # In-sight, nearest first: Ogre (dist 1) before Aelf (dist 6).
+    assert text.index("Ogre") < text.index("Aelf")
+    # Hidden Imp is behind the gate.
+    assert "Out of sight." in text
+    assert text.index("Aelf") < text.index("Out of sight.") < text.index("Imp")

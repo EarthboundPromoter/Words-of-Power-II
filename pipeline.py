@@ -111,12 +111,24 @@ def fire_pipeline(tts, log_fn, cfg, wizard_unit, telemetry=None):
             sections.append(section)
 
     if cfg.orphan_enabled:
+        # Wizard position drives the orphan composer's proximity/LoS ordering
+        # (R2). None between levels (no spatial frame) — the producer then
+        # falls back to rank order with no 'Out of sight.' gate.
+        wizard_pos = None
+        if wizard_unit is not None:
+            wx = getattr(wizard_unit, 'x', None)
+            wy = getattr(wizard_unit, 'y', None)
+            if wx is not None and wy is not None:
+                wizard_pos = (wx, wy)
         section = _safe_fire(
             'orphan',
             lambda: _orphan.producer.fire(
                 journal.records, cfg.show_coordinates,
                 getattr(cfg, 'movement_verbose', False),
                 log_fn, telemetry=telemetry,
+                wizard_pos=wizard_pos,
+                los_grouping=getattr(cfg, 'orphan_los_grouping', 'section'),
+                spawn_coord_cap=getattr(cfg, 'spawn_coord_cap', 5),
             ),
             log_fn,
         )
