@@ -3521,9 +3521,15 @@ if _PyGameView is not None:
                                     sp_after=_sp_after)
                 except Exception:
                     pass
-                # Speak char sheet overview after purchase
+                # Speak char sheet overview after purchase — but only if the buy
+                # actually landed back in the char sheet. Buying from the in-level
+                # shop returns to STATE_LEVEL with examine_target left as the confirm
+                # dialog's stale True sentinel; "Learned X" is the complete output
+                # there. (examine_target is a shared, persistent cursor; only read it
+                # in a screen where it's known to hold a describable item.)
                 try:
-                    _speak_char_sheet_overview(self)
+                    if getattr(self, 'state', None) == getattr(_main, 'STATE_CHAR_SHEET', 1):
+                        _speak_char_sheet_overview(self)
                 except Exception:
                     pass
         except Exception as e:
@@ -3689,7 +3695,10 @@ if _PyGameView is not None:
     def _describe_examine_target(view):
         """Return speech text for the current examine_target in the character sheet."""
         target = view.examine_target
-        if target is None or target is False:
+        # examine_target is a shared cursor that also holds non-item sentinels:
+        # the booleans True/False are the confirm-dialog Yes/No default. Never
+        # describe a bare bool (else str() leaks the literal "True"/"False").
+        if target is None or isinstance(target, bool):
             return "Nothing selected"
 
         # "Learn new spell" / "Learn new skill" placeholder items
@@ -3763,7 +3772,10 @@ if _PyGameView is not None:
         desc = getattr(target, 'description', '')
         if desc:
             return _clean_desc(desc)
-        return str(target)
+        # Last resort: don't str() an unknown object into speech (it would leak a
+        # raw repr). Log the type for diagnosis; tell the player nothing's selected.
+        log(f"[CharSheet] Undescribable examine_target: {type(target).__name__}")
+        return "Nothing selected"
 
     def _char_sheet_section_name(view):
         """Return which section the current examine_target belongs to."""
@@ -7243,7 +7255,7 @@ if _PyGameView is not None:
     def _patched_process_confirm(self):
         if not _sr_confirm_entered[0]:
             _sr_confirm_entered[0] = True
-            prompt = getattr(self, 'confirm_text', '') or "Confirm?"
+            prompt = read_text(getattr(self, 'confirm_text', '') or "Confirm?")
             sel = "Yes" if self.examine_target else "No"
             async_tts.speak(f"{prompt} {sel}")
             log(f"[State] CONFIRM entered: {prompt} → {sel}")
