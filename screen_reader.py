@@ -6564,14 +6564,30 @@ if _PyGameView is not None:
                 # digest is enabled (Phase 1 default), behavior matches the
                 # original single-producer firing — same content, same
                 # ordering, single tts.speak call.
-                try:
-                    _wizard_unit = getattr(self.game, 'p1', None)
-                    _pipeline.fire_pipeline(
-                        async_tts, log, cfg, _wizard_unit,
-                        telemetry=_telemetry,
-                    )
-                except Exception as _pipe_e:
-                    log(f"[Pipeline] error in fire_pipeline: {_pipe_e}")
+                #
+                # Turn 1 of a new level is the level-generation boundary, NOT a
+                # play turn: the player hasn't acted yet (enemies act after the
+                # player), so everything in the journal is setup — the enemy
+                # roster placement (EventOnUnitAdded), the wizard's equipment
+                # re-application/fade (EventOnBuffApply/Remove). Composing it
+                # would narrate the whole roster as live spawns and the gear as
+                # fresh "Wizard gained …" lines. Drop those records instead and
+                # skip the compose; turn 2 onward composes real play.
+                if _turn_count[0] <= 1:
+                    try:
+                        _journal.journal.reset(
+                            getattr(_journal.journal, 'level_id', 0))
+                    except Exception as _re:
+                        log(f"[Pipeline] level-start journal reset failed: {_re!r}")
+                else:
+                    try:
+                        _wizard_unit = getattr(self.game, 'p1', None)
+                        _pipeline.fire_pipeline(
+                            async_tts, log, cfg, _wizard_unit,
+                            telemetry=_telemetry,
+                        )
+                    except Exception as _pipe_e:
+                        log(f"[Pipeline] error in fire_pipeline: {_pipe_e}")
 
                 # Flush queued speech before turn signal, then HP (#39)
                 batcher.flush()
