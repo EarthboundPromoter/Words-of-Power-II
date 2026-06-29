@@ -3,6 +3,12 @@
 All notable changes to **Words of Power II** are listed here, newest first. This is
 an early work-in-progress RW3 port — expect frequent changes.
 
+## 2026-06-29 — 0.2.6
+
+### Fixed
+- How to Play now always opens at the first page instead of resuming the last page
+  viewed — a native open could otherwise land on the appended Words of Power section.
+
 ## 2026-06-29 — 0.2.5
 
 ### Added

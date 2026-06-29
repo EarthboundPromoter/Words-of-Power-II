@@ -1,5 +1,5 @@
 # Rift Wizard 2 Screen Reader Mod — Words of Power
-MOD_VERSION = "0.2.5"
+MOD_VERSION = "0.2.6"
 
 import sys
 import os
@@ -7801,12 +7801,20 @@ if _PyGameView is not None:
             _sr_htp['entered'] = True
             _sr_htp['ctrl'] = None
             try:
+                # Always open at the first page, never resume where a prior visit
+                # left off. RW3's show_help persists how_to_play_page, so without
+                # this a native open that previously paged into the appended Words
+                # of Power section would reopen there instead of the game's CONTROLS
+                # page. Page 0 = native CONTROLS on a normal open, our first page
+                # under F1 (mod-only mode). Set the view's index too so the visual
+                # draw matches what we read.
+                self.how_to_play_page = 0
                 model = build_how_to_play_model(self.get_how_to_play_pages())
                 ctrl = FocusController(
                     model, screen_label="How to Play",
                     nav_hint="Up and down to read, left and right to change page.",
                 )
-                ctrl.set_page(getattr(self, 'how_to_play_page', 0) or 0)
+                ctrl.set_page(0)
                 _sr_htp['ctrl'] = ctrl
                 async_tts.speak(ctrl.enter())
                 log(f"[State] HOW_TO_PLAY entered: page {ctrl.page_index + 1}/{len(model)}")
