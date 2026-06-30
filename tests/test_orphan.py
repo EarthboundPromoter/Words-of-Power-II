@@ -20,6 +20,7 @@ from orphan import (
     _render_action_chain,
     _render_action_section,
     _render_collapsed_action,
+    _render_shield_changes,
     _render_status_ticks,
     _team_prefix,
     _OrphanProducer,
@@ -1497,3 +1498,73 @@ def test_attempt_apply_string_payload_does_not_crash():
     section = p.fire(records, show_coords=True, movement_verbose=False,
                      log_fn=noop, telemetry=None)
     assert "Goblin (3,4) Bleed: 3 Physical" in section[1]
+
+
+# ---- Shield changes (R3): out-of-chain gains/strips on non-wizard units ----
+
+
+def _su(name, team=1, tier='minion', pid=None, x=3, y=4):
+    return {'id': pid, 'name': name, 'team': team, 'tier': tier,
+            'is_player_controlled': False, 'x': x, 'y': y}
+
+
+def _sgain(target, amount=3, marks=None):
+    return {'event_type': 'shield_gained',
+            'payload': {'target': target, 'amount': amount, 'shields_after': amount},
+            'marks': marks or []}
+
+
+def _sstrip(target, removed=2, marks=None):
+    return {'event_type': 'shield_stripped',
+            'payload': {'target': target, 'amount_removed': removed},
+            'marks': marks or []}
+
+
+def _texts(records, wizard_team=0, show_coords=True):
+    items, _claimed = _render_shield_changes(records, wizard_team, show_coords)
+    return [it.get('text') for it in items]
+
+
+def test_orphan_enemy_gain_single():
+    assert _texts([_sgain(_su('Ogre', pid=1))]) == ["Ogre (3,4) gained 3 shields."]
+
+
+def test_orphan_enemy_gain_collapses_each():
+    recs = [_sgain(_su('Ogre', pid=1, x=3, y=3)),
+            _sgain(_su('Ogre', pid=2, x=4, y=3)),
+            _sgain(_su('Ogre', pid=3, x=5, y=3))]
+    assert _texts(recs) == [
+        "3 Ogres at (3,3), (4,3), (5,3) gained 3 shields each."]
+
+
+def test_orphan_gain_ally_prefixed():
+    assert _texts([_sgain(_su('Wolf', team=0, pid=1), amount=2)]) == \
+        ["Ally Wolf (3,4) gained 2 shields."]
+
+
+def test_orphan_strip_single_and_collapse():
+    assert _texts([_sstrip(_su('Goblin', pid=1))]) == \
+        ["Goblin (3,4) shields stripped."]
+    recs = [_sstrip(_su('Goblin', pid=1, x=1, y=1)),
+            _sstrip(_su('Goblin', pid=2, x=2, y=1))]
+    assert _texts(recs) == ["2 Goblins at (1,1), (2,1) shields stripped."]
+
+
+def test_orphan_strip_superseded_by_block_not_rendered():
+    rec = _sstrip(_su('Goblin', pid=1), marks=['superseded_by_block'])
+    items, claimed = _render_shield_changes([rec], 0, True)
+    assert items == []          # block owns it
+    assert len(claimed) == 1    # but still claimed so nothing else renders it
+
+
+def test_orphan_skips_claimed_by_other():
+    rec = _sgain(_su('Ogre', pid=1), marks=['digest_v1'])
+    items, claimed = _render_shield_changes([rec], 0, True)
+    assert items == [] and claimed == []
+
+
+def test_orphan_skips_wizard_target():
+    wiz = {'id': 100, 'name': 'Wizard', 'team': 0, 'tier': 'wizard',
+           'is_player_controlled': True, 'x': 10, 'y': 10}
+    items, claimed = _render_shield_changes([_sgain(wiz)], 0, True)
+    assert items == [] and claimed == []

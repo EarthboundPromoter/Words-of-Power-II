@@ -1310,10 +1310,126 @@ def compose_statuses_applied_section(chain):
     return compose_debuffs_applied_section(chain)
 
 
-def compose_side_section(chain):
-    """Compose the Side section: heals, buffs (charges deferred).
+# ----------------------------------------------------------------------
+# Shields granted / stripped sections — non-wizard shield changes in a
+# player chain (Shield-Allies gains, Siphon-Shields strips). Wizard
+# self-gains go to the Side section; outgoing BLOCKS stay on the Surviving
+# section's "absorbed by N shields" (a block is not a strip). Shields are
+# not buffs (no buff_type/duration), so they get their own classifier, but
+# reuse _format_target_phrase for the same type-subdivided, ally-prefixed,
+# Tier-1-individuated / Tier-2-collapsed grouping as the buff/debuff
+# sections.
+# ----------------------------------------------------------------------
 
-    Returns 'Side. Heals: ... Buffs: ...' or empty string if neither
+
+def _classify_shield_changes(chain, event_type, exclude_superseded=False):
+    """Equivalence classes of non-wizard shield changes (event_type =
+    'shield_gained' or 'shield_stripped'), grouped exactly like the buff
+    sections: Tier 1 (boss/spawner) individuated, Tier 2 (minion) grouped by
+    (name, amount). Filters targets that died in the chain. For strips,
+    exclude_superseded drops the block-coincident strips marked at capture, so
+    only genuine direct strips (Siphon) appear — block absorptions read as
+    'absorbed by N shields' on the Surviving section instead."""
+    dead_target_ids = set()
+    for r in chain:
+        if r.get('event_type') == 'EventOnDeath':
+            t = (r.get('payload') or {}).get('target') or {}
+            if t.get('id') is not None:
+                dead_target_ids.add(t.get('id'))
+
+    classes = []
+    tier2_lookup = {}
+    for r in chain:
+        if r.get('event_type') != event_type:
+            continue
+        if exclude_superseded and 'superseded_by_block' in (r.get('marks') or []):
+            continue
+        payload = r.get('payload') or {}
+        target = payload.get('target') or {}
+        if target.get('is_player_controlled'):
+            continue
+        if target.get('id') in dead_target_ids:
+            continue
+        amount = (payload.get('amount') if event_type == 'shield_gained'
+                  else payload.get('amount_removed'))
+        tier = target.get('tier', 'minion')
+        if tier in ('boss', 'spawner', 'wizard'):
+            classes.append({'target': target, 'amount': amount,
+                            'count': 1, 'members': [target]})
+        else:
+            key = (target.get('name'), amount)
+            existing = tier2_lookup.get(key)
+            if existing is None:
+                cls = {'target': target, 'amount': amount,
+                       'count': 1, 'members': [target]}
+                classes.append(cls)
+                tier2_lookup[key] = cls
+            else:
+                existing['count'] += 1
+                existing['members'].append(target)
+    return classes
+
+
+def _shield_target_phrase(target, count, members, wizard_team):
+    """Target phrase with the Spawned-section ally convention: an 'Ally '
+    prefix on the name when the target shares the wizard's team (so shields
+    read consistently with spawns — '3 Ally Wolves')."""
+    name = target.get('name') or 'Unknown'
+    is_ally = wizard_team is not None and target.get('team') == wizard_team
+    prefix = "Ally " if is_ally else ""
+    if count <= 1:
+        x, y = target.get('x'), target.get('y')
+        return f"{prefix}{name} ({x},{y})"
+    from helpers import _pluralize
+    plural = _pluralize(name)
+    return f"{count} {prefix}{plural}{_format_coord_list(members)}"
+
+
+def _render_shield_gained_line(cls, wizard_team):
+    phrase = _shield_target_phrase(cls['target'], cls['count'], cls['members'],
+                                   wizard_team)
+    amount = cls['amount'] or 0
+    sh = "shield" if amount == 1 else "shields"
+    each = " each" if cls['count'] > 1 else ""
+    return f"{phrase} gained {amount} {sh}{each}."
+
+
+def _render_shield_stripped_line(cls, wizard_team):
+    # Binary outcome — the key info is which units lost shields. (Header
+    # carries the "stripped" verb so the line just names the units.)
+    phrase = _shield_target_phrase(cls['target'], cls['count'], cls['members'],
+                                   wizard_team)
+    return f"{phrase}."
+
+
+def compose_shields_granted_section(chain):
+    """Non-wizard shield gains in a player chain (e.g. Shield Allies).
+    Type-subdivided, ally-prefixed collapse via the shared target phrasing."""
+    classes = _classify_shield_changes(chain, 'shield_gained')
+    if not classes:
+        return ""
+    wizard_team = _find_wizard_team(chain)
+    lines = [_render_shield_gained_line(c, wizard_team) for c in classes]
+    return "Shields granted: " + " ".join(lines)
+
+
+def compose_shields_stripped_section(chain):
+    """Non-wizard shield strips in a player chain (e.g. Siphon Shields).
+    Skips block-coincident strips (those read as 'absorbed by N shields')."""
+    classes = _classify_shield_changes(chain, 'shield_stripped',
+                                       exclude_superseded=True)
+    if not classes:
+        return ""
+    wizard_team = _find_wizard_team(chain)
+    lines = [_render_shield_stripped_line(c, wizard_team) for c in classes]
+    return "Shields stripped: " + " ".join(lines)
+
+
+def compose_side_section(chain):
+    """Compose the Side section: heals, buffs, wizard self-shield gains
+    (charges deferred).
+
+    Returns 'Side. Heals: ... Buffs: ... Shields: ...' or empty string if no
     sub-section has content.
     """
     wizard_id = _find_wizard_id(chain)
@@ -1363,6 +1479,20 @@ def compose_side_section(chain):
         else:
             info['saw_fresh'] = True
 
+    # Aggregate wizard-target shield gains (in-chain self-shield, e.g. a
+    # self-cast Ironskin). Out-of-chain wizard gains are crisis's.
+    shield_gained_total = 0
+    shield_after_latest = None
+    for r in chain:
+        if r.get('event_type') != 'shield_gained':
+            continue
+        payload = r.get('payload') or {}
+        target = payload.get('target') or {}
+        if target.get('id') != wizard_id:
+            continue
+        shield_gained_total += payload.get('amount') or 0
+        shield_after_latest = payload.get('shields_after')
+
     parts = []
 
     if heals_by_source:
@@ -1377,6 +1507,14 @@ def compose_side_section(chain):
             info = buff_applies[name]
             buff_sentences.append(_format_buff_apply(name, info))
         parts.append("Buffs: " + " ".join(s + "." for s in buff_sentences))
+
+    if shield_gained_total:
+        sh = "shield" if shield_gained_total == 1 else "shields"
+        if shield_after_latest is not None:
+            parts.append(f"Shields: gained {shield_gained_total} {sh}, "
+                         f"{shield_after_latest} total.")
+        else:
+            parts.append(f"Shields: gained {shield_gained_total} {sh}.")
 
     if not parts:
         return ""
@@ -1489,10 +1627,12 @@ def compose_digest(chain):
     has_debuffs = bool(compose_debuffs_applied_section(chain))
     has_buffs = bool(compose_buffs_applied_section(chain))
     has_move = bool(compose_moved_section(chain))
+    has_shield_grants = bool(compose_shields_granted_section(chain))
+    has_shield_strips = bool(compose_shields_stripped_section(chain))
 
     if (cast_count == 1 and damage_count <= 1
             and not has_spawns and not has_debuffs and not has_buffs
-            and not has_move):
+            and not has_move and not has_shield_grants and not has_shield_strips):
         return _compose_streamlined(chain)
     return _compose_standard(chain)
 
@@ -1507,7 +1647,9 @@ def _compose_standard(chain):
     killed = compose_killed_section(chain)
     surviving = compose_surviving_section(chain)
     debuffs = compose_debuffs_applied_section(chain)
+    shields_stripped = compose_shields_stripped_section(chain)
     buffs = compose_buffs_applied_section(chain)
+    shields_granted = compose_shields_granted_section(chain)
     spawned = compose_spawned_section(chain)
     moved = compose_moved_section(chain)
     side = compose_side_section(chain)
@@ -1517,9 +1659,11 @@ def _compose_standard(chain):
         parts.append(cast)
 
     # Empty-chain handling: only emit "No damage." when all
-    # outcome-bearing sections are empty.
+    # outcome-bearing sections are empty (shield grants/strips count as
+    # outcomes — a Siphon that lands no damage still did something).
     if (cast and not killed and not surviving and not debuffs
-            and not buffs and not spawned):
+            and not buffs and not spawned and not shields_stripped
+            and not shields_granted):
         parts.append("No damage.")
     else:
         if killed:
@@ -1528,8 +1672,12 @@ def _compose_standard(chain):
             parts.append(surviving)
         if debuffs:
             parts.append(debuffs)
+        if shields_stripped:
+            parts.append(shields_stripped)
         if buffs:
             parts.append(buffs)
+        if shields_granted:
+            parts.append(shields_granted)
         if spawned:
             parts.append(spawned)
 

@@ -309,22 +309,74 @@ def _render_cloud_on_wizard(record, wizard_pos):
     return f"In {cloud_name}."
 
 
-def _render_wizard_shield_lost(record):
-    """EventOnShieldRemoved where target is wizard. The game decrements the
-    shield BEFORE raising the event (Level.py:4050 precedes 4055), so the
-    snapshot's `shields` is the post-loss remaining count. Always crisis
-    (a shielded hit is otherwise silent — the player must know they're under
-    fire); not chain-gated."""
-    if record.get('event_type') != 'EventOnShieldRemoved':
+def _shields_phrase(n):
+    """'1 shield' / 'N shields'."""
+    return "1 shield" if n == 1 else f"{n} shields"
+
+
+def _render_wizard_shield_blocked(record):
+    """shield_blocked where target is wizard — the rich block report the game's
+    DMG_BLOCKED log shows (amount that would have hit + type + source + shields
+    left), which the thin EventOnShieldRemoved event can't carry. Always crisis
+    (a blocked hit is otherwise silent — the player must know they're under fire
+    and spending shields); not chain-gated."""
+    if record.get('event_type') != 'shield_blocked':
         return None
     payload = record.get('payload') or {}
     target = payload.get('target') or {}
     if not _is_wizard_snap(target):
         return None
-    remaining = target.get('shields')
+    amount = payload.get('blocked_amount')
+    dtype = payload.get('damage_type')
+    source = payload.get('source_name')
+    remaining = payload.get('shields_remaining')
+    head = "Wizard blocked"
+    if amount is not None and dtype:
+        head += f" {amount} {dtype}"
+    elif dtype:
+        head += f" {dtype}"
+    if source:
+        head += f" from {source}"
     if remaining:
-        return f"Wizard shield lost, {remaining} remaining."
-    return "Wizard last shield lost."
+        return f"{head}, {_shields_phrase(remaining)} left."
+    return f"{head}, last shield."
+
+
+def _render_wizard_shield_stripped(record):
+    """shield_stripped where target is wizard — a defensive loss with no
+    incoming hit (Siphon, dispel). Always crisis. A block's coincident strip is
+    marked superseded at capture, so it never reaches this line."""
+    if record.get('event_type') != 'shield_stripped':
+        return None
+    if 'superseded_by_block' in (record.get('marks') or []):
+        return None
+    payload = record.get('payload') or {}
+    target = payload.get('target') or {}
+    if not _is_wizard_snap(target):
+        return None
+    remaining = payload.get('shields_after')
+    if remaining:
+        return f"Wizard shields stripped, {_shields_phrase(remaining)} left."
+    return "Wizard shields stripped."
+
+
+def _render_wizard_shield_gained(record):
+    """shield_gained where target is wizard. Out-of-chain only — an in-chain
+    self-cast shield is the digest's cast-line capstone. 'Wizard gained N
+    shields, M total.'"""
+    if record.get('event_type') != 'shield_gained':
+        return None
+    payload = record.get('payload') or {}
+    target = payload.get('target') or {}
+    if not _is_wizard_snap(target):
+        return None
+    amount = payload.get('amount')
+    if not amount:
+        return None
+    total = payload.get('shields_after')
+    if total is not None:
+        return f"Wizard gained {_shields_phrase(amount)}, {total} total."
+    return f"Wizard gained {_shields_phrase(amount)}."
 
 
 def _render_wizard_healed(record):
@@ -587,12 +639,21 @@ class _CrisisProducer:
                 categories_present.add('cloud_on_tile')
                 _claim(rec)
                 continue
-            # Shield loss — always crisis (a shielded hit is otherwise
-            # silent); not chain-gated.
-            line = _render_wizard_shield_lost(rec)
+            # Shield block — always crisis (a blocked hit is otherwise silent);
+            # not chain-gated. The rich block report supersedes the thin
+            # EventOnShieldRemoved (now data-only) and the coincident strip.
+            line = _render_wizard_shield_blocked(rec)
             if line:
                 lines.append(line)
-                categories_present.add('shield_lost')
+                categories_present.add('shield_blocked')
+                _claim(rec)
+                continue
+            # Shield strip — always crisis (a defensive loss the player must
+            # know). Block-coincident strips are superseded at capture.
+            line = _render_wizard_shield_stripped(rec)
+            if line:
+                lines.append(line)
+                categories_present.add('shield_stripped')
                 _claim(rec)
                 continue
             # Wizard-facing positives — only when out-of-chain (in-chain ->
@@ -608,6 +669,12 @@ class _CrisisProducer:
                 if line:
                     lines.append(line)
                     categories_present.add('buff_gained')
+                    _claim(rec)
+                    continue
+                line = _render_wizard_shield_gained(rec)
+                if line:
+                    lines.append(line)
+                    categories_present.add('shield_gained')
                     _claim(rec)
                     continue
 

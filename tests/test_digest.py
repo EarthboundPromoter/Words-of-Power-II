@@ -23,6 +23,8 @@ from digest import (
     compose_digest,
     compose_killed_section,
     compose_moved_section,
+    compose_shields_granted_section,
+    compose_shields_stripped_section,
     compose_side_section,
     compose_spawned_section,
     compose_surviving_section,
@@ -2608,3 +2610,101 @@ def test_surviving_section_excludes_wizard():
     ]
     out = compose_surviving_section(chain)
     assert 'Wizard' not in out
+
+
+# ---- Shield sections (R3): granted / stripped / wizard self-gain ----
+
+
+def _u(name, team=1, tier='minion', pid=None, x=3, y=4, player=False):
+    return {'id': pid, 'name': name, 'team': team, 'tier': tier,
+            'is_player_controlled': player, 'x': x, 'y': y}
+
+
+def _sg(target, amount=3, after=3):
+    return {'sequence': 0, 'parent': None, 'event_type': 'shield_gained',
+            'payload': {'target': target, 'amount': amount, 'shields_after': after},
+            'marks': []}
+
+
+def _ss(target, removed=2, marks=None):
+    return {'sequence': 0, 'parent': None, 'event_type': 'shield_stripped',
+            'payload': {'target': target, 'amount_removed': removed},
+            'marks': marks or []}
+
+
+def _wiz_cast(spell="Shield Allies"):
+    # supplies wizard team for ally classification via _find_wizard_team
+    return _player_cast(1, spell)
+
+
+def test_shields_granted_single_ally():
+    chain = [_wiz_cast(), _sg(_u('Wolf', team=0, pid=1))]
+    assert compose_shields_granted_section(chain) == \
+        "Shields granted: Ally Wolf (3,4) gained 3 shields."
+
+
+def test_shields_granted_collapses_by_type_with_each():
+    chain = [_wiz_cast(),
+             _sg(_u('Wolf', team=0, pid=1, x=3, y=4)),
+             _sg(_u('Wolf', team=0, pid=2, x=4, y=4)),
+             _sg(_u('Wolf', team=0, pid=3, x=5, y=4))]
+    assert compose_shields_granted_section(chain) == \
+        "Shields granted: 3 Ally Wolves at (3,4), (4,4), (5,4) gained 3 shields each."
+
+
+def test_shields_granted_subdivides_by_unit_type():
+    chain = [_wiz_cast(),
+             _sg(_u('Wolf', team=0, pid=1)),
+             _sg(_u('Wolf', team=0, pid=2)),
+             _sg(_u('Spider', team=0, pid=3), amount=2, after=2)]
+    out = compose_shields_granted_section(chain)
+    assert '2 Ally Wolves' in out and 'gained 3 shields each' in out
+    assert 'Ally Spider' in out and 'gained 2 shields' in out
+
+
+def test_shields_granted_empty_when_none():
+    assert compose_shields_granted_section([_wiz_cast()]) == ""
+
+
+def test_shields_stripped_collapses_enemies_no_ally_prefix():
+    chain = [_player_cast(1, "Siphon Shields"),
+             _ss(_u('Goblin', pid=1, x=7, y=8)),
+             _ss(_u('Goblin', pid=2, x=8, y=8))]
+    out = compose_shields_stripped_section(chain)
+    assert out == "Shields stripped: 2 Goblins at (7,8), (8,8)."
+    assert 'Ally' not in out
+
+
+def test_shields_stripped_skips_block_superseded():
+    chain = [_player_cast(1, "Fireball"),
+             _ss(_u('Goblin', pid=1), removed=1, marks=['superseded_by_block'])]
+    # the only strip is a block's coincident strip -> section is empty
+    assert compose_shields_stripped_section(chain) == ""
+
+
+def test_shields_excludes_dead_targets():
+    target = _u('Goblin', pid=1)
+    chain = [_player_cast(1, "Siphon Shields"), _ss(target),
+             {'sequence': 2, 'parent': None, 'event_type': 'EventOnDeath',
+              'payload': {'target': target}, 'marks': []}]
+    assert compose_shields_stripped_section(chain) == ""
+
+
+def test_side_section_wizard_self_gain():
+    wiz = _u('Wizard', team=0, tier='wizard', pid=_WIZARD_ID, player=True)
+    chain = [_player_cast(1, "Ironskin"), _sg(wiz, amount=3, after=3)]
+    out = compose_side_section(chain)
+    assert "Shields: gained 3 shields, 3 total." in out
+
+
+def test_side_section_singular_self_gain():
+    wiz = _u('Wizard', team=0, tier='wizard', pid=_WIZARD_ID, player=True)
+    chain = [_player_cast(1, "Ironskin"), _sg(wiz, amount=1, after=1)]
+    assert "Shields: gained 1 shield, 1 total." in compose_side_section(chain)
+
+
+def test_self_gain_not_in_granted_section():
+    # wizard self-gain belongs to Side, not the granted (others) section
+    wiz = _u('Wizard', team=0, tier='wizard', pid=_WIZARD_ID, player=True)
+    chain = [_player_cast(1, "Ironskin"), _sg(wiz)]
+    assert compose_shields_granted_section(chain) == ""

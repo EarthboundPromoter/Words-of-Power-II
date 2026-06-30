@@ -549,6 +549,24 @@ def _resist_blocked_amount(resists, damage_type, orig_amount):
 
 
 _BLOCK_CLAIMED_MARK = 'shield_blocked_claimed'
+_BLOCK_SUPERSEDED_MARK = 'superseded_by_block'
+
+
+def _supersede_block_strip(records, seq_before, target_id):
+    """A block's inline `unit.shields -= 1` (Level.py:4061) trips the
+    __setattr__ interceptor and produces a generic `shield_stripped` record in
+    addition to the rich `shield_blocked`. Mark that coincident strip superseded
+    so renderers (any producer) voice ONLY the block, not a duplicate 'shields
+    stripped'. Identified as the in-window `shield_stripped` for this target —
+    a block consumes exactly one shield, so there is one to mark."""
+    for rec in reversed(records):
+        if rec.get('sequence', 0) <= seq_before:
+            break
+        if (rec.get('event_type') == 'shield_stripped'
+                and (rec.get('payload', {}).get('target') or {}).get('id') == target_id
+                and _BLOCK_SUPERSEDED_MARK not in rec.get('marks', ())):
+            rec.setdefault('marks', []).append(_BLOCK_SUPERSEDED_MARK)
+            return
 
 
 def _claim_block_event(records, seq_before, target_id):
@@ -1177,6 +1195,9 @@ def install_hooks():
                     _shield_blocked_payload(
                         target, blocked_amount, damage_type, source, shields_after),
                 )
+                # The block's inline shields-=1 also logged a generic strip via
+                # the interceptor — mark it superseded so it isn't double-voiced.
+                _supersede_block_strip(journal.records, seq_before, id(target))
         except Exception:
             pass
         return result

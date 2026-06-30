@@ -22,7 +22,9 @@ from crisis import (
     _render_displaced,
     _render_wizard_death,
     _attacker_phrase,
-    _render_wizard_shield_lost,
+    _render_wizard_shield_blocked,
+    _render_wizard_shield_stripped,
+    _render_wizard_shield_gained,
     _render_wizard_healed,
     _render_wizard_buff_gained,
     _CrisisProducer,
@@ -190,29 +192,84 @@ def test_attacker_no_owner_unchanged():
     assert _render_damage_taken(rec) == "Wizard took 4 Physical from Spikes."
 
 
-# ---- _render_wizard_shield_lost ----
+# ---- shield block / strip / gain (R3) ----
 
 
-def _shield_record(target, remaining=2, sequence=30):
-    snap = dict(target)
-    snap['shields'] = remaining
+def _blocked_record(target, amount=12, dtype='Fire', source='Fire Bolt',
+                    remaining=2, marks=None, sequence=30):
     return {'sequence': sequence, 'parent': None,
-            'event_type': 'EventOnShieldRemoved',
-            'payload': {'target': snap}, 'marks': []}
+            'event_type': 'shield_blocked',
+            'payload': {'target': target, 'blocked_amount': amount,
+                        'damage_type': dtype, 'source_name': source,
+                        'shields_remaining': remaining},
+            'marks': marks or []}
 
 
-def test_shield_lost_with_remaining():
-    assert _render_wizard_shield_lost(_shield_record(_wizard_snap(), 2)) == \
-        "Wizard shield lost, 2 remaining."
+def _stripped_record(target, after=1, marks=None, sequence=30):
+    return {'sequence': sequence, 'parent': None,
+            'event_type': 'shield_stripped',
+            'payload': {'target': target, 'amount_removed': 1,
+                        'shields_after': after},
+            'marks': marks or []}
 
 
-def test_shield_last_lost():
-    assert _render_wizard_shield_lost(_shield_record(_wizard_snap(), 0)) == \
-        "Wizard last shield lost."
+def _gained_record(target, amount=2, after=3, sequence=30):
+    return {'sequence': sequence, 'parent': None,
+            'event_type': 'shield_gained',
+            'payload': {'target': target, 'amount': amount, 'shields_after': after},
+            'marks': []}
 
 
-def test_shield_lost_non_wizard_ignored():
-    assert _render_wizard_shield_lost(_shield_record(_enemy_snap(), 1)) is None
+def test_shield_blocked_full():
+    assert _render_wizard_shield_blocked(_blocked_record(_wizard_snap())) == \
+        "Wizard blocked 12 Fire from Fire Bolt, 2 shields left."
+
+
+def test_shield_blocked_singular_remaining():
+    assert _render_wizard_shield_blocked(
+        _blocked_record(_wizard_snap(), remaining=1)) == \
+        "Wizard blocked 12 Fire from Fire Bolt, 1 shield left."
+
+
+def test_shield_blocked_last_shield():
+    assert _render_wizard_shield_blocked(
+        _blocked_record(_wizard_snap(), remaining=0)) == \
+        "Wizard blocked 12 Fire from Fire Bolt, last shield."
+
+
+def test_shield_blocked_non_wizard_ignored():
+    assert _render_wizard_shield_blocked(_blocked_record(_enemy_snap())) is None
+
+
+def test_shield_stripped_with_remaining():
+    assert _render_wizard_shield_stripped(
+        _stripped_record(_wizard_snap(), after=2)) == \
+        "Wizard shields stripped, 2 shields left."
+
+
+def test_shield_stripped_all():
+    assert _render_wizard_shield_stripped(
+        _stripped_record(_wizard_snap(), after=0)) == "Wizard shields stripped."
+
+
+def test_shield_stripped_superseded_by_block_ignored():
+    rec = _stripped_record(_wizard_snap(), after=1, marks=['superseded_by_block'])
+    assert _render_wizard_shield_stripped(rec) is None
+
+
+def test_shield_gained_with_total():
+    assert _render_wizard_shield_gained(_gained_record(_wizard_snap())) == \
+        "Wizard gained 2 shields, 3 total."
+
+
+def test_shield_gained_singular():
+    assert _render_wizard_shield_gained(
+        _gained_record(_wizard_snap(), amount=1, after=1)) == \
+        "Wizard gained 1 shield, 1 total."
+
+
+def test_shield_gained_non_wizard_ignored():
+    assert _render_wizard_shield_gained(_gained_record(_enemy_snap())) is None
 
 
 # ---- _render_wizard_healed ----

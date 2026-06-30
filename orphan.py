@@ -1350,6 +1350,68 @@ def _render_buff_applies(records, wizard_team, show_coords):
     return out_items, claimed
 
 
+def _render_shield_changes(records, wizard_team, show_coords):
+    """Out-of-chain shield gains/strips on NON-wizard units — an enemy
+    self-shields or shields an ally, an aura grants shields, an enemy strips an
+    ally's shields. Wizard shield changes are crisis's; in-chain ones the
+    digest's (both already claimed, so _is_claimed_by_other skips them).
+    Collapsed by (event, amount, name, tier), ally-prefixed, emitted as status
+    line-items so they ride the proximity/LoS ordering. Block-coincident strips
+    (superseded_by_block) are skipped — the block owns that narration, and no
+    non-wizard block voice exists yet (see build plan). Returns (items,
+    claimed)."""
+    out_items = []
+    claimed = []
+    groups = {}
+    order = []
+    for r in records:
+        et = r.get('event_type')
+        if et not in ('shield_gained', 'shield_stripped'):
+            continue
+        if _is_claimed_by_other(r):
+            continue
+        if et == 'shield_stripped' and 'superseded_by_block' in (r.get('marks') or []):
+            _claim(r)
+            claimed.append(r)
+            continue
+        p = r.get('payload') or {}
+        t = p.get('target') or {}
+        if _is_wizard_snap(t):
+            continue
+        amount = (p.get('amount') if et == 'shield_gained'
+                  else p.get('amount_removed'))
+        sig = (et, amount, t.get('name'), t.get('tier'))
+        if sig not in groups:
+            order.append(sig)
+            groups[sig] = []
+        groups[sig].append(t)
+        _claim(r)
+        claimed.append(r)
+
+    for sig in order:
+        et, amount, target_name, _tier = sig
+        members = groups[sig]
+        if et == 'shield_gained':
+            amt = amount or 0
+            sh = "shield" if amt == 1 else "shields"
+            phrase_tail = f"gained {amt} {sh}"
+            each = " each"
+        else:
+            phrase_tail = "shields stripped"
+            each = ""
+        if len(members) == 1:
+            target_str = _name_with_coord(members[0], wizard_team, show_coords)
+            out_items.append(_make_item(RANK_STATUS, [members[0]],
+                f"{target_str} {phrase_tail}."))
+        else:
+            plural = _pluralize(target_name or 'enemy')
+            prefix = _team_prefix(members[0], wizard_team)
+            coords = _coord_list(members, show_coords)
+            out_items.append(_make_item(RANK_STATUS, members,
+                f"{len(members)} {prefix}{plural}{coords} {phrase_tail}{each}."))
+    return out_items, claimed
+
+
 # ======================================================================
 # Producer
 # ======================================================================
@@ -1482,9 +1544,15 @@ class _OrphanProducer:
         buff_items, _buff_claimed = _render_buff_applies(
             new_records, wizard_team, show_coords
         )
+        # Out-of-chain shield gains/strips on non-wizard units. Runs after the
+        # chain sections so crisis/digest-owned shield records are already
+        # claimed (claim==render).
+        shield_items, _shield_claimed = _render_shield_changes(
+            new_records, wizard_team, show_coords
+        )
 
         all_items = (action_items + tick_items + bare_items + death_items
-                     + spawn_items + buff_items)
+                     + spawn_items + buff_items + shield_items)
         text = _assemble_items(all_items, wizard_pos, los_grouping)
 
         if telemetry is not None:
