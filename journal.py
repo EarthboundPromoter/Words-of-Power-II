@@ -21,6 +21,7 @@ journal_debug.log files cannot be replayed against the new shape.
 """
 
 import json
+import math
 import os
 import time
 
@@ -36,6 +37,10 @@ class _Journal:
         self.level_id = None
         self._fp = None
         self._hooks_installed = False
+        # Set True only while Unit.refresh() runs, so the __setattr__ interceptor
+        # ignores refresh's shields=0 reset (a level-transition/respawn reset, not
+        # a combat strip). See patched_unit_refresh / patched_setattr.
+        self._suppress_watched_capture = False
 
     def reset(self, level_id):
         self.records = []
@@ -485,9 +490,150 @@ def _payload_buff_remove(event):
 
 
 def _payload_shield_removed(event):
-    """EventOnShieldRemoved(unit). Counted by the digest to compose
-    'absorbed by N shields' on shielded targets."""
-    return {'target': _snapshot_unit(event.unit)}
+    """EventOnShieldRemoved(unit, source). Raised ONLY on a block
+    (Level.py:4066). Kept as a DATA record for the shield ledger /
+    validation; the canonical block VOICE is the richer 'shield_blocked'
+    record synthesized in the deal_damage wrapper (the event is too thin —
+    it carries no blocked amount or damage type, which live only as locals in
+    deal_damage). `source` enriched here for ledger completeness; the digest's
+    'absorbed by N shields' counting still works off the target."""
+    return {
+        'target': _snapshot_unit(event.unit),
+        'source_name': _name_or(getattr(event, 'source', None)),
+        'source_owner_name': _name_or(getattr(getattr(event, 'source', None), 'owner', None)),
+    }
+
+
+# ----------------------------------------------------------------------
+# Shield capture (R3). The game mutates `shields` as an IMMUTABLE int by
+# silent direct assignment (add_shields Level.py:2499; remove_shields :2504;
+# and ~8 raw `.shields =`/`-=` writes in spell/equipment content), raising no
+# event. Because the value is immutable, EVERY change is a wholesale
+# reassignment that must route through Unit.__setattr__ — so a single
+# __setattr__ interceptor (patched_setattr in install_hooks) is the one
+# COMPLETE source for shield-change events, catching content-direct writes the
+# old add_shields/remove_shields method hooks missed. (Same mechanism will
+# capture `team` for team-flip — see _WATCHED_ATTRS.) The block DETAIL
+# (blocked amount/type/source the game's DMG_BLOCKED log shows but the
+# EventOnShieldRemoved event omits) still needs the deal_damage wrapper, gated
+# on the block event actually firing. These helpers are pure (no live-Level
+# dependency) so they unit-test in test_journal.py.
+# ----------------------------------------------------------------------
+
+# Attributes the __setattr__ interceptor watches: no-event, immutable-valued,
+# player-relevant state. 'team' joins here when team-flip lands on the same hook.
+_WATCHED_ATTRS = frozenset({'shields'})
+
+
+def _resist_blocked_amount(resists, damage_type, orig_amount):
+    """Reproduce the game's post-resist amount (Level.deal_damage,
+    Level.py:4034-4039) for a hit a shield then fully blocked — the
+    'would have been N' the game's DMG_BLOCKED log shows. The
+    EventOnShieldRemoved event can't carry it, so the block record recomputes
+    from the same inputs: effective resist capped at 100, ceil of the resisted
+    fraction.
+
+    NOT folded in (rare, documented divergence — not reconstructed): a
+    damage_limit_buff clamp (Level.py:4042) can lower the game's amount below
+    this."""
+    if orig_amount is None:
+        return None
+    resist = 0
+    if resists:
+        try:
+            resist = resists.get(damage_type, 0)
+        except Exception:
+            resist = 0
+    resist = min(resist, 100)
+    return int(math.ceil(orig_amount * (100 - resist) / 100.0))
+
+
+_BLOCK_CLAIMED_MARK = 'shield_blocked_claimed'
+
+
+def _claim_block_event(records, seq_before, target_id):
+    """Precise block detector + claimer: find the first UNCLAIMED
+    EventOnShieldRemoved for `target_id` raised after `seq_before`, mark it
+    claimed, and return True. That event is raised ONLY at the real block
+    branch (Level.py:4066), so gating on it — not on a shields before/after
+    diff — avoids false positives on the other paths deal_damage returns 0
+    (no-unit, dead unit, damage-instance cap, redirect).
+
+    The CLAIM (via the journal's existing per-record `marks`) is what stops an
+    OUTER deal_damage wrapper from re-counting a block performed by a NESTED
+    inner call: a handler that re-damages the same shielded unit from inside
+    raise_event(EventOnShieldRemoved)/PreDamaged makes the inner block's event
+    fall inside the outer wrapper's scan window too. The inner wrapper runs
+    first and claims its event; the outer then finds only its own (or none).
+    Walks only records created during the call (breaks at seq_before)."""
+    for rec in reversed(records):
+        if rec.get('sequence', 0) <= seq_before:
+            break
+        if rec.get('event_type') == 'EventOnShieldRemoved':
+            tgt = rec.get('payload', {}).get('target') or {}
+            if tgt.get('id') == target_id and _BLOCK_CLAIMED_MARK not in rec.get('marks', ()):
+                rec.setdefault('marks', []).append(_BLOCK_CLAIMED_MARK)
+                return True
+    return False
+
+
+def _shield_change_record(unit, before, after):
+    """Classify a shields write seen by the __setattr__ interceptor into a
+    journal record, or None for a no-op. The interceptor sees only the stored
+    before/after (already cap-clamped by the game), so the net delta IS the
+    true change — inherently cap-honest, no need to know the requested amount.
+    A block's inline `unit.shields -= 1` (Level.py:4061) also arrives here as a
+    strip; the deal_damage wrapper adds the richer block detail separately and
+    the render layer lets the block voice supersede the coincident strip."""
+    before = before or 0
+    after = after or 0
+    if after == before:
+        return None
+    if after > before:
+        return 'shield_gained', _shield_gained_payload(unit, after - before, before, after)
+    return 'shield_stripped', _shield_stripped_payload(unit, before, after)
+
+
+def _shield_gained_payload(unit, amount, shields_before, shields_after):
+    """Synthesized 'shield_gained' record. `amount` is the NET gain
+    (after - before) the interceptor observed — already cap-honest, since the
+    game stored the clamped value before we diffed."""
+    return {
+        'target': _snapshot_unit(unit),
+        'amount': amount,
+        'shields_before': shields_before,
+        'shields_after': shields_after,
+    }
+
+
+def _shield_stripped_payload(unit, shields_before, shields_after):
+    """Synthesized 'shield_stripped' record — remove_shields strips with no
+    event. The block path decrements unit.shields inline (NOT via
+    remove_shields), so this never double-fires with shield_blocked."""
+    removed = None
+    if shields_before is not None and shields_after is not None:
+        removed = shields_before - shields_after
+    return {
+        'target': _snapshot_unit(unit),
+        'amount_removed': removed,
+        'shields_before': shields_before,
+        'shields_after': shields_after,
+    }
+
+
+def _shield_blocked_payload(unit, blocked_amount, damage_type, source, shields_remaining):
+    """Synthesized 'shield_blocked' record — the CANONICAL block voice. Binds
+    the blocked hit (amount the game would have dealt + type + source) with the
+    remaining shield count, from the deal_damage wrapper's before/after diff.
+    Supersedes EventOnShieldRemoved for rendering."""
+    return {
+        'target': _snapshot_unit(unit),
+        'blocked_amount': blocked_amount,
+        'damage_type': _name_or(damage_type),
+        'source_name': _name_or(source),
+        'source_owner_name': _name_or(getattr(source, 'owner', None)),
+        'shields_remaining': shields_remaining,
+    }
 
 
 def _payload_unfrozen(event):
@@ -663,6 +809,9 @@ def install_hooks():
     original_unit_apply_buff = Level.Unit.apply_buff
     original_buff_advance = Level.Buff.advance
     original_cloud_advance = Level.Cloud.advance
+    original_unit_setattr = Level.Unit.__setattr__
+    original_unit_refresh = Level.Unit.refresh
+    original_deal_damage = Level.Level.deal_damage
 
     def patched_act_cast(self, unit, spell, x, y, pay_costs=True, queue=True, **cast_kwargs):
         # RW3: act_cast replaced the explicit is_echo param with **cast_kwargs and
@@ -955,6 +1104,83 @@ def install_hooks():
         finally:
             journal.pop()
 
+    def patched_setattr(self, name, value):
+        # The ONE complete capture point for no-event, immutable-valued state
+        # (shields now; team at team-flip). Every assignment to a watched attr —
+        # add_shields, remove_shields, the block's inline decrement, and the ~8
+        # content direct-writes the method hooks missed — routes through here.
+        #
+        # Discipline (this mediates EVERY unit attribute write, so a bug breaks
+        # the whole game): the store ALWAYS runs via the captured original;
+        # observation is fully try/except-guarded and can never prevent it; and
+        # nothing here sets an attribute on `self` except through
+        # original_unit_setattr (any `self.x = ...` would re-enter and recurse).
+        # Old value is read from __dict__ directly (no __getattribute__ games).
+        if name not in _WATCHED_ATTRS:
+            original_unit_setattr(self, name, value)
+            return
+        before = self.__dict__.get(name)
+        original_unit_setattr(self, name, value)
+        try:
+            # ever_spawned (set in add_obj, Level.py:3910) gates out the ~40
+            # construction writes + factory/baseline shields on not-yet-placed
+            # units; only live, on-field mutations are recorded. The suppress
+            # flag gates out Unit.refresh()'s shields=0 reset (level transition /
+            # respawn, not combat). Parent comes from the cause stack — a reactive
+            # gain parents to its EventOnDamaged, a Siphon strip to the cast.
+            if getattr(self, 'ever_spawned', False) and not journal._suppress_watched_capture:
+                after = self.__dict__.get(name)
+                classified = _shield_change_record(self, before, after)
+                if classified is not None:
+                    event_type, payload = classified
+                    journal.record(event_type, payload)
+        except Exception:
+            pass
+
+    def patched_unit_refresh(self):
+        # Unit.refresh (Level.py:2510) zeroes shields as part of a full reset at
+        # level transitions / deploy / respawn — NOT a combat strip. Bracket it
+        # so the __setattr__ interceptor ignores that shields=0 write (and any
+        # other watched resets refresh performs), preventing a phantom "shields
+        # stripped". The flag always resets, even if refresh raises.
+        prev = journal._suppress_watched_capture
+        journal._suppress_watched_capture = True
+        try:
+            return original_unit_refresh(self)
+        finally:
+            journal._suppress_watched_capture = prev
+
+    def patched_deal_damage(self, x, y, amount, damage_type, source,
+                            flash=True, redirect=False):
+        # Block DETAIL only (the gain/strip magnitude is owned by the
+        # __setattr__ interceptor). The game's DMG_BLOCKED log (text.py:245)
+        # shows the blocked amount + type + source, but EventOnShieldRemoved
+        # carries none of it — those live only as locals here. Detect the block
+        # PRECISELY by whether that event fired for this unit during the call
+        # (it's raised only at the real block branch, Level.py:4066), recompute
+        # the post-resist "would have been" amount as the game does, read the
+        # remaining count off the same target reference, and attribute via the
+        # cause stack (player attack chain -> outgoing block; wizard target ->
+        # incoming).
+        target = self.get_unit_at(x, y)
+        seq_before = journal.sequence
+        result = original_deal_damage(self, x, y, amount, damage_type, source,
+                                      flash=flash, redirect=redirect)
+        try:
+            if target is not None and _claim_block_event(
+                    journal.records, seq_before, id(target)):
+                shields_after = getattr(target, 'shields', 0) or 0
+                blocked_amount = _resist_blocked_amount(
+                    getattr(target, 'resists', None), damage_type, amount)
+                journal.record(
+                    'shield_blocked',
+                    _shield_blocked_payload(
+                        target, blocked_amount, damage_type, source, shields_after),
+                )
+        except Exception:
+            pass
+        return result
+
     Level.Level.act_cast = patched_act_cast
     Level.Level.queue_spell = patched_queue_spell
     Level.EventHandler.raise_event = patched_raise_event
@@ -970,4 +1196,7 @@ def install_hooks():
     Level.Unit.apply_buff = patched_unit_apply_buff
     Level.Buff.advance = patched_buff_advance
     Level.Cloud.advance = patched_cloud_advance
+    Level.Unit.__setattr__ = patched_setattr
+    Level.Unit.refresh = patched_unit_refresh
+    Level.Level.deal_damage = patched_deal_damage
     journal._hooks_installed = True
