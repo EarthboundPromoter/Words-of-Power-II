@@ -1471,6 +1471,78 @@ def compose_shields_stripped_section(chain):
     return "Shields stripped: " + " ".join(lines)
 
 
+def _classify_team_changes(chain, event_type):
+    """Equivalence classes of team flips (event_type = 'team_joined' or
+    'team_turned'), grouped like the shield sections: Tier 1 (boss/spawner)
+    individuated, Tier 2 (minion) collapsed by name. Filters targets that died in
+    the chain. No amount — a flip is categorical; the direction IS the event_type,
+    so within one call every target shares the same resulting team and name alone
+    is a safe collapse key."""
+    dead_target_ids = set()
+    for r in chain:
+        if r.get('event_type') == 'EventOnDeath':
+            t = (r.get('payload') or {}).get('target') or {}
+            if t.get('id') is not None:
+                dead_target_ids.add(t.get('id'))
+    classes = []
+    tier2_lookup = {}
+    for r in chain:
+        if r.get('event_type') != event_type:
+            continue
+        payload = r.get('payload') or {}
+        target = payload.get('target') or {}
+        if target.get('is_player_controlled'):   # the wizard never flips (defensive)
+            continue
+        if target.get('id') in dead_target_ids:
+            continue
+        tier = target.get('tier', 'minion')
+        if tier in ('boss', 'spawner'):
+            classes.append({'target': target, 'count': 1, 'members': [target]})
+        else:
+            key = (target.get('name'),)
+            existing = tier2_lookup.get(key)
+            if existing is None:
+                cls = {'target': target, 'count': 1, 'members': [target]}
+                classes.append(cls)
+                tier2_lookup[key] = cls
+            else:
+                existing['count'] += 1
+                existing['members'].append(target)
+    return classes
+
+
+def _team_target_phrase(target, count, members):
+    """Target phrase for a flip line. No ally/enemy prefix — the disposition
+    ('turned friendly/hostile') already carries the allegiance, so a prefix would
+    be redundant ('Ally Ogre turned friendly')."""
+    name = target.get('name') or 'Unknown'
+    if count <= 1:
+        x, y = target.get('x'), target.get('y')
+        return f"{name} ({x},{y})"
+    from helpers import _pluralize
+    plural = _pluralize(name)
+    return f"{count} {plural}{_format_coord_list(members)}"
+
+
+def _render_team_line(cls, disposition):
+    phrase = _team_target_phrase(cls['target'], cls['count'], cls['members'])
+    return f"{phrase} turned {disposition}."
+
+
+def compose_team_changes_section(chain):
+    """Team flips in a player chain — Dominate/conversions (enemy→player, "turned
+    friendly") and the rare player-losing forfeit (player→enemy, "turned
+    hostile"). Bare verb-in-line form (no section header, unlike shields — the
+    disposition carries the meaning): 'Ogre (3,4) turned friendly.'"""
+    joined = _classify_team_changes(chain, 'team_joined')
+    turned = _classify_team_changes(chain, 'team_turned')
+    if not joined and not turned:
+        return ""
+    lines = [_render_team_line(c, 'friendly') for c in joined]
+    lines += [_render_team_line(c, 'hostile') for c in turned]
+    return " ".join(lines)
+
+
 def compose_side_section(chain):
     """Compose the Side section: heals, buffs, wizard self-shield gains
     (charges deferred).
@@ -1675,10 +1747,12 @@ def compose_digest(chain):
     has_move = bool(compose_moved_section(chain))
     has_shield_grants = bool(compose_shields_granted_section(chain))
     has_shield_strips = bool(compose_shields_stripped_section(chain))
+    has_team_changes = bool(compose_team_changes_section(chain))
 
     if (cast_count == 1 and damage_count <= 1
             and not has_spawns and not has_debuffs and not has_buffs
-            and not has_move and not has_shield_grants and not has_shield_strips):
+            and not has_move and not has_shield_grants and not has_shield_strips
+            and not has_team_changes):
         return _compose_streamlined(chain)
     return _compose_standard(chain)
 
@@ -1696,6 +1770,7 @@ def _compose_standard(chain):
     shields_stripped = compose_shields_stripped_section(chain)
     buffs = compose_buffs_applied_section(chain)
     shields_granted = compose_shields_granted_section(chain)
+    team_changes = compose_team_changes_section(chain)
     spawned = compose_spawned_section(chain)
     moved = compose_moved_section(chain)
     side = compose_side_section(chain)
@@ -1709,7 +1784,7 @@ def _compose_standard(chain):
     # outcomes — a Siphon that lands no damage still did something).
     if (cast and not killed and not surviving and not debuffs
             and not buffs and not spawned and not shields_stripped
-            and not shields_granted):
+            and not shields_granted and not team_changes):
         parts.append("No damage.")
     else:
         if killed:
@@ -1726,6 +1801,8 @@ def _compose_standard(chain):
             parts.append(shields_granted)
         if spawned:
             parts.append(spawned)
+        if team_changes:
+            parts.append(team_changes)
 
     # The wizard's own relocation trails the outcome sections: cast →
     # effects → "and you ended up here". Kept independent of the No-damage
@@ -1940,6 +2017,9 @@ _COMPOSER_KNOWN_EVENT_TYPES = frozenset({
     # section's block clause, and orphan — all handled, so they must not trip
     # the unmodeled-telemetry noise.
     'shield_gained', 'shield_stripped', 'shield_blocked',
+    # Team-flip capture (R2). Rendered by compose_team_changes_section (in-chain
+    # Dominate/conversions) and orphan (ambient); both handled, so not unmodeled.
+    'team_joined', 'team_turned',
 })
 
 

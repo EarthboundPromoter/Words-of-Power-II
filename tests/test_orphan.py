@@ -22,6 +22,7 @@ from orphan import (
     _render_collapsed_action,
     _render_shield_changes,
     _render_shield_blocks,
+    _render_team_changes,
     _render_status_ticks,
     _team_prefix,
     _OrphanProducer,
@@ -1690,3 +1691,56 @@ def test_orphan_block_skips_wizard_and_claimed():
     claimed_rec = _sblock(_su('Ogre', pid=1), marks=['digest_v1'])
     items, claimed = _render_shield_blocks([claimed_rec], 0, True)
     assert items == [] and claimed == []
+
+
+# ---- Team flips (R2): ambient conversions on non-wizard units ----
+
+
+def _tj_o(target, marks=None):
+    # enemy -> player
+    return {'event_type': 'team_joined',
+            'payload': {'target': target, 'team_before': 1, 'team_after': 0},
+            'marks': marks or []}
+
+
+def _tt_o(target, marks=None):
+    # player -> enemy
+    return {'event_type': 'team_turned',
+            'payload': {'target': target, 'team_before': 0, 'team_after': 1},
+            'marks': marks or []}
+
+
+def _team_texts(records, wizard_team=0, show_coords=True):
+    items, _claimed = _render_team_changes(records, wizard_team, show_coords)
+    return [it.get('text') for it in items]
+
+
+def test_orphan_team_turned_single_no_prefix():
+    assert _team_texts([_tt_o(_su('Wolf', team=1, pid=1))]) == \
+        ["Wolf (3,4) turned hostile."]
+
+
+def test_orphan_team_joined_single_no_prefix():
+    # even though the unit is now player-team, no "Ally" prefix — the
+    # disposition carries the allegiance.
+    assert _team_texts([_tj_o(_su('Ogre', team=0, pid=1))]) == \
+        ["Ogre (3,4) turned friendly."]
+
+
+def test_orphan_team_collapses_by_name():
+    recs = [_tt_o(_su('Wolf', team=1, pid=1, x=3, y=4)),
+            _tt_o(_su('Wolf', team=1, pid=2, x=4, y=4))]
+    assert _team_texts(recs) == ["2 Wolves at (3,4), (4,4) turned hostile."]
+
+
+def test_orphan_team_skips_claimed_by_digest():
+    rec = _tj_o(_su('Ogre', pid=1), marks=['digest_v1'])
+    items, claimed = _render_team_changes([rec], 0, True)
+    assert items == [] and claimed == []
+
+
+def test_orphan_team_skips_wizard():
+    wiz = {'id': 100, 'name': 'Wizard', 'team': 0, 'tier': 'wizard',
+           'is_player_controlled': True, 'x': 10, 'y': 10}
+    items, _ = _render_team_changes([_tj_o(wiz)], 0, True)
+    assert items == []

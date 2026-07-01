@@ -5,6 +5,9 @@ an early work-in-progress RW3 port — expect frequent changes.
 
 ## 2026-06-30 — 0.2.6
 
+### Added
+- Allegiance changes are now announced: units that turn friendly (Dominate, conversions) or hostile (betrayals, Treachery).
+
 ### Fixed
 - Channeling, rituals, and other manual-only cast behavior work again with the mod loaded.
 - How to Play now always opens at the first page instead of resuming the last page

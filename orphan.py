@@ -1442,6 +1442,52 @@ def _render_shield_changes(records, wizard_team, show_coords,
     return out_items, claimed
 
 
+def _render_team_changes(records, wizard_team, show_coords):
+    """Out-of-chain team flips on NON-wizard units — Treachery (ally→enemy), an
+    enemy Siren/Mordred converting your ally, any ambient conversion. In-chain
+    flips (your Dominate) are the digest's (already claimed → _is_claimed_by_other
+    skips them). Collapsed by (event, name, tier); emitted as status line-items so
+    they ride the proximity/LoS ordering. No ally/enemy prefix — the disposition
+    ('turned friendly/hostile') already carries the allegiance. Returns
+    (items, claimed)."""
+    out_items = []
+    claimed = []
+    groups = {}
+    order = []
+    for r in records:
+        et = r.get('event_type')
+        if et not in ('team_joined', 'team_turned'):
+            continue
+        if _is_claimed_by_other(r):
+            continue
+        p = r.get('payload') or {}
+        t = p.get('target') or {}
+        if _is_wizard_snap(t):
+            continue
+        sig = (et, t.get('name'), t.get('tier'))
+        if sig not in groups:
+            order.append(sig)
+            groups[sig] = []
+        groups[sig].append(t)
+        _claim(r)
+        claimed.append(r)
+
+    for sig in order:
+        et, target_name, _tier = sig
+        members = groups[sig]
+        disposition = 'friendly' if et == 'team_joined' else 'hostile'
+        if len(members) == 1:
+            m = members[0]
+            name = m.get('name') or 'Unknown'
+            out_items.append(_make_item(RANK_STATUS, [m],
+                f"{name}{_coord_str(m, show_coords)} turned {disposition}."))
+        else:
+            plural = _pluralize(target_name or 'enemy')
+            out_items.append(_make_item(RANK_STATUS, members,
+                f"{len(members)} {plural}{_coord_list(members, show_coords)} turned {disposition}."))
+    return out_items, claimed
+
+
 def _render_shield_blocks(records, wizard_team, show_coords,
                           ally_shield_totals=False, enemy_shield_totals=True):
     """Out-of-chain shield BLOCKS on NON-wizard units — an enemy attacks your
@@ -1671,10 +1717,15 @@ class _OrphanProducer:
             new_records, wizard_team, show_coords,
             ally_shield_totals, enemy_shield_totals
         )
+        # Out-of-chain team flips on non-wizard units (Treachery, enemy
+        # conversions). In-chain flips (your Dominate) are digest-claimed.
+        team_items, _team_claimed = _render_team_changes(
+            new_records, wizard_team, show_coords
+        )
 
         all_items = (action_items + tick_items + bare_items + death_items
                      + spawn_items + buff_items + shield_items
-                     + shield_block_items)
+                     + shield_block_items + team_items)
         text = _assemble_items(all_items, wizard_pos, los_grouping)
 
         if telemetry is not None:

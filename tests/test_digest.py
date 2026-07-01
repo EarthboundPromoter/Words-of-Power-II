@@ -25,6 +25,7 @@ from digest import (
     compose_moved_section,
     compose_shields_granted_section,
     compose_shields_stripped_section,
+    compose_team_changes_section,
     compose_side_section,
     compose_spawned_section,
     compose_surviving_section,
@@ -2703,6 +2704,59 @@ def test_shields_granted_subdivides_by_unit_type():
     out = compose_shields_granted_section(chain)
     assert '2 Ally Wolves' in out and 'gained 3 shields each' in out
     assert 'Ally Spider' in out and 'gained 2 shields' in out
+
+
+# ---- team-flip section (R2): "turned friendly" / "turned hostile", no prefix ----
+
+
+def _tj(target):
+    # enemy -> player (Dominate/conversion)
+    return {'sequence': 0, 'parent': None, 'event_type': 'team_joined',
+            'payload': {'target': target, 'team_before': 1, 'team_after': 0},
+            'marks': []}
+
+
+def _tt(target):
+    # player -> enemy (forfeit/betrayal)
+    return {'sequence': 0, 'parent': None, 'event_type': 'team_turned',
+            'payload': {'target': target, 'team_before': 0, 'team_after': 1},
+            'marks': []}
+
+
+def test_team_joined_single_no_prefix():
+    chain = [_wiz_cast("Dominate"), _tj(_u('Ogre', team=0, pid=1))]
+    assert compose_team_changes_section(chain) == "Ogre (3,4) turned friendly."
+
+
+def test_team_joined_collapses_by_name():
+    chain = [_wiz_cast("Dominate"),
+             _tj(_u('Ogre', team=0, pid=1, x=3, y=4)),
+             _tj(_u('Ogre', team=0, pid=2, x=4, y=4)),
+             _tj(_u('Ogre', team=0, pid=3, x=5, y=4))]
+    assert compose_team_changes_section(chain) == \
+        "3 Ogres at (3,4), (4,4), (5,4) turned friendly."
+
+
+def test_team_turned_single():
+    chain = [_wiz_cast("Ritual Bound"), _tt(_u('Wolf', team=1, pid=1))]
+    assert compose_team_changes_section(chain) == "Wolf (3,4) turned hostile."
+
+
+def test_team_mixed_directions_both_render():
+    chain = [_wiz_cast("Chaos"),
+             _tj(_u('Ogre', team=0, pid=1)),
+             _tt(_u('Wolf', team=1, pid=2))]
+    out = compose_team_changes_section(chain)
+    assert "Ogre (3,4) turned friendly." in out
+    assert "Wolf (3,4) turned hostile." in out
+
+
+def test_team_flip_of_dead_target_dropped():
+    ogre = _u('Ogre', team=0, pid=7)
+    chain = [_wiz_cast("Dominate"), _tj(ogre),
+             {'sequence': 0, 'parent': None, 'event_type': 'EventOnDeath',
+              'payload': {'target': ogre}, 'marks': []}]
+    assert compose_team_changes_section(chain) == ""
 
 
 def test_shields_granted_same_name_ally_enemy_split_by_team():
