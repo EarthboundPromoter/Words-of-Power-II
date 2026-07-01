@@ -14,6 +14,8 @@ an early work-in-progress RW3 port — expect frequent changes.
   to be silently dropped as part of the unit arriving.
 - A unit returning to the battlefield via Reincarnation no longer produces a phantom
   "shields gained" announcement.
+- A shield grant that pushes a unit past the 20-shield cap now announces the true net
+  gain once, instead of an inflated amount followed by a correction.
 - Channeling, rituals, and other manual-only cast behavior work again with the mod loaded.
 - How to Play now always opens at the first page instead of resuming the last page
   viewed — a native open could otherwise land on the appended Words of Power section.

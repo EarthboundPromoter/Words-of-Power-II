@@ -144,3 +144,85 @@ def test_reincarnation_respawn_shields_not_voiced():
                and (r["payload"].get("target") or {}).get("id") == id(martyr)]
     assert phantom == [], \
         "reincarnation respawn must not phantom-voice a shield change (R22)"
+
+
+# ---- R21: add_shields / remove_shields cap-clamp double-write -> one net record ----
+
+def _new_records_after(seq, target_id):
+    return [r for r in _shield_records(target_id) if r["sequence"] > seq]
+
+
+def test_add_shields_cap_crossing_single_net_record():
+    # 19 + 5 -> `+=` to 24, then min(24,20)=20: two interceptor fires unbracketed
+    # (+5 gain, then -4 strip). Bracketed, it must voice one net +1.
+    lvl = _fresh_level()
+    ogre = _place(lvl, _unit("Ogre"), 5, 5)
+    ogre.shields = 19
+    seq = journal.sequence
+    ogre.add_shields(5)
+    recs = _new_records_after(seq, id(ogre))
+    assert len(recs) == 1, "cap-crossing add_shields must voice one net record"
+    assert recs[0]["event_type"] == "shield_gained"
+    assert recs[0]["payload"]["amount"] == 1
+    assert ogre.shields == 20
+
+
+def test_remove_shields_underflow_single_net_record():
+    # 2 - 5 -> `-=` to -3, then clamp to 0: two fires unbracketed (-5, then +3).
+    # Bracketed, one net -2.
+    lvl = _fresh_level()
+    ghoul = _place(lvl, _unit("Ghoul"), 5, 5)
+    ghoul.shields = 2
+    seq = journal.sequence
+    ghoul.remove_shields(5)
+    recs = _new_records_after(seq, id(ghoul))
+    assert len(recs) == 1, "underflow remove_shields must voice one net record"
+    assert recs[0]["event_type"] == "shield_stripped"
+    assert recs[0]["payload"]["amount_removed"] == 2
+    assert ghoul.shields == 0
+
+
+def test_add_shields_below_cap_single_record():
+    # Normal (no clamp) grant still voices exactly one record with the true gain.
+    lvl = _fresh_level()
+    imp = _place(lvl, _unit("Imp"), 5, 5)
+    imp.shields = 5
+    seq = journal.sequence
+    imp.add_shields(3)
+    recs = _new_records_after(seq, id(imp))
+    assert len(recs) == 1
+    assert recs[0]["event_type"] == "shield_gained"
+    assert recs[0]["payload"]["amount"] == 3
+    assert imp.shields == 8
+
+
+def test_add_shields_uncapped_can_exceed_20():
+    # cap=False skips the clamp (FinalBosses.py:1546), so no second write and the
+    # net record reflects the full uncapped total.
+    lvl = _fresh_level()
+    titan = _place(lvl, _unit("Titan"), 5, 5)
+    titan.shields = 19
+    seq = journal.sequence
+    titan.add_shields(6, cap=False)
+    recs = _new_records_after(seq, id(titan))
+    assert len(recs) == 1
+    assert recs[0]["payload"]["amount"] == 6
+    assert titan.shields == 25
+
+
+def test_add_shields_respects_outer_suppress():
+    # A setter called inside an outer suppress bracket (e.g. within refresh) must
+    # not emit, and the store must still happen. Guards the save/restore of the
+    # net-emit path.
+    lvl = _fresh_level()
+    u = _place(lvl, _unit("Unit"), 5, 5)
+    prev = journal._suppress_watched_capture
+    journal._suppress_watched_capture = True
+    try:
+        seq = journal.sequence
+        u.add_shields(3)
+        recs = _new_records_after(seq, id(u))
+    finally:
+        journal._suppress_watched_capture = prev
+    assert recs == []
+    assert u.shields == 3          # the store still ran despite suppression

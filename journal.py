@@ -774,6 +774,26 @@ def _classify_watched(unit, name, before, after):
     return _shield_change_record(unit, before, after)
 
 
+def _emit_watched_net(unit, name, before):
+    """Emit ONE net-diff record for a watched attr after a bracketed setter body
+    (add_shields / remove_shields), honoring the same live-unit + suppress gate
+    as the per-write interceptor. `before` is the attr's stored value from just
+    before the setter ran; the current stored value is the net result — so a
+    cap-crossing grant (Level.py:2501-2502: `+=` then `min(...,20)`) or an
+    underflow (2507-2508: `-=` then clamp-to-0) voices its true net change once,
+    instead of an inflated intermediate plus a correction."""
+    try:
+        if not _is_live_unit(unit) or journal._suppress_watched_capture:
+            return
+        after = unit.__dict__.get(name)
+        classified = _classify_watched(unit, name, before, after)
+        if classified is not None:
+            event_type, payload = classified
+            journal.record(event_type, payload)
+    except Exception:
+        pass
+
+
 def _shield_blocked_payload(unit, blocked_amount, damage_type, source, shields_remaining):
     """Synthesized 'shield_blocked' record — the CANONICAL block voice. Binds
     the blocked hit (amount the game would have dealt + type + source) with the
@@ -985,6 +1005,8 @@ def install_hooks():
     original_cloud_advance = Level.Cloud.advance
     original_unit_setattr = Level.Unit.__setattr__
     original_unit_refresh = Level.Unit.refresh
+    original_add_shields = Level.Unit.add_shields
+    original_remove_shields = Level.Unit.remove_shields
     original_deal_damage = Level.Level.deal_damage
 
     class _TrackedCastContext(original_cast_context):
@@ -1404,6 +1426,40 @@ def install_hooks():
         except Exception:
             pass
 
+    def patched_add_shields(self, shields, cap=True):
+        # Level.Unit.add_shields does `self.shields += n` then `min(...,20)` cap
+        # (Level.py:2501-2502) — TWO __setattr__ fires for one logical grant when
+        # it crosses the 20 cap (a phantom inflated gain, then a correcting
+        # strip). Bracket the body so the interceptor ignores the intermediate
+        # writes, then emit ONE net-diff record via _emit_watched_net. The ~96
+        # raw `.shields =` content direct-writes bypass this method and still
+        # capture per-write via the interceptor. Discipline mirrors
+        # patched_unit_refresh: the flag always restores, even on raise.
+        before = self.__dict__.get('shields')
+        prev = journal._suppress_watched_capture
+        journal._suppress_watched_capture = True
+        try:
+            original_add_shields(self, shields, cap=cap)
+        finally:
+            journal._suppress_watched_capture = prev
+        _emit_watched_net(self, 'shields', before)
+
+    def patched_remove_shields(self, shields):
+        # Symmetric to patched_add_shields: remove_shields does `-= n` then a
+        # `< 0 -> 0` clamp (Level.py:2507-2508), a double-fire on underflow. NB
+        # the block path decrements shields INLINE (Level.py:4061), NOT via this
+        # method, so the shield_blocked detail (patched_deal_damage) is
+        # unaffected. remove_shields early-returns when shields is 0, so a no-op
+        # strip stays a no-op (net before==after -> no record).
+        before = self.__dict__.get('shields')
+        prev = journal._suppress_watched_capture
+        journal._suppress_watched_capture = True
+        try:
+            original_remove_shields(self, shields)
+        finally:
+            journal._suppress_watched_capture = prev
+        _emit_watched_net(self, 'shields', before)
+
     def patched_unit_refresh(self):
         # Unit.refresh (Level.py:2510) zeroes shields as part of a full reset at
         # level transitions / deploy / respawn — NOT a combat strip. Bracket it
@@ -1472,5 +1528,7 @@ def install_hooks():
     Level.Cloud.advance = patched_cloud_advance
     Level.Unit.__setattr__ = patched_setattr
     Level.Unit.refresh = patched_unit_refresh
+    Level.Unit.add_shields = patched_add_shields
+    Level.Unit.remove_shields = patched_remove_shields
     Level.Level.deal_damage = patched_deal_damage
     journal._hooks_installed = True
