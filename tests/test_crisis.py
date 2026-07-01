@@ -26,6 +26,7 @@ from crisis import (
     _render_wizard_shield_stripped,
     _render_wizard_shield_gained,
     _render_wizard_healed,
+    _render_crisis_charm_save,
     _render_wizard_buff_gained,
     _CrisisProducer,
 )
@@ -299,6 +300,54 @@ def test_wizard_healed_zero_ignored():
 
 def test_wizard_healed_non_wizard_ignored():
     assert _render_wizard_healed(_heal_record(_enemy_snap())) is None
+
+
+# ---- _render_crisis_charm_save (R5, interim) ----
+
+
+def _silent_heal_record(target, amount=40, source='Crisis Charm', sequence=40):
+    return {'sequence': sequence, 'parent': None,
+            'event_type': 'silent_heal',
+            'payload': {'target': target, 'heal_amount': amount,
+                        'source_name': source}, 'marks': []}
+
+
+def test_crisis_charm_save_rendered():
+    assert _render_crisis_charm_save(_silent_heal_record(_wizard_snap())) == \
+        "Crisis Charm restored you to full, 40 health."
+
+
+def test_crisis_charm_save_other_source_ignored():
+    # Ruby Heart / reincarnation silent_heals are staged for Track B, not voiced.
+    rec = _silent_heal_record(_wizard_snap(), source='Ruby Heart')
+    assert _render_crisis_charm_save(rec) is None
+
+
+def test_crisis_charm_save_non_wizard_ignored():
+    assert _render_crisis_charm_save(_silent_heal_record(_enemy_snap())) is None
+
+
+def test_crisis_charm_save_zero_ignored():
+    assert _render_crisis_charm_save(_silent_heal_record(_wizard_snap(), amount=0)) is None
+
+
+def test_crisis_charm_save_voiced_through_fire():
+    p = _CrisisProducer()
+    def noop(_): pass
+    rec = _silent_heal_record(_wizard_snap())
+    section = p.fire([rec], _StubWizard(50, 50), noop, telemetry=None)
+    assert "Crisis Charm restored you to full, 40 health." in section[1]
+    assert _has_crisis_mark(rec)
+
+
+def test_staged_silent_heal_not_voiced_through_fire():
+    # A Ruby Heart silent_heal must stay inert in the interim (owned by pickup).
+    p = _CrisisProducer()
+    def noop(_): pass
+    rec = _silent_heal_record(_wizard_snap(), source='Ruby Heart')
+    section = p.fire([rec], _StubWizard(50, 50), noop, telemetry=None)
+    assert "Crisis Charm" not in section[1]
+    assert not _has_crisis_mark(rec)
 
 
 # ---- _render_wizard_buff_gained ----

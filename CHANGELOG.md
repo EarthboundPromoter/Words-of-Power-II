@@ -7,6 +7,8 @@ an early work-in-progress RW3 port — expect frequent changes.
 
 ### Added
 - Allegiance changes are now announced: units that turn friendly (Dominate, conversions) or hostile (betrayals, Treachery).
+- Crisis Charm now announces its life-save: when a hit would kill you, you hear that it
+  restored you to full and by how much (previously only a log line the reader didn't speak).
 
 ### Fixed
 - Shields granted to a unit at the moment it is summoned (e.g. Magic Minion Shield's

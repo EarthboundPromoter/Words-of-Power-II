@@ -794,6 +794,59 @@ def _emit_watched_net(unit, name, before):
         pass
 
 
+# ----------------------------------------------------------------------
+# Silent-heal capture (R5). A small, enumerable set of cur_hp/max_hp changes
+# bypass EventOnHealed (the engine writes cur_hp raw): Crisis Charm's on-lethal
+# restore (Equipment.py:3195), ReincarnationBuff.respawn (CommonContent.py:1254),
+# Ruby Heart (Level.py:2808), and HP-granting component pickups (Components.py).
+# These are captured by targeted method-wrappers that SNAPSHOT cur_hp/max_hp
+# around the mutating call (the deal_damage block-detail idiom), recovering the
+# observed delta the event layer omits — engine ground truth, not the item's
+# described amount. cur_hp is NOT globally watched (it changes on every
+# damage/heal, mostly already evented); this is deliberate synth-at-known-sites,
+# backstopped by EventOnHealed for everything else. A future silent-heal item is
+# a bounded "add a wrapper" task, surfaced by the HP-jump-without-record test.
+#
+# All sites emit ONE uniform record type, 'silent_heal', so Track B composes
+# them uniformly. Interim render: crisis voices ONLY the Crisis Charm save (an
+# otherwise-silent life-save); the rest are captured-but-inert (their heal is
+# owned by a pickup / reincarnate announcement — voicing them now would double).
+# ----------------------------------------------------------------------
+
+def _silent_heal_payload(unit, cur_before, cur_after, max_before, max_after, source_name):
+    heal = (cur_after - cur_before) if (cur_before is not None and cur_after is not None) else None
+    max_gain = (max_after - max_before) if (max_before is not None and max_after is not None) else None
+    return {
+        'target': _snapshot_unit(unit),
+        'heal_amount': heal,
+        'cur_hp_before': cur_before,
+        'cur_hp_after': cur_after,
+        'max_hp_before': max_before,
+        'max_hp_after': max_after,
+        'max_hp_gained': max_gain,
+        'source_name': source_name,
+    }
+
+
+def _emit_silent_heal(unit, cur_before, max_before, source_name):
+    """Record a silent_heal with real observed deltas. `cur_before`/`max_before`
+    are snapshotted before the mutating call; the unit's current cur/max are the
+    'after'. Emits only if cur_hp actually rose or max_hp actually rose (a no-op
+    heal — e.g. Ruby Heart at full HP — records nothing). Fully guarded so it can
+    never disrupt the wrapped game effect."""
+    try:
+        cur_after = getattr(unit, 'cur_hp', None)
+        max_after = getattr(unit, 'max_hp', None)
+        heal = (cur_after - cur_before) if (cur_before is not None and cur_after is not None) else 0
+        max_gain = (max_after - max_before) if (max_before is not None and max_after is not None) else 0
+        if (heal or 0) <= 0 and (max_gain or 0) <= 0:
+            return
+        journal.record('silent_heal', _silent_heal_payload(
+            unit, cur_before, cur_after, max_before, max_after, source_name))
+    except Exception:
+        pass
+
+
 def _shield_blocked_payload(unit, blocked_amount, damage_type, source, shields_remaining):
     """Synthesized 'shield_blocked' record — the CANONICAL block voice. Binds
     the blocked hit (amount the game would have dealt + type + source) with the
@@ -1507,6 +1560,22 @@ def install_hooks():
             pass
         return result
 
+    def _make_crisis_charm_hook(original_on_damage):
+        def patched_crisis_charm_on_damage(self, evt):
+            # Crisis Charm (Equipment.py:3179) restores the owner to full when a
+            # hit would kill them — a raw `cur_hp = max_hp` (3195) that raises no
+            # EventOnHealed and only `level.log`s "used a Crisis Charm" (which the
+            # mod doesn't auto-voice). Snapshot cur_hp/max_hp around on_damage and
+            # emit a silent_heal with the real restored magnitude if it fired.
+            owner = getattr(self, 'owner', None)
+            cur_before = getattr(owner, 'cur_hp', None) if owner is not None else None
+            max_before = getattr(owner, 'max_hp', None) if owner is not None else None
+            result = original_on_damage(self, evt)
+            if owner is not None:
+                _emit_silent_heal(owner, cur_before, max_before, "Crisis Charm")
+            return result
+        return patched_crisis_charm_on_damage
+
     Level.CastContext = _TrackedCastContext
     Level.Level.act_cast = patched_act_cast
     Level.Level.defer_cast = patched_defer_cast
@@ -1531,4 +1600,19 @@ def install_hooks():
     Level.Unit.add_shields = patched_add_shields
     Level.Unit.remove_shields = patched_remove_shields
     Level.Level.deal_damage = patched_deal_damage
+
+    # Silent-heal wrappers (R5) — targeted method hooks on content classes that
+    # write cur_hp/max_hp raw (no EventOnHealed). Resilient: each is guarded so a
+    # renamed/moved class in a future RW3 update disables that one capture rather
+    # than breaking hook install. Idempotent via the _wof_wrapped marker.
+    try:
+        import Equipment as _Equipment
+        _cc = getattr(_Equipment, 'CrisisCharm', None)
+        if _cc is not None and not getattr(_cc.on_damage, '_wof_wrapped', False):
+            _wrapped = _make_crisis_charm_hook(_cc.on_damage)
+            _wrapped._wof_wrapped = True
+            _cc.on_damage = _wrapped
+    except Exception:
+        pass
+
     journal._hooks_installed = True

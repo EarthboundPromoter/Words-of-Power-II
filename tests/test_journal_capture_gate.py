@@ -226,3 +226,48 @@ def test_add_shields_respects_outer_suppress():
         journal._suppress_watched_capture = prev
     assert recs == []
     assert u.shields == 3          # the store still ran despite suppression
+
+
+# ---- R5: Crisis Charm silent-heal capture ----
+
+def _silent_heals(target_id=None):
+    out = [r for r in journal.records if r["event_type"] == "silent_heal"]
+    if target_id is not None:
+        out = [r for r in out
+               if (r["payload"].get("target") or {}).get("id") == target_id]
+    return out
+
+
+def test_crisis_charm_save_captured():
+    # Crisis Charm restores the owner to full on a would-be-lethal hit via a raw
+    # cur_hp write (no EventOnHealed). The targeted wrapper snapshots cur_hp and
+    # emits a silent_heal with the real restored magnitude.
+    from Equipment import CrisisCharm
+    lvl = _fresh_level()
+    wiz = _unit("Wizard", hp=50, player=True)
+    _place(lvl, wiz, 7, 7)
+    charm = CrisisCharm()
+    wiz.equip(charm)                 # registers the trigger; makes unequip valid
+    wiz.cur_hp = 0                   # a would-be-lethal state (charm fires ≤ 0)
+    charm.on_damage(None)            # on_damage ignores evt; wrapper captures
+    recs = _silent_heals(id(wiz))
+    assert len(recs) == 1
+    p = recs[0]["payload"]
+    assert p["source_name"] == "Crisis Charm"
+    assert p["heal_amount"] == 50
+    assert p["target"]["is_player_controlled"] is True
+    assert wiz.cur_hp == 50
+
+
+def test_crisis_charm_no_fire_no_record():
+    # Above 0 HP the charm early-returns (no restore) -> no silent_heal.
+    from Equipment import CrisisCharm
+    lvl = _fresh_level()
+    wiz = _unit("Wizard", hp=50, player=True)
+    _place(lvl, wiz, 7, 7)
+    charm = CrisisCharm()
+    wiz.equip(charm)
+    wiz.cur_hp = 30                  # not lethal
+    charm.on_damage(None)
+    assert _silent_heals(id(wiz)) == []
+    assert wiz.cur_hp == 30

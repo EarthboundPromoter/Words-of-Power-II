@@ -2020,6 +2020,10 @@ _COMPOSER_KNOWN_EVENT_TYPES = frozenset({
     # Team-flip capture (R2). Rendered by compose_team_changes_section (in-chain
     # Dominate/conversions) and orphan (ambient); both handled, so not unmodeled.
     'team_joined', 'team_turned',
+    # Silent-heal capture (R5). Crisis Charm's save is voiced by crisis; the rest
+    # are captured ground truth staged for Track B (owned by pickup / reincarnate
+    # announcements). Known-set so a silent_heal landing in a chain isn't noise.
+    'silent_heal',
 })
 
 

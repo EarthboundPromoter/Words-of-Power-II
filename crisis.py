@@ -399,6 +399,31 @@ def _render_wizard_healed(record):
     return f"Wizard healed {amount}."
 
 
+def _render_crisis_charm_save(record):
+    """Interim render for the Crisis Charm life-save (R5). The charm restores the
+    wizard to full when a hit would kill them, raising no EventOnHealed and only
+    logging 'used a Crisis Charm' (which the mod doesn't auto-voice) — so the mod
+    supplies the missing voice from the captured silent_heal.
+
+    INTERIM: filtered to source 'Crisis Charm'. Other silent_heal records are
+    captured ground truth staged for Track B, NOT voiced here (their heal is
+    owned by a pickup / reincarnate announcement). Track B replaces this with
+    real routing over all silent_heal records. Not chain-gated — a death-save
+    must always be heard."""
+    if record.get('event_type') != 'silent_heal':
+        return None
+    payload = record.get('payload') or {}
+    if payload.get('source_name') != 'Crisis Charm':
+        return None
+    target = payload.get('target') or {}
+    if not _is_wizard_snap(target):
+        return None
+    amount = payload.get('heal_amount')
+    if not amount or amount <= 0:
+        return None
+    return f"Crisis Charm restored you to full, {amount} health."
+
+
 def _render_wizard_buff_gained(record):
     """EventOnBuffApply where target is wizard and the buff is NOT a curse
     (buff_type != 2; curses are owned by _handle_wizard_debuff_apply). Covers
@@ -654,6 +679,16 @@ class _CrisisProducer:
             if line:
                 lines.append(line)
                 categories_present.add('shield_stripped')
+                _claim(rec)
+                continue
+            # Crisis Charm life-save — always crisis (an otherwise-silent restore
+            # from a would-be-lethal hit; the game only logs it). Not chain-gated:
+            # a death-save must always be heard. INTERIM (source-filtered); Track B
+            # routes all silent_heal records.
+            line = _render_crisis_charm_save(rec)
+            if line:
+                lines.append(line)
+                categories_present.add('crisis_charm_save')
                 _claim(rec)
                 continue
             # Wizard-facing positives — only when out-of-chain (in-chain ->
