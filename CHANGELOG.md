@@ -9,6 +9,11 @@ an early work-in-progress RW3 port — expect frequent changes.
 - Allegiance changes are now announced: units that turn friendly (Dominate, conversions) or hostile (betrayals, Treachery).
 
 ### Fixed
+- Shields granted to a unit at the moment it is summoned (e.g. Magic Minion Shield's
+  "allies gain shields when summoned") are now announced — these on-summon grants used
+  to be silently dropped as part of the unit arriving.
+- A unit returning to the battlefield via Reincarnation no longer produces a phantom
+  "shields gained" announcement.
 - Channeling, rituals, and other manual-only cast behavior work again with the mod loaded.
 - How to Play now always opens at the first page instead of resuming the last page
   viewed — a native open could otherwise land on the appended Words of Power section.

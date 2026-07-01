@@ -586,8 +586,36 @@ def _payload_shield_removed(event):
 # Attributes the __setattr__ interceptor watches: no-event, immutable-valued,
 # player-relevant state. 'shields' is a numeric delta; 'team' is a categorical
 # allegiance flip — each gets its own change-record builder (dispatched in
-# patched_setattr), but both share the interceptor + the ever_spawned gating.
+# patched_setattr), but both share the interceptor + the _is_live_unit gating.
 _WATCHED_ATTRS = frozenset({'shields', 'team'})
+
+
+def _is_live_unit(unit):
+    """The spawn-vs-runtime discriminator for watched-attr capture: True iff
+    `unit` is currently a placed, on-field unit — present in its level's `units`
+    list. Level.add_obj appends the unit at Level.py:3907, one line BEFORE it
+    raises EventOnUnitAdded (3908) and two before it sets ever_spawned (3910).
+    So:
+      - construction / factory / summon-init shield & team writes (all BEFORE
+        the append) read False -> dropped as arrival, not "gained";
+      - the on-summon grant window is the EventOnUnitAdded raise (3908), where
+        the unit is ALREADY in `units` -> reads True -> captured. This is the
+        R7 straddle the old `ever_spawned` gate missed (grants that fire on
+        EventOnUnitAdded landed before ever_spawned=True and were dropped);
+      - a killed/removed unit is popped from `units` (remove_obj, Level.py:3947)
+        -> reads False, so off-field writes drop naturally. That subsumes R22:
+        ReincarnationBuff.respawn restores shields (CommonContent.py:1251) while
+        the unit sits removed between kill and re-add, so no phantom "gained".
+    O(n) membership, but only ever called on the rare watched (shields/team)
+    writes — the interceptor's fast-path returns before this for every other
+    attribute. Guarded so a not-yet-placed unit (level is None) reads False."""
+    lvl = getattr(unit, 'level', None)
+    if lvl is None:
+        return False
+    units = getattr(lvl, 'units', None)
+    if not units:
+        return False
+    return unit in units
 
 
 def _resist_blocked_amount(resists, damage_type, orig_amount):
@@ -734,6 +762,16 @@ def _team_change_payload(unit, before, after):
         'team_before': before,
         'team_after': after,
     }
+
+
+def _classify_watched(unit, name, before, after):
+    """Dispatch a watched-attr before/after to its change-record builder, or
+    None for a no-op. Shared by the __setattr__ interceptor (per-write) and the
+    shield-setter net-emit (one net diff over a bracketed add_shields/
+    remove_shields body), so both classify identically."""
+    if name == 'team':
+        return _team_change_record(unit, before, after)
+    return _shield_change_record(unit, before, after)
 
 
 def _shield_blocked_payload(unit, blocked_amount, damage_type, source, shields_remaining):
@@ -1349,18 +1387,17 @@ def install_hooks():
         before = self.__dict__.get(name)
         original_unit_setattr(self, name, value)
         try:
-            # ever_spawned (set in add_obj, Level.py:3910) gates out the ~40
-            # construction writes + factory/baseline shields on not-yet-placed
-            # units; only live, on-field mutations are recorded. The suppress
-            # flag gates out Unit.refresh()'s shields=0 reset (level transition /
+            # _is_live_unit (unit in level.units) gates out the ~40 construction
+            # writes + factory/baseline shields on not-yet-placed units, while
+            # (unlike the old ever_spawned gate) STILL capturing on-summon grants
+            # that fire during the EventOnUnitAdded raise (R7) and dropping
+            # off-field writes to killed/removed units (R22). The suppress flag
+            # gates out Unit.refresh()'s shields=0 reset (level transition /
             # respawn, not combat). Parent comes from the cause stack — a reactive
             # gain parents to its EventOnDamaged, a Siphon strip to the cast.
-            if getattr(self, 'ever_spawned', False) and not journal._suppress_watched_capture:
+            if _is_live_unit(self) and not journal._suppress_watched_capture:
                 after = self.__dict__.get(name)
-                classified = (
-                    _team_change_record(self, before, after) if name == 'team'
-                    else _shield_change_record(self, before, after)
-                )
+                classified = _classify_watched(self, name, before, after)
                 if classified is not None:
                     event_type, payload = classified
                     journal.record(event_type, payload)
