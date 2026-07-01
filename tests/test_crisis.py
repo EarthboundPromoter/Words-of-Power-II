@@ -26,7 +26,7 @@ from crisis import (
     _render_wizard_shield_stripped,
     _render_wizard_shield_gained,
     _render_wizard_healed,
-    _render_crisis_charm_save,
+    _render_wizard_lethal_save,
     _render_wizard_buff_gained,
     _CrisisProducer,
 )
@@ -302,54 +302,61 @@ def test_wizard_healed_non_wizard_ignored():
     assert _render_wizard_healed(_heal_record(_enemy_snap())) is None
 
 
-# ---- _render_crisis_charm_save (R5, interim) ----
+# ---- _render_wizard_lethal_save (R5, interim; data-driven) ----
 
 
-def _silent_heal_record(target, amount=40, source='Crisis Charm', sequence=40,
-                        max_hp_after=50):
+def _silent_heal_record(target, cur_before=0, cur_after=50, max_hp_after=50,
+                        sequence=40):
+    heal = cur_after - cur_before
     return {'sequence': sequence, 'parent': None,
             'event_type': 'silent_heal',
-            'payload': {'target': target, 'heal_amount': amount,
+            'payload': {'target': target, 'heal_amount': heal,
+                        'cur_hp_before': cur_before, 'cur_hp_after': cur_after,
                         'max_hp_after': max_hp_after,
-                        'source_name': source}, 'marks': []}
+                        'source_name': None}, 'marks': []}
 
 
-def test_crisis_charm_save_rendered():
-    # Reports the FULL value (max HP = 50), not the heal delta (40).
-    assert _render_crisis_charm_save(_silent_heal_record(_wizard_snap())) == \
-        "Crisis Charm restored you to full, 50 health."
+def test_lethal_save_restored_to_full():
+    # cur_hp 0 -> 50 (== max): "restored to full", reporting the max.
+    rec = _silent_heal_record(_wizard_snap(), cur_before=0, cur_after=50, max_hp_after=50)
+    assert _render_wizard_lethal_save(rec) == \
+        "You would have died — restored to full, 50 health."
 
 
-def test_crisis_charm_save_other_source_ignored():
-    # Ruby Heart / reincarnation silent_heals are staged for Track B, not voiced.
-    rec = _silent_heal_record(_wizard_snap(), source='Ruby Heart')
-    assert _render_crisis_charm_save(rec) is None
+def test_lethal_save_survived_at_one():
+    # Soulbound clamp: cur_hp -3 -> 1 (< max): "survived at 1 health".
+    rec = _silent_heal_record(_wizard_snap(), cur_before=-3, cur_after=1, max_hp_after=50)
+    assert _render_wizard_lethal_save(rec) == \
+        "You would have died — survived at 1 health."
 
 
-def test_crisis_charm_save_non_wizard_ignored():
-    assert _render_crisis_charm_save(_silent_heal_record(_enemy_snap())) is None
+def test_ordinary_silent_heal_not_a_lethal_save():
+    # Ruby Heart / components: cur_hp_before > 0 -> NOT a lethal save -> inert.
+    rec = _silent_heal_record(_wizard_snap(), cur_before=20, cur_after=75, max_hp_after=75)
+    assert _render_wizard_lethal_save(rec) is None
 
 
-def test_crisis_charm_save_zero_ignored():
-    assert _render_crisis_charm_save(_silent_heal_record(_wizard_snap(), amount=0)) is None
+def test_lethal_save_non_wizard_ignored():
+    rec = _silent_heal_record(_enemy_snap(), cur_before=0, cur_after=1, max_hp_after=18)
+    assert _render_wizard_lethal_save(rec) is None
 
 
-def test_crisis_charm_save_voiced_through_fire():
+def test_lethal_save_voiced_through_fire():
     p = _CrisisProducer()
     def noop(_): pass
-    rec = _silent_heal_record(_wizard_snap())
+    rec = _silent_heal_record(_wizard_snap(), cur_before=0, cur_after=50, max_hp_after=50)
     section = p.fire([rec], _StubWizard(50, 50), noop, telemetry=None)
-    assert "Crisis Charm restored you to full, 50 health." in section[1]
+    assert "You would have died — restored to full, 50 health." in section[1]
     assert _has_crisis_mark(rec)
 
 
-def test_staged_silent_heal_not_voiced_through_fire():
-    # A Ruby Heart silent_heal must stay inert in the interim (owned by pickup).
+def test_ordinary_silent_heal_inert_through_fire():
+    # An ordinary wizard silent heal (cur_before > 0) stays inert in the interim.
     p = _CrisisProducer()
     def noop(_): pass
-    rec = _silent_heal_record(_wizard_snap(), source='Ruby Heart')
+    rec = _silent_heal_record(_wizard_snap(), cur_before=20, cur_after=50, max_hp_after=50)
     section = p.fire([rec], _StubWizard(50, 50), noop, telemetry=None)
-    assert "Crisis Charm" not in section[1]
+    assert "would have died" not in section[1].lower()
     assert not _has_crisis_mark(rec)
 
 

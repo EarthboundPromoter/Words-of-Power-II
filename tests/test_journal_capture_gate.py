@@ -51,6 +51,12 @@ def _place(lvl, unit, x, y):
     return unit
 
 
+def _src(name="Test"):
+    # Minimal damage source: deal_damage reads source.name / source.owner.
+    import types
+    return types.SimpleNamespace(name=name, owner=None)
+
+
 def _shield_records(target_id=None):
     out = [r for r in journal.records
            if r["event_type"] in ("shield_gained", "shield_stripped")]
@@ -238,45 +244,95 @@ def _silent_heals(target_id=None):
     return out
 
 
-def test_crisis_charm_save_captured():
-    # Crisis Charm restores the owner to full on a would-be-lethal hit via a raw
-    # cur_hp write (no EventOnHealed). The targeted wrapper snapshots cur_hp and
-    # emits a silent_heal with the real restored magnitude.
-    from Equipment import CrisisCharm
+def _max_hp_changes(target_id=None):
+    out = [r for r in journal.records if r["event_type"] == "max_hp_change"]
+    if target_id is not None:
+        out = [r for r in out
+               if (r["payload"].get("target") or {}).get("id") == target_id]
+    return out
+
+
+def test_silent_cur_hp_gain_captured_universally():
+    # A raw cur_hp increase on a live unit (no deal_damage, no event) is captured
+    # by the interceptor — the universal chokepoint, no per-site hook.
     lvl = _fresh_level()
     wiz = _unit("Wizard", hp=50, player=True)
     _place(lvl, wiz, 7, 7)
-    charm = CrisisCharm()
-    wiz.equip(charm)                 # registers the trigger; makes unequip valid
-    wiz.cur_hp = 0                   # a would-be-lethal state (charm fires ≤ 0)
-    charm.on_damage(None)            # on_damage ignores evt; wrapper captures
+    wiz.cur_hp = 20
+    wiz.cur_hp = 45                    # raw silent heal
     recs = _silent_heals(id(wiz))
     assert len(recs) == 1
     p = recs[0]["payload"]
-    assert p["source_name"] == "Crisis Charm"
-    assert p["heal_amount"] == 50
-    assert p["target"]["is_player_controlled"] is True
-    assert wiz.cur_hp == 50
+    assert p["heal_amount"] == 25
+    assert p["cur_hp_before"] == 20 and p["cur_hp_after"] == 45
+    assert p["source_name"] is None   # attribution is a Track-B cause-walk
 
 
-def test_crisis_charm_no_fire_no_record():
-    # Above 0 HP the charm early-returns (no restore) -> no silent_heal.
-    from Equipment import CrisisCharm
+def test_raw_cur_hp_loss_not_a_silent_heal():
+    # A raw cur_hp DECREASE (e.g. an HP spend) is not a heal — gains only.
     lvl = _fresh_level()
     wiz = _unit("Wizard", hp=50, player=True)
     _place(lvl, wiz, 7, 7)
-    charm = CrisisCharm()
-    wiz.equip(charm)
-    wiz.cur_hp = 30                  # not lethal
-    charm.on_damage(None)
+    wiz.cur_hp = 20                    # from 50 -> 20
     assert _silent_heals(id(wiz)) == []
-    assert wiz.cur_hp == 30
 
 
-# ---- R5: capture-only silent heals (staged for Track B, not voiced interim) ----
+def test_deal_damage_heal_not_double_captured():
+    # A heal THROUGH deal_damage raises EventOnHealed AND writes cur_hp; the
+    # deal_damage bracket suppresses the interceptor's cur_hp capture -> no
+    # double (exactly one EventOnHealed, zero silent_heal).
+    lvl = _fresh_level()
+    wiz = _unit("Wizard", hp=50, player=True)
+    _place(lvl, wiz, 7, 7)
+    wiz.cur_hp = 20
+    import Level as L
+    wiz.deal_damage(-15, L.Tags.Heal, _src("Heal"))     # heal 15 via deal_damage
+    assert _silent_heals(id(wiz)) == []
+    healed = [r for r in journal.records if r["event_type"] == "EventOnHealed"
+              and (r["payload"].get("target") or {}).get("id") == id(wiz)]
+    assert len(healed) == 1
+    assert wiz.cur_hp == 35
 
-def test_ruby_heart_captures_silent_heal():
-    # HeartDot.on_player_enter: max_hp += 25 then cur_hp = max_hp (raw, no event).
+
+def test_crisis_charm_save_captured_through_deal_damage():
+    # THE real path: Crisis Charm fires inside deal_damage's EventOnDamaged raise
+    # (Level.py:4119). The deal_damage bracket suppresses cur_hp, but raise_event
+    # un-brackets it — so the charm's silent restore IS captured, not swallowed.
+    from Equipment import CrisisCharm
+    import Level as L
+    lvl = _fresh_level()
+    wiz = _unit("Wizard", hp=50, player=True)
+    _place(lvl, wiz, 7, 7)
+    wiz.equip(CrisisCharm())
+    wiz.cur_hp = 5
+    lvl.deal_damage(7, 7, 40, L.Tags.Physical, _src("Blow"))  # lethal -> charm restores
+    recs = _silent_heals(id(wiz))
+    assert len(recs) == 1, "Crisis Charm restore must survive the deal_damage bracket"
+    p = recs[0]["payload"]
+    assert p["cur_hp_before"] <= 0 and p["cur_hp_after"] == wiz.max_hp
+    assert wiz.cur_hp == 50
+
+
+def test_soulbound_clamp_captured():
+    # Soulbound clamps cur_hp to 1 on a would-be-lethal hit (CommonContent.py:1392)
+    # — captured universally with zero Soulbound-specific code. Works on an ENEMY.
+    from CommonContent import Soulbound
+    import Level as L
+    lvl = _fresh_level()
+    guardian = _place(lvl, _unit("Guardian", hp=10, player=False), 3, 3)
+    enemy = _place(lvl, _unit("Cultist", hp=20, player=False), 7, 7)
+    enemy.apply_buff(Soulbound(guardian))
+    enemy.cur_hp = 5
+    lvl.deal_damage(7, 7, 40, L.Tags.Physical, _src("Blow"))  # lethal -> clamp to 1
+    recs = _silent_heals(id(enemy))
+    assert len(recs) == 1, "Soulbound clamp-to-1 must be captured"
+    assert recs[0]["payload"]["cur_hp_after"] == 1
+    assert enemy.cur_hp == 1
+
+
+def test_ruby_heart_captures_heal_and_max_change():
+    # HeartDot.on_player_enter: max_hp += 25 (max_hp_change) then cur_hp = max_hp
+    # (silent_heal) — captured via the interceptor, two records, no wrapper.
     lvl = _fresh_level()
     wiz = _unit("Wizard", hp=50, player=True)
     _place(lvl, wiz, 7, 7)
@@ -284,53 +340,48 @@ def test_ruby_heart_captures_silent_heal():
     heart = Level.HeartDot()
     lvl.add_prop(heart, 8, 8)
     heart.on_player_enter(wiz)
-    recs = _silent_heals(id(wiz))
-    assert len(recs) == 1
-    p = recs[0]["payload"]
-    assert p["source_name"] == "Ruby Heart"
-    assert p["max_hp_gained"] == 25
-    assert p["heal_amount"] == 55       # cur 20 -> 75 (max 50->75)
+    heals = _silent_heals(id(wiz))
+    maxes = _max_hp_changes(id(wiz))
+    assert len(heals) == 1 and heals[0]["payload"]["heal_amount"] == 55  # 20->75
+    assert len(maxes) == 1 and maxes[0]["payload"]["delta"] == 25
+    assert maxes[0]["payload"]["direction"] == "gained"
     assert wiz.cur_hp == 75
 
 
-def test_component_pickup_captures_silent_heal():
-    # Heart Fragment on_pickup: max_hp += 10, cur_hp += 10 — via the floor
-    # ComponentPickup choke point, source = the component's name.
+def test_component_pickup_captured_universally():
+    # Heart Fragment on_pickup (max += 10, cur += 10) via the floor pickup path —
+    # captured by the interceptor with no ComponentPickup-specific hook.
     from Components import HeartFragment
-    import collections
-    lvl = _fresh_level()
-    wiz = _unit("Wizard", hp=50, player=True)
-    wiz.component_tags = collections.defaultdict(int)   # real player init sets this
-    _place(lvl, wiz, 7, 7)
-    wiz.cur_hp = 40
-    pickup = Level.ComponentPickup(HeartFragment())
-    lvl.add_prop(pickup, 8, 8)
-    pickup.on_player_enter(wiz)
-    recs = _silent_heals(id(wiz))
-    assert len(recs) == 1
-    p = recs[0]["payload"]
-    assert p["source_name"] == "Heart Fragment"
-    assert p["heal_amount"] == 10       # cur 40 -> 50
-    assert p["max_hp_gained"] == 10
-
-
-def test_non_healing_component_pickup_no_record():
-    # A component that changes no HP produces no silent_heal (net delta 0).
-    from Components import BurningEmber
     import collections
     lvl = _fresh_level()
     wiz = _unit("Wizard", hp=50, player=True)
     wiz.component_tags = collections.defaultdict(int)
     _place(lvl, wiz, 7, 7)
-    pickup = Level.ComponentPickup(BurningEmber())
+    wiz.cur_hp = 40
+    pickup = Level.ComponentPickup(HeartFragment())
     lvl.add_prop(pickup, 8, 8)
     pickup.on_player_enter(wiz)
-    assert _silent_heals(id(wiz)) == []
+    assert len(_silent_heals(id(wiz))) == 1
+    assert _silent_heals(id(wiz))[0]["payload"]["heal_amount"] == 10   # 40 -> 50
+    assert len(_max_hp_changes(id(wiz))) == 1
 
 
-def test_reincarnation_respawn_emits_silent_heal():
-    # The respawn full-restore is now captured as ground truth (capture-only;
-    # inert in the interim — owned by the reincarnate announcement).
+def test_max_hp_drain_captured():
+    # A raw max_hp decrease is captured as a 'drained' max_hp_change.
+    lvl = _fresh_level()
+    u = _place(lvl, _unit("Cursed", hp=30, player=False), 5, 5)
+    u.max_hp = 25                      # drain 5
+    recs = _max_hp_changes(id(u))
+    assert len(recs) == 1
+    assert recs[0]["payload"]["delta"] == -5
+    assert recs[0]["payload"]["direction"] == "drained"
+
+
+def test_reincarnation_respawn_off_field_dropped():
+    # The respawn restore happens while the unit is off-field (removed from
+    # level.units between kill and re-add) -> dropped by the in-units gate. It is
+    # owned by the reincarnate event, not a standalone heal. (R22 shield safety
+    # is preserved; see test_reincarnation_respawn_shields_not_voiced above.)
     from CommonContent import ReincarnationBuff
     lvl = _fresh_level()
     martyr = _place(lvl, _unit("Martyr", hp=20), 7, 7)
@@ -343,6 +394,4 @@ def test_reincarnation_respawn_emits_silent_heal():
     heals = [r for r in journal.records if r["sequence"] > seq_before
              and r["event_type"] == "silent_heal"
              and (r["payload"].get("target") or {}).get("id") == id(martyr)]
-    assert len(heals) == 1
-    assert heals[0]["payload"]["source_name"] == "Reincarnation"
-    assert heals[0]["payload"]["heal_amount"] == martyr.max_hp   # 0 -> full
+    assert heals == []

@@ -7,8 +7,9 @@ an early work-in-progress RW3 port — expect frequent changes.
 
 ### Added
 - Allegiance changes are now announced: units that turn friendly (Dominate, conversions) or hostile (betrayals, Treachery).
-- Crisis Charm now announces its life-save: when a hit would kill you, you hear that it
-  restored you to full and by how much (previously only a log line the reader didn't speak).
+- Cheating death is now announced: when a hit would have killed you but you survive
+  (Crisis Charm restoring you to full, Soulbound / Soul Jar clamping you to 1 HP), you
+  hear "You would have died —" and your resulting health (previously silent).
 
 ### Fixed
 - Shields granted to a unit at the moment it is summoned (e.g. Magic Minion Shield's

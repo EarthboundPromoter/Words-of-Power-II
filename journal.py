@@ -42,8 +42,18 @@ class _Journal:
         self._hooks_installed = False
         # Set True only while Unit.refresh() runs, so the __setattr__ interceptor
         # ignores refresh's shields=0 reset (a level-transition/respawn reset, not
-        # a combat strip). See patched_unit_refresh / patched_setattr.
+        # a combat strip). Applies to ALL watched attrs. See patched_unit_refresh.
         self._suppress_watched_capture = False
+        # Set True only while Level.deal_damage runs. deal_damage (Level.py:4006)
+        # is the SOLE evented HP-change path — it writes cur_hp (4073/4129/4135)
+        # and raises EventOnDamaged (4119) / EventOnHealed (4087), nowhere else.
+        # So cur_hp writes INSIDE it are already captured via those events; suppress
+        # the interceptor's cur_hp capture there and what escapes the bracket is
+        # exactly the SILENT cur_hp changes (Crisis Charm, Soulbound, Ruby Heart,
+        # component pickups, ...). cur_hp-ONLY: the block's inline `shields -= 1`
+        # (Level.py:4061) fires inside deal_damage and MUST still capture (the
+        # shield_blocked detail depends on it), so shields are not suppressed here.
+        self._suppress_cur_hp_capture = False
         # R3 cause-graph. cast_begin roots are anchored at execute_cast (the true
         # per-cast chokepoint) so every cast — manual, deferred, internal, inline —
         # gets exactly one root. A cast's triggering cause is computed at
@@ -77,6 +87,8 @@ class _Journal:
         self._pending_cast_begin = None
         self._skip_next_queue_wrap = False
         self._pending_queue = False
+        self._suppress_watched_capture = False
+        self._suppress_cur_hp_capture = False
         # Drop the level ref on transition: a new floor's records must not read a
         # departed level's current_cast_context. Not live-reachable today (no
         # cross-level records fire during a live cast), but cheap insurance.
@@ -583,11 +595,23 @@ def _payload_shield_removed(event):
 # dependency) so they unit-test in test_journal.py.
 # ----------------------------------------------------------------------
 
-# Attributes the __setattr__ interceptor watches: no-event, immutable-valued,
-# player-relevant state. 'shields' is a numeric delta; 'team' is a categorical
-# allegiance flip — each gets its own change-record builder (dispatched in
-# patched_setattr), but both share the interceptor + the _is_live_unit gating.
-_WATCHED_ATTRS = frozenset({'shields', 'team'})
+# Attributes the __setattr__ interceptor watches: no-event, player-relevant
+# state the game shows but never logs (render-gate bin 2, PRODUCER_TAXONOMY §5).
+# Each dispatches to its own change-record builder in patched_setattr; all share
+# the interceptor chokepoint + the _is_live_unit gating:
+#   'shields' — numeric delta (gain/strip)
+#   'team'    — categorical allegiance flip
+#   'cur_hp'  — silent heals (GAINS only); losses go through deal_damage
+#               (EventOnDamaged) or raise EventOnSpendHP. deal_damage's own cur_hp
+#               writes are bracketed out (_suppress_cur_hp_capture) since they are
+#               already evented — so what's captured here is exactly the silent
+#               set (Crisis Charm, Soulbound, Ruby Heart, components, undeath, ...).
+#   'max_hp'  — any change (no max_hp event exists anywhere, so every max_hp write
+#               is silent): boosts (Ruby Heart +25, undeath, components) and drains
+#               (drain_max_hp, Necrosis, sacrifice). Capture-only interim.
+# This is the taxonomy's universal-chokepoint capture (§2) — no per-site hooks, so
+# future content is caught automatically.
+_WATCHED_ATTRS = frozenset({'shields', 'team', 'cur_hp', 'max_hp'})
 
 
 def _is_live_unit(unit):
@@ -741,10 +765,10 @@ def _team_change_record(unit, before, after):
         player -> enemy  : lost an ally   -> 'team_turned' ("turned hostile")
     Direction comes from the raw before/after ints, NOT the snapshot (some sites
     hardcode the constant rather than caster.team). Spawn-init writes are gated
-    out upstream by ever_spawned — a summoned/transformed unit's team is set
-    before add_obj (Level.py:3998 summon; CommonContent MatureInto/raise_skeleton),
-    so only flips of already-live units reach here. Berserk is a buff, not a team
-    write, so it never appears."""
+    out upstream by _is_live_unit — a summoned/transformed unit's team is set
+    before add_obj appends it (Level.py:3998 summon; CommonContent MatureInto/
+    raise_skeleton), so it isn't yet in level.units and only flips of already-live
+    units reach here. Berserk is a buff, not a team write, so it never appears."""
     if before == after:
         return None
     player = getattr(Level, 'TEAM_PLAYER', 0)
@@ -771,6 +795,10 @@ def _classify_watched(unit, name, before, after):
     remove_shields body), so both classify identically."""
     if name == 'team':
         return _team_change_record(unit, before, after)
+    if name == 'cur_hp':
+        return _cur_hp_change_record(unit, before, after)
+    if name == 'max_hp':
+        return _max_hp_change_record(unit, before, after)
     return _shield_change_record(unit, before, after)
 
 
@@ -795,56 +823,70 @@ def _emit_watched_net(unit, name, before):
 
 
 # ----------------------------------------------------------------------
-# Silent-heal capture (R5). A small, enumerable set of cur_hp/max_hp changes
-# bypass EventOnHealed (the engine writes cur_hp raw): Crisis Charm's on-lethal
-# restore (Equipment.py:3195), ReincarnationBuff.respawn (CommonContent.py:1254),
-# Ruby Heart (Level.py:2808), and HP-granting component pickups (Components.py).
-# These are captured by targeted method-wrappers that SNAPSHOT cur_hp/max_hp
-# around the mutating call (the deal_damage block-detail idiom), recovering the
-# observed delta the event layer omits — engine ground truth, not the item's
-# described amount. cur_hp is NOT globally watched (it changes on every
-# damage/heal, mostly already evented); this is deliberate synth-at-known-sites,
-# backstopped by EventOnHealed for everything else. A future silent-heal item is
-# a bounded "add a wrapper" task, surfaced by the HP-jump-without-record test.
+# Silent HP capture (R5) — UNIVERSAL, via the __setattr__ interceptor chokepoint
+# (PRODUCER_TAXONOMY §2). cur_hp/max_hp are in _WATCHED_ATTRS; the interceptor
+# records their SILENT changes — those the game shows (HP bar) but never logs.
 #
-# All sites emit ONE uniform record type, 'silent_heal', so Track B composes
-# them uniformly. Interim render: crisis voices ONLY the Crisis Charm save (an
-# otherwise-silent life-save); the rest are captured-but-inert (their heal is
-# owned by a pickup / reincarnate announcement — voicing them now would double).
+# cur_hp: only GAINS are heals. Losses flow through deal_damage (EventOnDamaged)
+# or raise EventOnSpendHP — both already captured — so a raw cur_hp DECREASE here
+# is not modeled as a heal. deal_damage's own cur_hp writes are bracketed out
+# (_suppress_cur_hp_capture), so what the interceptor sees is exactly the silent
+# heal set: Crisis Charm (Equipment.py:3195), Soulbound (CommonContent.py:1392),
+# Ruby Heart (Level.py:2808), component pickups (Components.py), undeath, and any
+# FUTURE content — no per-site hooks. (Reincarnation's restore happens off-field
+# — the unit is removed from level.units between kill and re-add — so the
+# _is_live_unit gate drops it; it is owned by the reincarnate event, not a heal.)
+#
+# max_hp: no max_hp event exists, so EVERY max_hp write is silent. The interceptor
+# records any change (boost or drain) as 'max_hp_change'. Capture-only interim.
+#
+# Attribution (which item healed you) is NOT known at the write — it is the
+# cause-walk's job (Track B, §3 "source = attribution"). The interim render keys
+# on the DATA instead: a wizard cur_hp rise from <=0 is a lethal-save, voiced by
+# crisis (covers Crisis Charm AND Soulbound without naming either). Ordinary
+# silent heals (cur_hp_before > 0) stay captured-but-inert, staged for Track B.
 # ----------------------------------------------------------------------
 
-def _silent_heal_payload(unit, cur_before, cur_after, max_before, max_after, source_name):
+def _cur_hp_change_record(unit, before, after):
+    """Classify a cur_hp write seen by the interceptor. Only GAINS are silent
+    heals; a decrease (an HP-spend that raised EventOnSpendHP, or any non-heal
+    raw drop) is not modeled here. Returns ('silent_heal', payload) or None."""
+    before = before or 0
+    after = after or 0
+    if after <= before:
+        return None
+    max_hp = getattr(unit, 'max_hp', None)
+    return 'silent_heal', _silent_heal_payload(unit, before, after, max_hp)
+
+
+def _silent_heal_payload(unit, cur_before, cur_after, max_hp):
     heal = (cur_after - cur_before) if (cur_before is not None and cur_after is not None) else None
-    max_gain = (max_after - max_before) if (max_before is not None and max_after is not None) else None
     return {
         'target': _snapshot_unit(unit),
         'heal_amount': heal,
         'cur_hp_before': cur_before,
         'cur_hp_after': cur_after,
-        'max_hp_before': max_before,
-        'max_hp_after': max_after,
-        'max_hp_gained': max_gain,
-        'source_name': source_name,
+        'max_hp_after': max_hp,
+        # Attribution deferred to the cause-walk (Track B); unknown at the write.
+        'source_name': None,
     }
 
 
-def _emit_silent_heal(unit, cur_before, max_before, source_name):
-    """Record a silent_heal with real observed deltas. `cur_before`/`max_before`
-    are snapshotted before the mutating call; the unit's current cur/max are the
-    'after'. Emits only if cur_hp actually rose or max_hp actually rose (a no-op
-    heal — e.g. Ruby Heart at full HP — records nothing). Fully guarded so it can
-    never disrupt the wrapped game effect."""
-    try:
-        cur_after = getattr(unit, 'cur_hp', None)
-        max_after = getattr(unit, 'max_hp', None)
-        heal = (cur_after - cur_before) if (cur_before is not None and cur_after is not None) else 0
-        max_gain = (max_after - max_before) if (max_before is not None and max_after is not None) else 0
-        if (heal or 0) <= 0 and (max_gain or 0) <= 0:
-            return
-        journal.record('silent_heal', _silent_heal_payload(
-            unit, cur_before, cur_after, max_before, max_after, source_name))
-    except Exception:
-        pass
+def _max_hp_change_record(unit, before, after):
+    """Classify a max_hp write seen by the interceptor. No max_hp event exists,
+    so every change is silent; record boosts and drains alike (capture-only).
+    Returns ('max_hp_change', payload) or None for a no-op."""
+    before = before or 0
+    after = after or 0
+    if after == before:
+        return None
+    return 'max_hp_change', {
+        'target': _snapshot_unit(unit),
+        'delta': after - before,
+        'max_hp_before': before,
+        'max_hp_after': after,
+        'direction': 'gained' if after > before else 'drained',
+    }
 
 
 def _shield_blocked_payload(unit, blocked_amount, damage_type, source, shields_remaining):
@@ -1190,9 +1232,21 @@ def install_hooks():
     def patched_raise_event(self, event, entity=None):
         rec = journal.record(type(event).__name__, _to_payload(event))
         journal.push(rec)
+        # Un-bracket cur_hp capture for the duration of the raise. deal_damage
+        # suppresses cur_hp capture (its OWN write at Level.py:4073 is the evented
+        # damage/heal), but a REACTIVE handler that writes cur_hp during an event
+        # raise INSIDE deal_damage — Crisis Charm / Soulbound restoring HP on
+        # EventOnDamaged (raised at 4119, after the 4073 write) — is a SILENT heal
+        # we must capture, not suppress. The engine's own write is direct (not in
+        # a raise); reactive writes are in a raise. So re-enabling capture during
+        # raises cleanly separates them. No-op outside deal_damage (flag already
+        # False). Save/restore nests correctly with an inner deal_damage.
+        prev_cur_hp = journal._suppress_cur_hp_capture
+        journal._suppress_cur_hp_capture = False
         try:
             return original_raise_event(self, event, entity)
         finally:
+            journal._suppress_cur_hp_capture = prev_cur_hp
             journal.pop()
 
     def patched_channel_advance(self):
@@ -1444,11 +1498,12 @@ def install_hooks():
             journal.pop()
 
     def patched_setattr(self, name, value):
-        # The ONE complete capture point for no-event, immutable-valued state
-        # (shields + team). Every assignment to a watched attr — add_shields,
-        # remove_shields, the block's inline decrement, the ~8 content shield
-        # direct-writes, and every team flip (Dominate, conversions, Treachery) —
-        # routes through here.
+        # The ONE complete capture point for no-event, player-visible state
+        # (shields, team, cur_hp, max_hp). Every assignment to a watched attr —
+        # add_shields, remove_shields, the block's inline decrement, content
+        # shield direct-writes, team flips (Dominate/conversions/Treachery), and
+        # raw cur_hp/max_hp changes (Crisis Charm, Soulbound, Ruby Heart, undeath,
+        # ...) — routes through here. This is the taxonomy's universal chokepoint.
         #
         # Discipline (this mediates EVERY unit attribute write, so a bug breaks
         # the whole game): the store ALWAYS runs via the captured original;
@@ -1462,20 +1517,25 @@ def install_hooks():
         before = self.__dict__.get(name)
         original_unit_setattr(self, name, value)
         try:
-            # _is_live_unit (unit in level.units) gates out the ~40 construction
-            # writes + factory/baseline shields on not-yet-placed units, while
-            # (unlike the old ever_spawned gate) STILL capturing on-summon grants
-            # that fire during the EventOnUnitAdded raise (R7) and dropping
-            # off-field writes to killed/removed units (R22). The suppress flag
-            # gates out Unit.refresh()'s shields=0 reset (level transition /
-            # respawn, not combat). Parent comes from the cause stack — a reactive
-            # gain parents to its EventOnDamaged, a Siphon strip to the cast.
-            if _is_live_unit(self) and not journal._suppress_watched_capture:
-                after = self.__dict__.get(name)
-                classified = _classify_watched(self, name, before, after)
-                if classified is not None:
-                    event_type, payload = classified
-                    journal.record(event_type, payload)
+            # Suppression, checked FIRST (cheap) so the hot deal_damage path —
+            # which writes cur_hp on every damage/heal instance — short-circuits
+            # before the O(n) _is_live_unit scan. _suppress_watched_capture (all
+            # attrs) gates Unit.refresh()'s reset + the shield-setter brackets;
+            # _suppress_cur_hp_capture (cur_hp only) gates deal_damage's evented
+            # cur_hp writes. _is_live_unit (unit in level.units) then gates out
+            # construction / off-field writes while still catching on-summon grants
+            # (R7) and dropping killed/removed-unit writes (R22, reincarnation).
+            if journal._suppress_watched_capture:
+                return
+            if name == 'cur_hp' and journal._suppress_cur_hp_capture:
+                return
+            if not _is_live_unit(self):
+                return
+            after = self.__dict__.get(name)
+            classified = _classify_watched(self, name, before, after)
+            if classified is not None:
+                event_type, payload = classified
+                journal.record(event_type, payload)
         except Exception:
             pass
 
@@ -1540,8 +1600,20 @@ def install_hooks():
         # incoming).
         target = self.get_unit_at(x, y)
         seq_before = journal.sequence
-        result = original_deal_damage(self, x, y, amount, damage_type, source,
-                                      flash=flash, redirect=redirect)
+        # Bracket cur_hp capture: deal_damage's cur_hp writes (Level.py:4073/4129/
+        # 4135) are the EVENTED HP changes (EventOnDamaged 4119 / EventOnHealed
+        # 4087), already captured — so suppress the interceptor's silent-heal
+        # capture here. cur_hp-ONLY: the block's inline `shields -= 1` (Level.py:
+        # 4061) still captures (the shield_blocked detail below depends on it).
+        # Save/restore handles nested deal_damage (a handler re-damaging inside
+        # this call). shields/team/max_hp are unaffected.
+        prev_cur_hp = journal._suppress_cur_hp_capture
+        journal._suppress_cur_hp_capture = True
+        try:
+            result = original_deal_damage(self, x, y, amount, damage_type, source,
+                                          flash=flash, redirect=redirect)
+        finally:
+            journal._suppress_cur_hp_capture = prev_cur_hp
         try:
             if target is not None and _claim_block_event(
                     journal.records, seq_before, id(target)):
@@ -1559,58 +1631,6 @@ def install_hooks():
         except Exception:
             pass
         return result
-
-    def _make_crisis_charm_hook(original_on_damage):
-        def patched_crisis_charm_on_damage(self, evt):
-            # Crisis Charm (Equipment.py:3179) restores the owner to full when a
-            # hit would kill them — a raw `cur_hp = max_hp` (3195) that raises no
-            # EventOnHealed and only `level.log`s "used a Crisis Charm" (which the
-            # mod doesn't auto-voice). Snapshot cur_hp/max_hp around on_damage and
-            # emit a silent_heal with the real restored magnitude if it fired.
-            owner = getattr(self, 'owner', None)
-            cur_before = getattr(owner, 'cur_hp', None) if owner is not None else None
-            max_before = getattr(owner, 'max_hp', None) if owner is not None else None
-            result = original_on_damage(self, evt)
-            if owner is not None:
-                _emit_silent_heal(owner, cur_before, max_before, "Crisis Charm")
-            return result
-        return patched_crisis_charm_on_damage
-
-    def _make_reincarnation_hook(original_respawn):
-        def patched_respawn(self):
-            # ReincarnationBuff.respawn (CommonContent.py:1248) is a GENERATOR
-            # that full-restores cur_hp (1254) + shields (1251) while the unit is
-            # off-field (removed on death, re-added at 1257) — no EventOnHealed.
-            # Snapshot around the whole generator (before = the killed unit's 0 HP;
-            # after = restored) and emit a capture-only silent_heal. INERT in the
-            # interim: the heal is owned by the reincarnate announcement (Track B).
-            owner = getattr(self, 'owner', None)
-            cur_before = getattr(owner, 'cur_hp', None) if owner is not None else None
-            max_before = getattr(owner, 'max_hp', None) if owner is not None else None
-            result = yield from original_respawn(self)
-            if owner is not None:
-                _emit_silent_heal(owner, cur_before, max_before, "Reincarnation")
-            return result
-        return patched_respawn
-
-    def _make_prop_enter_heal_hook(original_enter, source_fn):
-        def patched_on_player_enter(self, player):
-            # Prop pickups that heal via a raw cur_hp write (Ruby Heart
-            # Level.py:2808; component pickups Components.py) — no EventOnHealed.
-            # Snapshot around the entry and emit a capture-only silent_heal with
-            # the real delta (incl. any max_hp raise). INERT in the interim: the
-            # heal is owned by the pickup announcement (Track B folds in the num).
-            cur_before = getattr(player, 'cur_hp', None)
-            max_before = getattr(player, 'max_hp', None)
-            result = original_enter(self, player)
-            try:
-                source = source_fn(self)
-            except Exception:
-                source = None
-            if source:
-                _emit_silent_heal(player, cur_before, max_before, source)
-            return result
-        return patched_on_player_enter
 
     Level.CastContext = _TrackedCastContext
     Level.Level.act_cast = patched_act_cast
@@ -1636,55 +1656,5 @@ def install_hooks():
     Level.Unit.add_shields = patched_add_shields
     Level.Unit.remove_shields = patched_remove_shields
     Level.Level.deal_damage = patched_deal_damage
-
-    # Silent-heal wrappers (R5) — targeted method hooks on content classes that
-    # write cur_hp/max_hp raw (no EventOnHealed). Resilient: each is guarded so a
-    # renamed/moved class in a future RW3 update disables that one capture rather
-    # than breaking hook install. Idempotent via the _wof_wrapped marker.
-    try:
-        import Equipment as _Equipment
-        _cc = getattr(_Equipment, 'CrisisCharm', None)
-        if _cc is not None and not getattr(_cc.on_damage, '_wof_wrapped', False):
-            _wrapped = _make_crisis_charm_hook(_cc.on_damage)
-            _wrapped._wof_wrapped = True
-            _cc.on_damage = _wrapped
-    except Exception:
-        pass
-
-    try:
-        import CommonContent as _CommonContent
-        _rb = getattr(_CommonContent, 'ReincarnationBuff', None)
-        if _rb is not None and not getattr(_rb.respawn, '_wof_wrapped', False):
-            _wrapped = _make_reincarnation_hook(_rb.respawn)
-            _wrapped._wof_wrapped = True
-            _rb.respawn = _wrapped
-    except Exception:
-        pass
-
-    try:
-        _hd = getattr(Level, 'HeartDot', None)
-        if _hd is not None and not getattr(_hd.on_player_enter, '_wof_wrapped', False):
-            _wrapped = _make_prop_enter_heal_hook(
-                _hd.on_player_enter, lambda self: "Ruby Heart")
-            _wrapped._wof_wrapped = True
-            _hd.on_player_enter = _wrapped
-    except Exception:
-        pass
-
-    try:
-        # Floor component pickups route through ComponentPickup.on_player_enter
-        # (Level.py:2819 -> component.on_pickup) — the choke point for HP-granting
-        # components (Heart Fragment, Devil's Blood, ...) and future ones. NB the
-        # crafting/reward paths that call component.on_pickup directly are NOT
-        # covered here (a documented synth-at-sites boundary).
-        _cp = getattr(Level, 'ComponentPickup', None)
-        if _cp is not None and not getattr(_cp.on_player_enter, '_wof_wrapped', False):
-            _wrapped = _make_prop_enter_heal_hook(
-                _cp.on_player_enter,
-                lambda self: getattr(getattr(self, 'component', None), 'name', None) or "Component")
-            _wrapped._wof_wrapped = True
-            _cp.on_player_enter = _wrapped
-    except Exception:
-        pass
 
     journal._hooks_installed = True

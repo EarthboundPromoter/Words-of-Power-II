@@ -399,38 +399,37 @@ def _render_wizard_healed(record):
     return f"Wizard healed {amount}."
 
 
-def _render_crisis_charm_save(record):
-    """Interim render for the Crisis Charm life-save (R5). The charm restores the
-    wizard to full when a hit would kill them, raising no EventOnHealed and only
-    logging 'used a Crisis Charm' (which the mod doesn't auto-voice) — so the mod
-    supplies the missing voice from the captured silent_heal.
+def _render_wizard_lethal_save(record):
+    """Interim render for a wizard LETHAL-SAVE (R5) — a silent cur_hp rise from
+    <=0 back to positive, i.e. a hit that would have killed you but didn't (Crisis
+    Charm restores to full, Equipment.py:3195; Soulbound clamps to 1,
+    CommonContent.py:1392). These raise no EventOnHealed and their log lines
+    aren't auto-voiced, so the mod supplies the voice from the captured
+    silent_heal.
 
-    INTERIM: filtered to source 'Crisis Charm'. Other silent_heal records are
-    captured ground truth staged for Track B, NOT voiced here (their heal is
-    owned by a pickup / reincarnate announcement). Track B replaces this with
-    real routing over all silent_heal records. Not chain-gated — a death-save
-    must always be heard."""
+    DATA-DRIVEN, not source-named: universal capture doesn't know which item
+    saved you (that's cause-attribution, Track B, §3). The lethal-save predicate
+    is cur_hp_before <= 0 < cur_hp_after — which cleanly distinguishes the
+    must-speak saves from ordinary silent heals (Ruby Heart, components: their
+    cur_hp_before is positive) that stay captured-but-inert, staged for Track B.
+    The OUTCOME (restored-to-full vs survived-at-N) is read from the data. Not
+    chain-gated — a death-save must always be heard. Track B re-homes this off
+    crisis into the wizard-highlight + adds 'from Crisis Charm' via the cause."""
     if record.get('event_type') != 'silent_heal':
         return None
     payload = record.get('payload') or {}
-    if payload.get('source_name') != 'Crisis Charm':
-        return None
     target = payload.get('target') or {}
     if not _is_wizard_snap(target):
         return None
-    amount = payload.get('heal_amount')
-    if not amount or amount <= 0:
+    before = payload.get('cur_hp_before')
+    after = payload.get('cur_hp_after')
+    if before is None or after is None or before > 0 or after <= 0:
         return None
-    # Report the FULL value (max HP), not the heal delta — the charm always
-    # restores to full, so "restored to full, N health" reads as "you're now at
-    # N (your max)"; the delta would misread as your current HP. Doubles as a
-    # max-HP reminder. Fall back to cur_hp_after, then the delta, if absent.
-    full = payload.get('max_hp_after')
-    if full is None:
-        full = payload.get('cur_hp_after')
-    if full is None:
-        full = amount
-    return f"Crisis Charm restored you to full, {full} health."
+    max_hp = payload.get('max_hp_after')
+    if max_hp is not None and after >= max_hp:
+        # Restored to full — report the max (a reminder of your maximum).
+        return f"You would have died — restored to full, {max_hp} health."
+    return f"You would have died — survived at {after} health."
 
 
 def _render_wizard_buff_gained(record):
@@ -690,14 +689,14 @@ class _CrisisProducer:
                 categories_present.add('shield_stripped')
                 _claim(rec)
                 continue
-            # Crisis Charm life-save — always crisis (an otherwise-silent restore
-            # from a would-be-lethal hit; the game only logs it). Not chain-gated:
-            # a death-save must always be heard. INTERIM (source-filtered); Track B
-            # routes all silent_heal records.
-            line = _render_crisis_charm_save(rec)
+            # Wizard lethal-save — always crisis (an otherwise-silent restore from
+            # a would-be-lethal hit: Crisis Charm, Soulbound). Not chain-gated: a
+            # death-save must always be heard. INTERIM (data-driven predicate);
+            # Track B re-homes to the wizard-highlight + cause-attribution.
+            line = _render_wizard_lethal_save(rec)
             if line:
                 lines.append(line)
-                categories_present.add('crisis_charm_save')
+                categories_present.add('wizard_lethal_save')
                 _claim(rec)
                 continue
             # Wizard-facing positives — only when out-of-chain (in-chain ->
