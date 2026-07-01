@@ -305,16 +305,19 @@ def test_wizard_healed_non_wizard_ignored():
 # ---- _render_crisis_charm_save (R5, interim) ----
 
 
-def _silent_heal_record(target, amount=40, source='Crisis Charm', sequence=40):
+def _silent_heal_record(target, amount=40, source='Crisis Charm', sequence=40,
+                        max_hp_after=50):
     return {'sequence': sequence, 'parent': None,
             'event_type': 'silent_heal',
             'payload': {'target': target, 'heal_amount': amount,
+                        'max_hp_after': max_hp_after,
                         'source_name': source}, 'marks': []}
 
 
 def test_crisis_charm_save_rendered():
+    # Reports the FULL value (max HP = 50), not the heal delta (40).
     assert _render_crisis_charm_save(_silent_heal_record(_wizard_snap())) == \
-        "Crisis Charm restored you to full, 40 health."
+        "Crisis Charm restored you to full, 50 health."
 
 
 def test_crisis_charm_save_other_source_ignored():
@@ -336,7 +339,7 @@ def test_crisis_charm_save_voiced_through_fire():
     def noop(_): pass
     rec = _silent_heal_record(_wizard_snap())
     section = p.fire([rec], _StubWizard(50, 50), noop, telemetry=None)
-    assert "Crisis Charm restored you to full, 40 health." in section[1]
+    assert "Crisis Charm restored you to full, 50 health." in section[1]
     assert _has_crisis_mark(rec)
 
 

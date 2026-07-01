@@ -271,3 +271,78 @@ def test_crisis_charm_no_fire_no_record():
     charm.on_damage(None)
     assert _silent_heals(id(wiz)) == []
     assert wiz.cur_hp == 30
+
+
+# ---- R5: capture-only silent heals (staged for Track B, not voiced interim) ----
+
+def test_ruby_heart_captures_silent_heal():
+    # HeartDot.on_player_enter: max_hp += 25 then cur_hp = max_hp (raw, no event).
+    lvl = _fresh_level()
+    wiz = _unit("Wizard", hp=50, player=True)
+    _place(lvl, wiz, 7, 7)
+    wiz.cur_hp = 20
+    heart = Level.HeartDot()
+    lvl.add_prop(heart, 8, 8)
+    heart.on_player_enter(wiz)
+    recs = _silent_heals(id(wiz))
+    assert len(recs) == 1
+    p = recs[0]["payload"]
+    assert p["source_name"] == "Ruby Heart"
+    assert p["max_hp_gained"] == 25
+    assert p["heal_amount"] == 55       # cur 20 -> 75 (max 50->75)
+    assert wiz.cur_hp == 75
+
+
+def test_component_pickup_captures_silent_heal():
+    # Heart Fragment on_pickup: max_hp += 10, cur_hp += 10 — via the floor
+    # ComponentPickup choke point, source = the component's name.
+    from Components import HeartFragment
+    import collections
+    lvl = _fresh_level()
+    wiz = _unit("Wizard", hp=50, player=True)
+    wiz.component_tags = collections.defaultdict(int)   # real player init sets this
+    _place(lvl, wiz, 7, 7)
+    wiz.cur_hp = 40
+    pickup = Level.ComponentPickup(HeartFragment())
+    lvl.add_prop(pickup, 8, 8)
+    pickup.on_player_enter(wiz)
+    recs = _silent_heals(id(wiz))
+    assert len(recs) == 1
+    p = recs[0]["payload"]
+    assert p["source_name"] == "Heart Fragment"
+    assert p["heal_amount"] == 10       # cur 40 -> 50
+    assert p["max_hp_gained"] == 10
+
+
+def test_non_healing_component_pickup_no_record():
+    # A component that changes no HP produces no silent_heal (net delta 0).
+    from Components import BurningEmber
+    import collections
+    lvl = _fresh_level()
+    wiz = _unit("Wizard", hp=50, player=True)
+    wiz.component_tags = collections.defaultdict(int)
+    _place(lvl, wiz, 7, 7)
+    pickup = Level.ComponentPickup(BurningEmber())
+    lvl.add_prop(pickup, 8, 8)
+    pickup.on_player_enter(wiz)
+    assert _silent_heals(id(wiz)) == []
+
+
+def test_reincarnation_respawn_emits_silent_heal():
+    # The respawn full-restore is now captured as ground truth (capture-only;
+    # inert in the interim — owned by the reincarnate announcement).
+    from CommonContent import ReincarnationBuff
+    lvl = _fresh_level()
+    martyr = _place(lvl, _unit("Martyr", hp=20), 7, 7)
+    martyr.apply_buff(ReincarnationBuff(lives=1))
+    _place(lvl, _unit("Bystander"), 1, 1)
+    seq_before = journal.sequence
+    martyr.kill()
+    while lvl.can_advance_spells():
+        lvl.advance_spells()
+    heals = [r for r in journal.records if r["sequence"] > seq_before
+             and r["event_type"] == "silent_heal"
+             and (r["payload"].get("target") or {}).get("id") == id(martyr)]
+    assert len(heals) == 1
+    assert heals[0]["payload"]["source_name"] == "Reincarnation"
+    assert heals[0]["payload"]["heal_amount"] == martyr.max_hp   # 0 -> full

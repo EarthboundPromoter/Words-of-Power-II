@@ -1576,6 +1576,42 @@ def install_hooks():
             return result
         return patched_crisis_charm_on_damage
 
+    def _make_reincarnation_hook(original_respawn):
+        def patched_respawn(self):
+            # ReincarnationBuff.respawn (CommonContent.py:1248) is a GENERATOR
+            # that full-restores cur_hp (1254) + shields (1251) while the unit is
+            # off-field (removed on death, re-added at 1257) — no EventOnHealed.
+            # Snapshot around the whole generator (before = the killed unit's 0 HP;
+            # after = restored) and emit a capture-only silent_heal. INERT in the
+            # interim: the heal is owned by the reincarnate announcement (Track B).
+            owner = getattr(self, 'owner', None)
+            cur_before = getattr(owner, 'cur_hp', None) if owner is not None else None
+            max_before = getattr(owner, 'max_hp', None) if owner is not None else None
+            result = yield from original_respawn(self)
+            if owner is not None:
+                _emit_silent_heal(owner, cur_before, max_before, "Reincarnation")
+            return result
+        return patched_respawn
+
+    def _make_prop_enter_heal_hook(original_enter, source_fn):
+        def patched_on_player_enter(self, player):
+            # Prop pickups that heal via a raw cur_hp write (Ruby Heart
+            # Level.py:2808; component pickups Components.py) — no EventOnHealed.
+            # Snapshot around the entry and emit a capture-only silent_heal with
+            # the real delta (incl. any max_hp raise). INERT in the interim: the
+            # heal is owned by the pickup announcement (Track B folds in the num).
+            cur_before = getattr(player, 'cur_hp', None)
+            max_before = getattr(player, 'max_hp', None)
+            result = original_enter(self, player)
+            try:
+                source = source_fn(self)
+            except Exception:
+                source = None
+            if source:
+                _emit_silent_heal(player, cur_before, max_before, source)
+            return result
+        return patched_on_player_enter
+
     Level.CastContext = _TrackedCastContext
     Level.Level.act_cast = patched_act_cast
     Level.Level.defer_cast = patched_defer_cast
@@ -1612,6 +1648,42 @@ def install_hooks():
             _wrapped = _make_crisis_charm_hook(_cc.on_damage)
             _wrapped._wof_wrapped = True
             _cc.on_damage = _wrapped
+    except Exception:
+        pass
+
+    try:
+        import CommonContent as _CommonContent
+        _rb = getattr(_CommonContent, 'ReincarnationBuff', None)
+        if _rb is not None and not getattr(_rb.respawn, '_wof_wrapped', False):
+            _wrapped = _make_reincarnation_hook(_rb.respawn)
+            _wrapped._wof_wrapped = True
+            _rb.respawn = _wrapped
+    except Exception:
+        pass
+
+    try:
+        _hd = getattr(Level, 'HeartDot', None)
+        if _hd is not None and not getattr(_hd.on_player_enter, '_wof_wrapped', False):
+            _wrapped = _make_prop_enter_heal_hook(
+                _hd.on_player_enter, lambda self: "Ruby Heart")
+            _wrapped._wof_wrapped = True
+            _hd.on_player_enter = _wrapped
+    except Exception:
+        pass
+
+    try:
+        # Floor component pickups route through ComponentPickup.on_player_enter
+        # (Level.py:2819 -> component.on_pickup) — the choke point for HP-granting
+        # components (Heart Fragment, Devil's Blood, ...) and future ones. NB the
+        # crafting/reward paths that call component.on_pickup directly are NOT
+        # covered here (a documented synth-at-sites boundary).
+        _cp = getattr(Level, 'ComponentPickup', None)
+        if _cp is not None and not getattr(_cp.on_player_enter, '_wof_wrapped', False):
+            _wrapped = _make_prop_enter_heal_hook(
+                _cp.on_player_enter,
+                lambda self: getattr(getattr(self, 'component', None), 'name', None) or "Component")
+            _wrapped._wof_wrapped = True
+            _cp.on_player_enter = _wrapped
     except Exception:
         pass
 

@@ -421,7 +421,16 @@ def _render_crisis_charm_save(record):
     amount = payload.get('heal_amount')
     if not amount or amount <= 0:
         return None
-    return f"Crisis Charm restored you to full, {amount} health."
+    # Report the FULL value (max HP), not the heal delta — the charm always
+    # restores to full, so "restored to full, N health" reads as "you're now at
+    # N (your max)"; the delta would misread as your current HP. Doubles as a
+    # max-HP reminder. Fall back to cur_hp_after, then the delta, if absent.
+    full = payload.get('max_hp_after')
+    if full is None:
+        full = payload.get('cur_hp_after')
+    if full is None:
+        full = amount
+    return f"Crisis Charm restored you to full, {full} health."
 
 
 def _render_wizard_buff_gained(record):
