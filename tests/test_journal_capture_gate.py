@@ -395,3 +395,35 @@ def test_reincarnation_respawn_off_field_dropped():
              and r["event_type"] == "silent_heal"
              and (r["payload"].get("target") or {}).get("id") == id(martyr)]
     assert heals == []
+
+
+# ---- Invariant tripwire: deal_damage is the SOLE evented HP-change path ----
+
+def test_deal_damage_is_sole_evented_hp_path():
+    # The universal cur_hp capture is DEFINE-BY-EXCLUSION: "silent" = every cur_hp
+    # write except those deal_damage's bracket suppresses. That is sound ONLY
+    # while deal_damage remains the sole raiser of EventOnHealed/EventOnDamaged.
+    # If a future RW3 update adds a second evented HP path, its cur_hp write would
+    # escape the bracket and DOUBLE-voice (evented + silent). This canary fails
+    # loudly on that drift so the scheme's assumption is checked, not assumed.
+    import Level as L
+    src = os.path.join(os.path.dirname(L.__file__), 'Level.py')
+    with open(src, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+
+    # Level.deal_damage — NOT Unit.deal_damage(self, amount, ...); match by its
+    # x,y signature so we get the right one of the two same-named methods.
+    dd_start = next(i for i, ln in enumerate(lines)
+                    if ln.startswith('\tdef deal_damage(self, x, y'))
+    dd_end = next((i for i in range(dd_start + 1, len(lines))
+                   if lines[i].startswith('\tdef ')), len(lines))
+    # Constructions of the events (namedtuple defs use `= namedtuple`, so the
+    # `EventName(` pattern matches only construction sites).
+    for ev in ('EventOnHealed(', 'EventOnDamaged('):
+        sites = [i for i, ln in enumerate(lines) if ev in ln]
+        assert len(sites) == 1, (
+            "%s constructed at %d site(s); expected exactly 1 (inside deal_damage). "
+            "A new evented HP path breaks the universal-capture bracket." % (ev, len(sites)))
+        assert dd_start < sites[0] < dd_end, (
+            "%s no longer constructed inside deal_damage (%d not in %d..%d)."
+            % (ev, sites[0], dd_start, dd_end))

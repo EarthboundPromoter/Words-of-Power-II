@@ -630,9 +630,12 @@ def _is_live_unit(unit):
         -> reads False, so off-field writes drop naturally. That subsumes R22:
         ReincarnationBuff.respawn restores shields (CommonContent.py:1251) while
         the unit sits removed between kill and re-add, so no phantom "gained".
-    O(n) membership, but only ever called on the rare watched (shields/team)
-    writes — the interceptor's fast-path returns before this for every other
-    attribute. Guarded so a not-yet-placed unit (level is None) reads False."""
+    O(n) membership. The interceptor's fast-path returns before this for every
+    non-watched attribute, and the suppress-checks (incl. _suppress_cur_hp_capture
+    inside deal_damage — the hot cur_hp path) short-circuit before it too. So it
+    runs only on watched writes that ESCAPE suppression: shield/team changes, and
+    silent cur_hp/max_hp writes OUTSIDE deal_damage (rare). Guarded so a
+    not-yet-placed unit (level is None) reads False."""
     lvl = getattr(unit, 'level', None)
     if lvl is None:
         return False
@@ -853,9 +856,16 @@ def _cur_hp_change_record(unit, before, after):
     raw drop) is not modeled here. Returns ('silent_heal', payload) or None."""
     before = before or 0
     after = after or 0
+    max_hp = getattr(unit, 'max_hp', None)
+    # Defensive: if a reactive handler raw-overheals above max during an event
+    # raise (un-bracketed), the engine's paired clamp (Level.py:4128/4135) runs
+    # bracketed, so the interceptor would otherwise record the pre-clamp inflated
+    # value. Clamp to max so the recorded magnitude matches the unit's real final
+    # HP. No shipped content does this today (audit); this is forward insurance.
+    if max_hp is not None and after > max_hp:
+        after = max_hp
     if after <= before:
         return None
-    max_hp = getattr(unit, 'max_hp', None)
     return 'silent_heal', _silent_heal_payload(unit, before, after, max_hp)
 
 
