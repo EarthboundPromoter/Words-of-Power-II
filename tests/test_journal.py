@@ -23,6 +23,7 @@ from journal import (
     _shield_stripped_payload,
     _shield_blocked_payload,
     _payload_shield_removed,
+    _team_change_record,
 )
 
 
@@ -250,3 +251,26 @@ def test_payload_shield_removed_handles_missing_source():
     p = _payload_shield_removed(evt)
     assert p['source_name'] is None
     assert p['source_owner_name'] is None
+
+
+# ---- _team_change_record: categorical allegiance flips (TEAM_PLAYER=0/ENEMY=1) ----
+
+
+def test_team_change_noop_returns_none():
+    assert _team_change_record(_unit(), 0, 0) is None
+    assert _team_change_record(_unit(), 1, 1) is None
+
+
+def test_team_change_enemy_to_player_is_joined():
+    et, payload = _team_change_record(_unit(name="Ogre", player=False), 1, 0)
+    assert et == 'team_joined'                 # "turned friendly"
+    assert payload['team_before'] == 1
+    assert payload['team_after'] == 0
+    assert payload['target']['name'] == "Ogre"
+
+
+def test_team_change_player_to_enemy_is_turned():
+    et, payload = _team_change_record(_unit(name="Wolf"), 0, 1)
+    assert et == 'team_turned'                 # "turned hostile"
+    assert payload['team_before'] == 0
+    assert payload['team_after'] == 1

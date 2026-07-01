@@ -584,8 +584,10 @@ def _payload_shield_removed(event):
 # ----------------------------------------------------------------------
 
 # Attributes the __setattr__ interceptor watches: no-event, immutable-valued,
-# player-relevant state. 'team' joins here when team-flip lands on the same hook.
-_WATCHED_ATTRS = frozenset({'shields'})
+# player-relevant state. 'shields' is a numeric delta; 'team' is a categorical
+# allegiance flip — each gets its own change-record builder (dispatched in
+# patched_setattr), but both share the interceptor + the ever_spawned gating.
+_WATCHED_ATTRS = frozenset({'shields', 'team'})
 
 
 def _resist_blocked_amount(resists, damage_type, orig_amount):
@@ -699,6 +701,38 @@ def _shield_stripped_payload(unit, shields_before, shields_after):
         'amount_removed': removed,
         'shields_before': shields_before,
         'shields_after': shields_after,
+    }
+
+
+def _team_change_record(unit, before, after):
+    """Classify a `team` write seen by the __setattr__ interceptor into a journal
+    record, or None for a no-op. Categorical, not a numeric delta — RW3 has
+    exactly two teams (TEAM_PLAYER=0, TEAM_ENEMY=1, Level.py:18-19), so a runtime
+    flip is one of two directions, read relative to the wizard's TEAM_PLAYER:
+        enemy  -> player : gained an ally -> 'team_joined' ("turned friendly")
+        player -> enemy  : lost an ally   -> 'team_turned' ("turned hostile")
+    Direction comes from the raw before/after ints, NOT the snapshot (some sites
+    hardcode the constant rather than caster.team). Spawn-init writes are gated
+    out upstream by ever_spawned — a summoned/transformed unit's team is set
+    before add_obj (Level.py:3998 summon; CommonContent MatureInto/raise_skeleton),
+    so only flips of already-live units reach here. Berserk is a buff, not a team
+    write, so it never appears."""
+    if before == after:
+        return None
+    player = getattr(Level, 'TEAM_PLAYER', 0)
+    if after == player:
+        return 'team_joined', _team_change_payload(unit, before, after)
+    return 'team_turned', _team_change_payload(unit, before, after)
+
+
+def _team_change_payload(unit, before, after):
+    """Synthesized team-flip record. The snapshot is post-write (team == after),
+    so a just-joined unit reads as an ally downstream; team_before/after carry the
+    raw direction for renderers that need it."""
+    return {
+        'target': _snapshot_unit(unit),
+        'team_before': before,
+        'team_after': after,
     }
 
 
@@ -1298,9 +1332,10 @@ def install_hooks():
 
     def patched_setattr(self, name, value):
         # The ONE complete capture point for no-event, immutable-valued state
-        # (shields now; team at team-flip). Every assignment to a watched attr —
-        # add_shields, remove_shields, the block's inline decrement, and the ~8
-        # content direct-writes the method hooks missed — routes through here.
+        # (shields + team). Every assignment to a watched attr — add_shields,
+        # remove_shields, the block's inline decrement, the ~8 content shield
+        # direct-writes, and every team flip (Dominate, conversions, Treachery) —
+        # routes through here.
         #
         # Discipline (this mediates EVERY unit attribute write, so a bug breaks
         # the whole game): the store ALWAYS runs via the captured original;
@@ -1322,7 +1357,10 @@ def install_hooks():
             # gain parents to its EventOnDamaged, a Siphon strip to the cast.
             if getattr(self, 'ever_spawned', False) and not journal._suppress_watched_capture:
                 after = self.__dict__.get(name)
-                classified = _shield_change_record(self, before, after)
+                classified = (
+                    _team_change_record(self, before, after) if name == 'team'
+                    else _shield_change_record(self, before, after)
+                )
                 if classified is not None:
                     event_type, payload = classified
                     journal.record(event_type, payload)
