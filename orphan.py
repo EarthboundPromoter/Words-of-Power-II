@@ -1350,16 +1350,33 @@ def _render_buff_applies(records, wizard_team, show_coords):
     return out_items, claimed
 
 
-def _render_shield_changes(records, wizard_team, show_coords):
+def _show_shield_total(unit_snap, wizard_team, ally_shield_totals,
+                       enemy_shield_totals):
+    """Whether to voice a non-wizard unit's RESULTING shield count, per the two
+    independent configs. Ally = player-team non-wizard (summons, charmed foes);
+    enemy = everything else. The wizard's own totals are crisis's, always shown;
+    this gates only the ambient ally/enemy lines."""
+    if not unit_snap:
+        return False
+    team = unit_snap.get('team')
+    is_ally = (wizard_team is not None and team == wizard_team
+               and not unit_snap.get('is_player_controlled'))
+    return ally_shield_totals if is_ally else enemy_shield_totals
+
+
+def _render_shield_changes(records, wizard_team, show_coords,
+                           ally_shield_totals=False, enemy_shield_totals=True):
     """Out-of-chain shield gains/strips on NON-wizard units — an enemy
     self-shields or shields an ally, an aura grants shields, an enemy strips an
     ally's shields. Wizard shield changes are crisis's; in-chain ones the
     digest's (both already claimed, so _is_claimed_by_other skips them).
-    Collapsed by (event, amount, name, tier), ally-prefixed, emitted as status
-    line-items so they ride the proximity/LoS ordering. Block-coincident strips
-    (superseded_by_block) are skipped — the block owns that narration, and no
-    non-wizard block voice exists yet (see build plan). Returns (items,
-    claimed)."""
+    Collapsed by (event, amount, name, tier, [total]), ally-prefixed, emitted as
+    status line-items so they ride the proximity/LoS ordering. Block-coincident
+    strips (superseded_by_block) are skipped — the block owns that narration
+    (_render_shield_blocks). The resulting shield count rides the ally/enemy
+    shield-total configs; when shown it joins the collapse signature so members
+    that ended at different totals don't merge under one number. Returns
+    (items, claimed)."""
     out_items = []
     claimed = []
     groups = {}
@@ -1380,7 +1397,14 @@ def _render_shield_changes(records, wizard_team, show_coords):
             continue
         amount = (p.get('amount') if et == 'shield_gained'
                   else p.get('amount_removed'))
-        sig = (et, amount, t.get('name'), t.get('tier'))
+        total = (p.get('shields_after')
+                 if _show_shield_total(t, wizard_team, ally_shield_totals,
+                                       enemy_shield_totals)
+                 else None)
+        # team is in the signature so a same-name ally and enemy (Dominate /
+        # charm) never merge under one prefix — the ally-designation rule is
+        # mandatory and the prefix is taken from members[0].
+        sig = (et, amount, t.get('name'), t.get('tier'), t.get('team'), total)
         if sig not in groups:
             order.append(sig)
             groups[sig] = []
@@ -1389,26 +1413,110 @@ def _render_shield_changes(records, wizard_team, show_coords):
         claimed.append(r)
 
     for sig in order:
-        et, amount, target_name, _tier = sig
+        et, amount, target_name, _tier, _team, total = sig
         members = groups[sig]
         if et == 'shield_gained':
             amt = amount or 0
             sh = "shield" if amt == 1 else "shields"
-            phrase_tail = f"gained {amt} {sh}"
-            each = " each"
+            core = f"gained {amt} {sh}"
+            total_tail = f", {total} total" if total is not None else ""
+            each_applicable = True
         else:
-            phrase_tail = "shields stripped"
-            each = ""
+            core = "shields stripped"
+            # 0 left = fully stripped; the bare verb already says that.
+            total_tail = f", {total} left" if total else ""
+            each_applicable = bool(total_tail)
         if len(members) == 1:
             target_str = _name_with_coord(members[0], wizard_team, show_coords)
             out_items.append(_make_item(RANK_STATUS, [members[0]],
-                f"{target_str} {phrase_tail}."))
+                f"{target_str} {core}{total_tail}."))
         else:
             plural = _pluralize(target_name or 'enemy')
             prefix = _team_prefix(members[0], wizard_team)
             coords = _coord_list(members, show_coords)
+            # 'each' distributes the per-unit number(s); a strip with no total
+            # carries none, so it stays plain.
+            each = " each" if each_applicable else ""
             out_items.append(_make_item(RANK_STATUS, members,
-                f"{len(members)} {prefix}{plural}{coords} {phrase_tail}{each}."))
+                f"{len(members)} {prefix}{plural}{coords} {core}{total_tail}{each}."))
+    return out_items, claimed
+
+
+def _render_shield_blocks(records, wizard_team, show_coords,
+                          ally_shield_totals=False, enemy_shield_totals=True):
+    """Out-of-chain shield BLOCKS on NON-wizard units — an enemy attacks your
+    ally and the ally's shield negates the hit, or units trade blocked blows on
+    the enemy turn. Wizard blocks are crisis's; in-chain outgoing blocks (your
+    attack an enemy shrugs off) are the digest's (claimed, so
+    _is_claimed_by_other skips them, no double-voice). The block is the
+    canonical voice for the hit — its coincident strip is marked superseded and
+    dropped by _render_shield_changes. Mirrors crisis's block phrasing
+    ('blocked AMOUNT TYPE from SOURCE'); the trailing shields-left count rides
+    the ally/enemy shield-total configs. Collapsed by (amount, dtype, source,
+    name, tier, [remaining]), ally-prefixed, status-ranked. Returns (items,
+    claimed)."""
+    out_items = []
+    claimed = []
+    groups = {}
+    order = []
+    for r in records:
+        if r.get('event_type') != 'shield_blocked':
+            continue
+        if _is_claimed_by_other(r):
+            continue
+        p = r.get('payload') or {}
+        t = p.get('target') or {}
+        if _is_wizard_snap(t):
+            continue
+        amount = p.get('blocked_amount')
+        dtype = p.get('damage_type')
+        source = p.get('source_name')
+        remaining = (p.get('shields_remaining')
+                     if _show_shield_total(t, wizard_team, ally_shield_totals,
+                                           enemy_shield_totals)
+                     else None)
+        # team in the signature: a same-name ally and enemy never collapse
+        # under one prefix (ally-designation is mandatory).
+        sig = (amount, dtype, source, t.get('name'), t.get('tier'),
+               t.get('team'), remaining)
+        if sig not in groups:
+            order.append(sig)
+            groups[sig] = []
+        groups[sig].append(t)
+        _claim(r)
+        claimed.append(r)
+
+    for sig in order:
+        amount, dtype, source, target_name, _tier, _team, remaining = sig
+        members = groups[sig]
+        # Build the block clause guardedly, mirroring crisis: each part only
+        # when captured.
+        block = "blocked"
+        if amount is not None and dtype:
+            block += f" {amount} {dtype}"
+        elif dtype:
+            block += f" {dtype}"
+        if source:
+            block += f" from {source}"
+        # Config-gated shields-left tail (None = config off for this team).
+        if remaining is None:
+            left = ""
+        elif remaining > 0:
+            sh = "shield" if remaining == 1 else "shields"
+            left = f", {remaining} {sh} left"
+        else:
+            left = ", last shield"
+        if len(members) == 1:
+            target_str = _name_with_coord(members[0], wizard_team, show_coords)
+            out_items.append(_make_item(RANK_STATUS, [members[0]],
+                f"{target_str} {block}{left}."))
+        else:
+            plural = _pluralize(target_name or 'enemy')
+            prefix = _team_prefix(members[0], wizard_team)
+            coords = _coord_list(members, show_coords)
+            each = " each" if left else ""
+            out_items.append(_make_item(RANK_STATUS, members,
+                f"{len(members)} {prefix}{plural}{coords} {block}{left}{each}."))
     return out_items, claimed
 
 
@@ -1471,7 +1579,8 @@ class _OrphanProducer:
 
     def fire(self, journal_records, show_coords, movement_verbose,
               log_fn, telemetry=None, wizard_pos=None,
-              los_grouping='section', spawn_coord_cap=5):
+              los_grouping='section', spawn_coord_cap=5,
+              enemy_shield_totals=True, ally_shield_totals=False):
         """Compose the orphan section for this turn boundary.
 
         Args:
@@ -1493,6 +1602,10 @@ class _OrphanProducer:
                 'Out of sight.' transition(s) are spoken.
             spawn_coord_cap: int — the spawn-locality coord/cluster threshold
                 (R1 spawn rendering; threaded to the spawn formatter).
+            enemy_shield_totals: bool (default True) — append an enemy's
+                resulting shield count to its ambient shield gain/strip/block
+                lines ('Ogre gained 2 shields, 5 total.').
+            ally_shield_totals: bool (default False) — the same for ally units.
 
         Returns:
             (priority, text) tuple. text is empty if no orphan content.
@@ -1548,11 +1661,20 @@ class _OrphanProducer:
         # chain sections so crisis/digest-owned shield records are already
         # claimed (claim==render).
         shield_items, _shield_claimed = _render_shield_changes(
-            new_records, wizard_team, show_coords
+            new_records, wizard_team, show_coords,
+            ally_shield_totals, enemy_shield_totals
+        )
+        # Out-of-chain shield BLOCKS on non-wizard units (ally/enemy negates a
+        # hit). Separate from gains/strips: the block record carries its own
+        # magnitude/type/source; the coincident strip is superseded above.
+        shield_block_items, _shield_block_claimed = _render_shield_blocks(
+            new_records, wizard_team, show_coords,
+            ally_shield_totals, enemy_shield_totals
         )
 
         all_items = (action_items + tick_items + bare_items + death_items
-                     + spawn_items + buff_items + shield_items)
+                     + spawn_items + buff_items + shield_items
+                     + shield_block_items)
         text = _assemble_items(all_items, wizard_pos, los_grouping)
 
         if telemetry is not None:

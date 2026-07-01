@@ -329,7 +329,7 @@ def compose_cast_section(chain):
 # - Buff/debuff phrasing on equivalence-class signature and rendering.
 # - Reactive-event folding (shield breaks on adjacent units).
 # - Coords-off rendering (uses pie-slice spatial summary).
-# - "absorbed by N shields" outcome (more relevant for Surviving).
+# - "blocked by N shields" outcome (more relevant for Surviving).
 # ----------------------------------------------------------------------
 
 
@@ -430,9 +430,15 @@ def _hit_signature(hits):
     dealt == post-resist), but two overkilled units that took DIFFERENT actual
     damage (different remaining HP) no longer merge into one line with a single
     arbitrary number. Buff/debuff state will extend this signature in a
-    follow-up commit."""
+    follow-up commit.
+
+    Shielded (blocked) hits key on the would-have-been post-resist magnitude,
+    not the displayed (zero) dealt amount — now that the blocked figure is
+    spoken, two survivors that blocked DIFFERENT magnitudes must not merge into
+    one line carrying a single arbitrary 'blocked' number."""
     return tuple(
-        (h.get('spell'), h.get('dtype'), _displayed_damage(h),
+        (h.get('spell'), h.get('dtype'),
+         h.get('damage_post_resist') if h.get('shielded') else _displayed_damage(h),
          h.get('resisted'), h.get('shielded'))
         for h in hits
     )
@@ -444,7 +450,7 @@ def _format_hits(hits):
     damage list per design_digest_phrasing.md 'Magic Missile 71 plus 17 Arcane'.
 
     Shielded hits are skipped here — kills via shielded hits are rare and
-    the more important shield-related rendering ('absorbed by N shields')
+    the more important shield-related rendering ('blocked by N shields')
     lives on the Surviving section. If/when a kill chain includes shielded
     hits we'll revisit the rendering."""
     groups = []  # list of [(spell, dtype), [damage1, damage2, ...]]
@@ -615,7 +621,8 @@ def compose_killed_section(chain):
 # in this chain. Adds outcome suffixes:
 # - "(resisted)" when any hit had post-resist < pre-resist
 # - "(vulnerable)" when any hit had post-resist > pre-resist
-# - "absorbed by N shields" counts EventOnShieldRemoved on the target
+# - "blocked by N shields" reports the blocked hits + their would-have-been
+#   magnitude (post-resist), counted off EventOnShieldRemoved on the target
 #
 # Hit-history rendering uses an additional form for survivors, per
 # design_digest_phrasing.md: "Spell N hits, X Dtype each" when a single
@@ -624,46 +631,10 @@ def compose_killed_section(chain):
 # ----------------------------------------------------------------------
 
 
-def _format_hits_with_outcome(hits):
-    """Render a survivor's hit list as 'Spell A [plus B... or N hits, X each]
-    Dtype' per group, with shielded hits absorbed into a trailing
-    'absorbed by N shields' clause on the line.
-
-    Groups by (spell, dtype) across the WHOLE hit list (not just adjacent
-    runs) — necessary for spells like Annihilate that fire interleaved
-    F/L/P damage elements per cast. With pure adjacency-grouping a 14-cast
-    Annihilate on a survivor produces 42 separate entries; with
-    full grouping it collapses to three lines, one per damage type.
-
-    Damages within a group are listed in original order, so the 'plus'
-    form for varying values still preserves chronology.
-
-    Returns (damage_part, shield_count). The caller composes outcome
-    suffixes (resisted/vulnerable) at the line level.
-
-    Killed lines use the separate _format_hits helper which keeps strict
-    adjacency-based grouping per the phrasing spec's 'Magic Missile 71
-    plus 17 Arcane' example — kill phrasing is short enough that ordered
-    plus form reads cleanly.
-    """
-    groups = {}      # (spell, dtype) -> list of damages
-    group_order = [] # first-seen ordering of keys, for stable rendering
-    shield_count = 0
-    for hit in hits:
-        if hit.get('shielded'):
-            shield_count += 1
-            continue
-        spell = hit.get('spell')
-        dtype = hit.get('dtype')
-        damage = _displayed_damage(hit)
-        if spell is None or damage is None:
-            continue
-        key = (spell, dtype)
-        if key not in groups:
-            group_order.append(key)
-            groups[key] = []
-        groups[key].append(damage)
-
+def _render_damage_groups(group_order, groups):
+    """Render (spell, dtype) -> [damages] groups as 'Spell A [plus B... | N
+    hits, X each] Dtype' parts in first-seen order. Shared by the landed-hit
+    and blocked-hit rendering in _format_hits_with_outcome."""
     parts = []
     for key in group_order:
         spell, dtype = key
@@ -680,8 +651,79 @@ def _format_hits_with_outcome(hits):
                 parts.append(f"{spell} {damage_str} {dtype}")
             else:
                 parts.append(f"{spell} {damage_str}")
+    return parts
 
-    return ", ".join(parts), shield_count
+
+def _format_hits_with_outcome(hits):
+    """Render a survivor's hit list as 'Spell A [plus B... or N hits, X each]
+    Dtype' per group, with blocked hits rendered as their own '... blocked by N
+    shields' clause carrying the would-have-been magnitude (crisis parity).
+
+    Groups by (spell, dtype) across the WHOLE hit list (not just adjacent
+    runs) — necessary for spells like Annihilate that fire interleaved
+    F/L/P damage elements per cast. With pure adjacency-grouping a 14-cast
+    Annihilate on a survivor produces 42 separate entries; with
+    full grouping it collapses to three lines, one per damage type.
+
+    Damages within a group are listed in original order, so the 'plus'
+    form for varying values still preserves chronology.
+
+    Returns (damage_part, shield_part, shield_count). damage_part renders the
+    LANDED hits; shield_part renders the BLOCKED hits' would-have-been
+    post-resist magnitudes (the figure crisis speaks) under the same grouping
+    grammar; shield_count is the number of blocked hits. The caller composes the
+    'blocked by N shields' clause and the resisted/vulnerable suffixes at the
+    line level.
+
+    Killed lines use the separate _format_hits helper which keeps strict
+    adjacency-based grouping per the phrasing spec's 'Magic Missile 71
+    plus 17 Arcane' example — kill phrasing is short enough that ordered
+    plus form reads cleanly.
+    """
+    groups = {}      # (spell, dtype) -> list of damages (landed)
+    group_order = [] # first-seen ordering of keys, for stable rendering
+    shield_groups = {}      # (spell, dtype) -> list of would-have-been amounts
+    shield_group_order = []
+    shield_count = 0
+    for hit in hits:
+        if hit.get('shielded'):
+            shield_count += 1
+            spell = hit.get('spell')
+            # The blocked figure is the post-resist amount that WOULD have
+            # landed (deal_damage negates a shielded hit whole), not the dealt
+            # amount (0). Same number the crisis block line speaks.
+            amount = hit.get('damage_post_resist')
+            if spell is not None and amount is not None:
+                key = (spell, hit.get('dtype'))
+                if key not in shield_groups:
+                    shield_group_order.append(key)
+                    shield_groups[key] = []
+                shield_groups[key].append(amount)
+            continue
+        spell = hit.get('spell')
+        dtype = hit.get('dtype')
+        damage = _displayed_damage(hit)
+        if spell is None or damage is None:
+            continue
+        key = (spell, dtype)
+        if key not in groups:
+            group_order.append(key)
+            groups[key] = []
+        groups[key].append(damage)
+
+    damage_part = ", ".join(_render_damage_groups(group_order, groups))
+    shield_part = ", ".join(_render_damage_groups(shield_group_order, shield_groups))
+    return damage_part, shield_part, shield_count
+
+
+def _block_clause(shield_part, shield_count):
+    """The blocked-hits clause: 'Fire Bolt 12 Fire blocked by 1 shield', or the
+    bare 'blocked by N shields' when the magnitude wasn't captured. Assumes
+    shield_count > 0. 'blocked' unifies with crisis, the orphan non-wizard
+    block line, and the game's own DMG_BLOCKED log."""
+    shield_word = "shield" if shield_count == 1 else "shields"
+    tail = f"blocked by {shield_count} {shield_word}"
+    return f"{shield_part} {tail}" if shield_part else tail
 
 
 def _outcome_flags(hits):
@@ -783,29 +825,29 @@ def compose_surviving_section(chain):
         target_phrase = _format_target_phrase(
             cls['target'], cls['count'], cls['members']
         )
-        damage_part, shield_count = _format_hits_with_outcome(cls['hits'])
+        damage_part, shield_part, shield_count = _format_hits_with_outcome(cls['hits'])
         any_resisted, any_vulnerable = _outcome_flags(cls['hits'])
 
         clauses = []
         if damage_part:
             clauses.append(damage_part)
-        elif shield_count > 0:
-            # Shielded-only target: pull the spell name from the first
-            # shielded hit so the line still attributes the source.
-            shielded_hit = next((h for h in cls['hits'] if h.get('shielded')), None)
-            if shielded_hit:
-                spell = shielded_hit.get('spell') or 'attack'
-                clauses.append(f"{spell} absorbed by {shield_count} shields")
-            shield_count = 0  # consumed into the damage_part slot
 
         suffixes = []
         if any_resisted:
             suffixes.append("(resisted)")
         if any_vulnerable:
             suffixes.append("(vulnerable)")
+
+        # Blocked hits now carry the would-have-been magnitude + source
+        # (shield_part). Shielded-only → the block leads as the line's clause;
+        # mixed with landed damage → it trails after the resist/vuln tags, the
+        # prior placement.
         if shield_count > 0:
-            shield_word = "shield" if shield_count == 1 else "shields"
-            suffixes.append(f"absorbed by {shield_count} {shield_word}")
+            block = _block_clause(shield_part, shield_count)
+            if damage_part:
+                suffixes.append(block)
+            else:
+                clauses.append(block)
 
         body = ", ".join(clauses + suffixes)
         if body:
@@ -1357,7 +1399,11 @@ def _classify_shield_changes(chain, event_type, exclude_superseded=False):
             classes.append({'target': target, 'amount': amount,
                             'count': 1, 'members': [target]})
         else:
-            key = (target.get('name'), amount)
+            # team in the key so a charmed enemy and an ally summon of the
+            # same name don't collapse under one prefix (_shield_target_phrase
+            # takes the prefix from the class's first member — ally-designation
+            # is mandatory).
+            key = (target.get('name'), amount, target.get('team'))
             existing = tier2_lookup.get(key)
             if existing is None:
                 cls = {'target': target, 'amount': amount,
@@ -1889,6 +1935,11 @@ _COMPOSER_KNOWN_EVENT_TYPES = frozenset({
     # Captured but not rendered by the chain digest — handled (or
     # parked) by the future orphan-window composer.
     'equipment_initialized',
+    # Shield-change capture (R3). Rendered by the Side section (wizard gain),
+    # the mass shield sections (ally gain / enemy strip), the Surviving
+    # section's block clause, and orphan — all handled, so they must not trip
+    # the unmodeled-telemetry noise.
+    'shield_gained', 'shield_stripped', 'shield_blocked',
 })
 
 

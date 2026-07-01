@@ -1281,7 +1281,8 @@ def test_compose_surviving_section_vulnerable_suffix():
 
 
 def test_compose_surviving_section_shielded_only():
-    """All hits absorbed by shields — line shows 'Spell absorbed by N shields.'"""
+    """All hits blocked — line shows 'Spell X Dtype blocked by N shields.' with
+    the would-have-been magnitude (crisis parity)."""
     target = _target_snap(1, name="Boggart", x=25, y=16, cur_hp=6, max_hp=6)
     chain = [
         _player_cast(1, spell_name="Fireball"),
@@ -1289,7 +1290,7 @@ def test_compose_surviving_section_shielded_only():
                     dmg_pre=9, dmg_post=9),
         _shield_removed(3, 1, target),
     ]
-    expected = "1 surviving: Boggart (25,16): Fireball absorbed by 1 shields."
+    expected = "1 surviving: Boggart (25,16): Fireball 9 Fire blocked by 1 shield."
     assert compose_surviving_section(chain) == expected
 
 
@@ -1309,9 +1310,51 @@ def test_compose_surviving_section_mix_damage_and_shield():
     ]
     expected = (
         "1 surviving: Lich (22,20): "
-        "Magic Missile 12 Arcane, absorbed by 1 shield."
+        "Magic Missile 12 Arcane, Cracklevoid 5 Lightning blocked by 1 shield."
     )
     assert compose_surviving_section(chain) == expected
+
+
+def test_compose_surviving_section_uniform_blocks_collapse():
+    """Repeated identical blocked hits collapse to 'Spell N hits, X Dtype each
+    blocked by N shields' — same grouping grammar as landed hits."""
+    target = _target_snap(1, name="Ogre", x=8, y=8, cur_hp=20, max_hp=20,
+                          tier="boss")
+    chain = [
+        _player_cast(1, spell_name="Fire Bolt"),
+        _pre_damage(2, 1, target, spell="Fire Bolt", dtype="Fire",
+                    dmg_pre=12, dmg_post=12),
+        _shield_removed(3, 1, target),
+        _pre_damage(4, 1, target, spell="Fire Bolt", dtype="Fire",
+                    dmg_pre=12, dmg_post=12),
+        _shield_removed(5, 1, target),
+    ]
+    expected = (
+        "1 surviving: Ogre (8,8): "
+        "Fire Bolt 2 hits, 12 Fire each blocked by 2 shields."
+    )
+    assert compose_surviving_section(chain) == expected
+
+
+def test_compose_surviving_section_block_magnitude_splits_signature():
+    """Two same-name minions that blocked DIFFERENT would-have-been magnitudes
+    must NOT merge — now that the blocked figure is spoken, a single arbitrary
+    number on a merged line would misreport one of them."""
+    t1 = _target_snap(1, name="Goblin", x=5, y=5, cur_hp=7, max_hp=7)
+    t2 = _target_snap(2, name="Goblin", x=6, y=6, cur_hp=7, max_hp=7)
+    chain = [
+        _player_cast(1, spell_name="Fire Bolt"),
+        _pre_damage(2, 1, t1, spell="Fire Bolt", dtype="Fire",
+                    dmg_pre=9, dmg_post=9),
+        _shield_removed(3, 1, t1),
+        _pre_damage(4, 1, t2, spell="Fire Bolt", dtype="Fire",
+                    dmg_pre=4, dmg_post=4),
+        _shield_removed(5, 1, t2),
+    ]
+    out = compose_surviving_section(chain)
+    assert out.startswith("2 surviving:")
+    assert "Fire Bolt 9 Fire blocked by 1 shield" in out
+    assert "Fire Bolt 4 Fire blocked by 1 shield" in out
 
 
 def test_compose_surviving_section_groups_minions_by_signature_and_hp():
@@ -2660,6 +2703,17 @@ def test_shields_granted_subdivides_by_unit_type():
     out = compose_shields_granted_section(chain)
     assert '2 Ally Wolves' in out and 'gained 3 shields each' in out
     assert 'Ally Spider' in out and 'gained 2 shields' in out
+
+
+def test_shields_granted_same_name_ally_enemy_split_by_team():
+    # A charmed enemy 'Wolf' (ally) and a hostile 'Wolf' gaining the same
+    # amount must not collapse under one prefix — ally-designation is mandatory.
+    chain = [_wiz_cast(),
+             _sg(_u('Wolf', team=0, pid=1, x=3, y=4)),
+             _sg(_u('Wolf', team=1, pid=2, x=4, y=4))]
+    out = compose_shields_granted_section(chain)
+    assert 'Ally Wolf (3,4) gained 3 shields' in out
+    assert 'Wolf (4,4) gained 3 shields' in out
 
 
 def test_shields_granted_empty_when_none():

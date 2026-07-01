@@ -21,6 +21,7 @@ from orphan import (
     _render_action_section,
     _render_collapsed_action,
     _render_shield_changes,
+    _render_shield_blocks,
     _render_status_ticks,
     _team_prefix,
     _OrphanProducer,
@@ -1514,19 +1515,44 @@ def _sgain(target, amount=3, marks=None):
             'marks': marks or []}
 
 
-def _sstrip(target, removed=2, marks=None):
-    return {'event_type': 'shield_stripped',
-            'payload': {'target': target, 'amount_removed': removed},
+def _sstrip(target, removed=2, marks=None, shields_after=None):
+    payload = {'target': target, 'amount_removed': removed}
+    if shields_after is not None:
+        payload['shields_after'] = shields_after
+    return {'event_type': 'shield_stripped', 'payload': payload,
             'marks': marks or []}
 
 
-def _texts(records, wizard_team=0, show_coords=True):
-    items, _claimed = _render_shield_changes(records, wizard_team, show_coords)
+def _sblock(target, amount=12, dtype='Fire', source='Fire Bolt',
+            remaining=2, marks=None):
+    return {'event_type': 'shield_blocked',
+            'payload': {'target': target, 'blocked_amount': amount,
+                        'damage_type': dtype, 'source_name': source,
+                        'shields_remaining': remaining},
+            'marks': marks or []}
+
+
+def _texts(records, wizard_team=0, show_coords=True, **flags):
+    items, _claimed = _render_shield_changes(
+        records, wizard_team, show_coords, **flags)
+    return [it.get('text') for it in items]
+
+
+def _block_texts(records, wizard_team=0, show_coords=True, **flags):
+    items, _claimed = _render_shield_blocks(
+        records, wizard_team, show_coords, **flags)
     return [it.get('text') for it in items]
 
 
 def test_orphan_enemy_gain_single():
-    assert _texts([_sgain(_su('Ogre', pid=1))]) == ["Ogre (3,4) gained 3 shields."]
+    # enemy_shield_totals defaults True → resulting count rides the line.
+    assert _texts([_sgain(_su('Ogre', pid=1))]) == \
+        ["Ogre (3,4) gained 3 shields, 3 total."]
+
+
+def test_orphan_enemy_gain_no_total_when_off():
+    assert _texts([_sgain(_su('Ogre', pid=1))], enemy_shield_totals=False) == \
+        ["Ogre (3,4) gained 3 shields."]
 
 
 def test_orphan_enemy_gain_collapses_each():
@@ -1534,12 +1560,32 @@ def test_orphan_enemy_gain_collapses_each():
             _sgain(_su('Ogre', pid=2, x=4, y=3)),
             _sgain(_su('Ogre', pid=3, x=5, y=3))]
     assert _texts(recs) == [
-        "3 Ogres at (3,3), (4,3), (5,3) gained 3 shields each."]
+        "3 Ogres at (3,3), (4,3), (5,3) gained 3 shields, 3 total each."]
 
 
-def test_orphan_gain_ally_prefixed():
+def test_orphan_gain_ally_prefixed_default_no_total():
+    # ally_shield_totals defaults False → lean ally line.
     assert _texts([_sgain(_su('Wolf', team=0, pid=1), amount=2)]) == \
         ["Ally Wolf (3,4) gained 2 shields."]
+
+
+def test_orphan_gain_ally_total_when_on():
+    assert _texts([_sgain(_su('Wolf', team=0, pid=1), amount=2)],
+                  ally_shield_totals=True) == \
+        ["Ally Wolf (3,4) gained 2 shields, 2 total."]
+
+
+def test_orphan_gain_total_splits_collapse():
+    # Two Ogres gaining the same amount but ending at different totals must not
+    # merge once the total is spoken.
+    a = _su('Ogre', pid=1, x=3, y=3)
+    b = _su('Ogre', pid=2, x=4, y=3)
+    recs = [_sgain(a, amount=2), {'event_type': 'shield_gained',
+            'payload': {'target': b, 'amount': 2, 'shields_after': 5},
+            'marks': []}]
+    out = _texts(recs)
+    assert "Ogre (3,3) gained 2 shields, 2 total." in out
+    assert "Ogre (4,3) gained 2 shields, 5 total." in out
 
 
 def test_orphan_strip_single_and_collapse():
@@ -1567,4 +1613,80 @@ def test_orphan_skips_wizard_target():
     wiz = {'id': 100, 'name': 'Wizard', 'team': 0, 'tier': 'wizard',
            'is_player_controlled': True, 'x': 10, 'y': 10}
     items, claimed = _render_shield_changes([_sgain(wiz)], 0, True)
+    assert items == [] and claimed == []
+
+
+def test_orphan_gain_same_name_ally_enemy_split_by_team():
+    # A Dominated 'Ogre' (ally) and a hostile 'Ogre' that would otherwise share
+    # a signature (both totals hidden) must NOT merge under one prefix — the
+    # ally-designation rule is mandatory.
+    ally = _su('Ogre', team=0, pid=1, x=3, y=3)   # wizard_team=0 → ally
+    enemy = _su('Ogre', team=1, pid=2, x=4, y=3)  # enemy
+    out = _texts([_sgain(ally, amount=2), _sgain(enemy, amount=2)],
+                 enemy_shield_totals=False, ally_shield_totals=False)
+    assert "Ally Ogre (3,3) gained 2 shields." in out
+    assert "Ogre (4,3) gained 2 shields." in out
+    assert len(out) == 2
+
+
+def test_orphan_strip_total_when_on():
+    # shields_after > 0 → ', N left' when the team's config is on.
+    assert _texts([_sstrip(_su('Goblin', pid=1), shields_after=1)]) == \
+        ["Goblin (3,4) shields stripped, 1 left."]
+    # Fully stripped → no '0 left' noise; the bare verb says it.
+    assert _texts([_sstrip(_su('Goblin', pid=1), shields_after=0)]) == \
+        ["Goblin (3,4) shields stripped."]
+
+
+# ---- Shield blocks (R3): non-wizard block voice (was entirely silent) ----
+
+
+def test_orphan_block_single_with_total():
+    # enemy default on → magnitude/type/source + remaining count.
+    assert _block_texts([_sblock(_su('Ogre', pid=1))]) == \
+        ["Ogre (3,4) blocked 12 Fire from Fire Bolt, 2 shields left."]
+
+
+def test_orphan_block_ally_default_no_total():
+    # ally default off → the block still voices (it was the silent gap), minus
+    # the remaining-count tail.
+    assert _block_texts([_sblock(_su('Wolf', team=0, pid=1))]) == \
+        ["Ally Wolf (3,4) blocked 12 Fire from Fire Bolt."]
+
+
+def test_orphan_block_ally_total_when_on():
+    assert _block_texts([_sblock(_su('Wolf', team=0, pid=1))],
+                        ally_shield_totals=True) == \
+        ["Ally Wolf (3,4) blocked 12 Fire from Fire Bolt, 2 shields left."]
+
+
+def test_orphan_block_last_shield():
+    assert _block_texts([_sblock(_su('Ogre', pid=1), remaining=0)]) == \
+        ["Ogre (3,4) blocked 12 Fire from Fire Bolt, last shield."]
+
+
+def test_orphan_block_collapses():
+    recs = [_sblock(_su('Ogre', pid=1, x=3, y=3), source='Goblin'),
+            _sblock(_su('Ogre', pid=2, x=4, y=3), source='Goblin')]
+    assert _block_texts(recs) == [
+        "2 Ogres at (3,3), (4,3) blocked 12 Fire from Goblin, "
+        "2 shields left each."]
+
+
+def test_orphan_block_same_name_ally_enemy_split_by_team():
+    ally = _su('Ogre', team=0, pid=1, x=3, y=3)
+    enemy = _su('Ogre', team=1, pid=2, x=4, y=3)
+    out = _block_texts([_sblock(ally), _sblock(enemy)],
+                       enemy_shield_totals=False, ally_shield_totals=False)
+    assert "Ally Ogre (3,3) blocked 12 Fire from Fire Bolt." in out
+    assert "Ogre (4,3) blocked 12 Fire from Fire Bolt." in out
+    assert len(out) == 2
+
+
+def test_orphan_block_skips_wizard_and_claimed():
+    wiz = {'id': 100, 'name': 'Wizard', 'team': 0, 'tier': 'wizard',
+           'is_player_controlled': True, 'x': 10, 'y': 10}
+    assert _block_texts([_sblock(wiz)]) == []
+    claimed_rec = _sblock(_su('Ogre', pid=1), marks=['digest_v1'])
+    items, claimed = _render_shield_blocks([claimed_rec], 0, True)
     assert items == [] and claimed == []

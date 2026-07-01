@@ -129,6 +129,8 @@ def fire_pipeline(tts, log_fn, cfg, wizard_unit, telemetry=None):
                 wizard_pos=wizard_pos,
                 los_grouping=getattr(cfg, 'orphan_los_grouping', 'section'),
                 spawn_coord_cap=getattr(cfg, 'spawn_coord_cap', 5),
+                enemy_shield_totals=getattr(cfg, 'enemy_shield_totals', True),
+                ally_shield_totals=getattr(cfg, 'ally_shield_totals', False),
             ),
             log_fn,
         )

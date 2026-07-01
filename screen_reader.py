@@ -194,6 +194,19 @@ _SETTINGS_SCHEMA = [
      "# of the enemy / ally / status groups. 'line' tags each out-of-sight\n"
      "# line individually.\n"
      "# Default: section"),
+    ('Composer', 'enemy_shield_totals', 'true',
+     "# Speak an enemy's resulting shield count when its shields change out of\n"
+     "# combat with you (an enemy self-shields, an aura strips it, your\n"
+     "# attack is blocked): 'Ogre gained 2 shields, 5 total.' / 'Ogre blocked\n"
+     "# 12 Fire from Fire Bolt, 2 shields left.' Knowing how many shields stand\n"
+     "# between you and an enemy is how-many-hits-to-break information a sighted\n"
+     "# player reads off the shield pips.\n"
+     "# Default: true"),
+    ('Composer', 'ally_shield_totals', 'false',
+     "# The same resulting-count tail for ALLY units (summons, charmed foes).\n"
+     "# Off by default — useful if you micro your allies' defensive buffer,\n"
+     "# noise if you don't. Independent of enemy_shield_totals.\n"
+     "# Default: false"),
 ]
 
 
@@ -291,6 +304,8 @@ class _Cfg:
     orphan_los_grouping = _settings.get(
         'Composer', 'orphan_los_grouping', fallback='section'
     ).strip().lower()
+    enemy_shield_totals = _settings.getboolean('Composer', 'enemy_shield_totals', fallback=True)
+    ally_shield_totals = _settings.getboolean('Composer', 'ally_shield_totals', fallback=False)
 
 cfg = _Cfg()
 if cfg.orphan_los_grouping not in ('section', 'block', 'line'):
@@ -309,6 +324,8 @@ log(f"[Settings] dot_renotify_enabled = {cfg.dot_renotify_enabled}")
 log(f"[Settings] movement_verbose = {cfg.movement_verbose}")
 log(f"[Settings] spawn_coord_cap = {cfg.spawn_coord_cap}")
 log(f"[Settings] orphan_los_grouping = {cfg.orphan_los_grouping}")
+log(f"[Settings] enemy_shield_totals = {cfg.enemy_shield_totals}")
+log(f"[Settings] ally_shield_totals = {cfg.ally_shield_totals}")
 
 
 def _legacy_combat_off():
