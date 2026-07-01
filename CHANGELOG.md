@@ -3,9 +3,10 @@
 All notable changes to **Words of Power II** are listed here, newest first. This is
 an early work-in-progress RW3 port — expect frequent changes.
 
-## 2026-06-29 — 0.2.6
+## 2026-06-30 — 0.2.6
 
 ### Fixed
+- Channeling, rituals, and other manual-only cast behavior work again with the mod loaded.
 - How to Play now always opens at the first page instead of resuming the last page
   viewed — a native open could otherwise land on the appended Words of Power section.
 

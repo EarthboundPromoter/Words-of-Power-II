@@ -24,8 +24,11 @@ import json
 import math
 import os
 import time
+from collections import deque
 
 import Level
+
+_UNSET = object()
 
 
 class _Journal:
@@ -41,10 +44,43 @@ class _Journal:
         # ignores refresh's shields=0 reset (a level-transition/respawn reset, not
         # a combat strip). See patched_unit_refresh / patched_setattr.
         self._suppress_watched_capture = False
+        # R3 cause-graph. cast_begin roots are anchored at execute_cast (the true
+        # per-cast chokepoint) so every cast — manual, deferred, internal, inline —
+        # gets exactly one root. A cast's triggering cause is computed at
+        # act_cast/defer_cast APPEND time (while it is still live) and held in
+        # _pending_cause, a FIFO mirroring Level.pending_casts, then popped at
+        # execute_cast. _pending_cast_begin hands the freshly-made cast_begin to the
+        # CastContext subclass, which carries it through resolution via the engine's
+        # own current_cast_context. _in_execute_cast marks execute_cast's own
+        # queue_spell so it is NOT generator-wrapped (wrapping desyncs cast_contexts
+        # and breaks is_manual_cast — docs/IS_MANUAL_CAST_DESYNC.md). _level is the
+        # active Level so parenting can read current_cast_context off it.
+        self._pending_cause = deque()
+        self._pending_cast_begin = None
+        # One-shot: armed when a QUEUED cast's CastContext is created (after
+        # pay-costs, before the cast queues its own gen at Level.py:3133) and
+        # consumed by that gen's queue_spell, so ONLY execute_cast's own gen skips
+        # the cause-wrap. Content gens queued by reaction handlers during the SAME
+        # execute_cast — e.g. an EventOnSpellCast handler (raised at Level.py:3140,
+        # inside the call) that queue_spells a copy/free cast — are still wrapped, or
+        # they orphan (the adversarial-gate finding). _pending_queue carries the
+        # cast's `queue` flag to the CastContext so the token arms only when an own
+        # gen will actually be queued (queue=False casts have none).
+        self._skip_next_queue_wrap = False
+        self._pending_queue = False
+        self._level = None
 
     def reset(self, level_id):
         self.records = []
         self.cause_stack = []
+        self._pending_cause.clear()
+        self._pending_cast_begin = None
+        self._skip_next_queue_wrap = False
+        self._pending_queue = False
+        # Drop the level ref on transition: a new floor's records must not read a
+        # departed level's current_cast_context. Not live-reachable today (no
+        # cross-level records fire during a live cast), but cheap insurance.
+        self._level = None
         self.level_id = level_id
         if self._fp:
             self._emit({"__meta__": "level_reset", "level_id": level_id, "seq": self.sequence})
@@ -71,15 +107,34 @@ class _Journal:
         if self.cause_stack:
             self.cause_stack.pop()
 
-    def record(self, event_type, payload):
+    def _current_parent_seq(self):
+        # Parent for a new record = the innermost live cause. cause_stack wins when
+        # non-empty (nested events, the synthesized buff/cloud/channel roots, and
+        # wrapped direct-queue gens). Otherwise fall back to the running cast's
+        # cast_begin via the engine's own current_cast_context — this is how an
+        # execute_cast gen's effects (which R3 no longer generator-wraps) reach
+        # their root during deferred resolution.
+        if self.cause_stack:
+            return self.cause_stack[-1]["sequence"]
+        lvl = self._level
+        if lvl is not None:
+            ctx = getattr(lvl, "current_cast_context", None)
+            if ctx is not None:
+                cb = getattr(ctx, "_cast_begin", None)
+                if cb is not None:
+                    return cb["sequence"]
+        return None
+
+    def record(self, event_type, payload, parent_seq=_UNSET):
         self.sequence += 1
-        parent = self.cause_stack[-1]["sequence"] if self.cause_stack else None
+        if parent_seq is _UNSET:
+            parent_seq = self._current_parent_seq()
         rec = {
             "sequence": self.sequence,
             "action_chain_id": self.action_chain_id,
             "level_id": self.level_id,
             "event_type": event_type,
-            "parent": parent,
+            "parent": parent_seq,
             "timestamp": time.time(),
             "payload": payload,
             "marks": [],
@@ -92,6 +147,14 @@ class _Journal:
     def begin_chain(self, payload):
         self.action_chain_id += 1
         return self.record("cast_begin", payload)
+
+    def begin_chain_with_parent(self, payload, parent_rec):
+        # Like begin_chain, but the parent is computed at cast-REQUEST time
+        # (act_cast/defer_cast, via the _pending_cause FIFO), not at drain time when
+        # the triggering cause is gone. This is the deferred-cast root fix.
+        self.action_chain_id += 1
+        parent_seq = parent_rec["sequence"] if parent_rec else None
+        return self.record("cast_begin", payload, parent_seq)
 
     def _emit(self, obj):
         try:
@@ -801,6 +864,23 @@ def _wrap_with_cause(inner_gen, cause_record):
         return
 
 
+def _active_cause(level):
+    """The record a new cast's cast_begin should hang under, evaluated at
+    act_cast/defer_cast APPEND time (while the triggering cause is still live).
+
+    cause_stack wins when non-empty — an in-keypress proc parents to the
+    triggering spell/event; a buff- or cloud-tick cast parents to that tick's
+    synthesized root. Otherwise the running cast's cast_begin (via the engine's
+    current_cast_context) — an internal sub-cast nests under its parent cast.
+    Neither → None → a manual-keypress (or truly orphan) root."""
+    if journal.cause_stack:
+        return journal.cause_stack[-1]
+    ctx = getattr(level, "current_cast_context", None)
+    if ctx is not None:
+        return getattr(ctx, "_cast_begin", None)
+    return None
+
+
 def install_hooks():
     """Monkeypatch Level.act_cast, Level.queue_spell, EventHandler.raise_event,
     and ChannelBuff.on_advance to populate the journal. Idempotent — safe to
@@ -817,6 +897,10 @@ def install_hooks():
         return
 
     original_act_cast = Level.Level.act_cast
+    original_defer_cast = Level.Level.defer_cast
+    original_execute_cast = Level.Level.execute_cast
+    original_process_pending_casts = Level.Level.process_pending_casts
+    original_cast_context = Level.CastContext
     original_queue_spell = Level.Level.queue_spell
     original_raise_event = Level.EventHandler.raise_event
     original_channel_advance = Level.ChannelBuff.on_advance
@@ -831,37 +915,127 @@ def install_hooks():
     original_unit_refresh = Level.Unit.refresh
     original_deal_damage = Level.Level.deal_damage
 
+    class _TrackedCastContext(original_cast_context):
+        # A mutable subclass of the engine's immutable CastContext namedtuple.
+        # namedtuple stores its fields via __new__/__slots__; a subclass that does
+        # NOT declare __slots__ gains a __dict__, so we can attach the cast's
+        # cast_begin record without disturbing field access / unpacking / isinstance.
+        # execute_cast (Level.py:3129) builds every context, and the engine threads
+        # it through resolution as current_cast_context (advance_spells:3321,
+        # run_with_cast_context:4210) — so _cast_begin rides along to every effect
+        # with no generator wrapping. Save-safe: __getstate__ nulls cast_contexts /
+        # current_cast_context (Level.py:2927-2928), so no instance is ever pickled.
+        def __init__(self, *args, **kwargs):
+            self._cast_begin = journal._pending_cast_begin
+            # Context creation (Level.py:3129) sits AFTER pay_costs and BEFORE the
+            # cast queues its own gen (3133) — the exact point to arm the one-shot
+            # that lets ONLY that gen skip the wrap. Gate on _pending_queue so a
+            # queue=False cast (no own gen) doesn't arm and accidentally swallow the
+            # wrap of a later content gen.
+            if journal._pending_queue:
+                journal._skip_next_queue_wrap = True
+
     def patched_act_cast(self, unit, spell, x, y, pay_costs=True, queue=True, **cast_kwargs):
-        # RW3: act_cast replaced the explicit is_echo param with **cast_kwargs and
-        # forwards them straight into spell.cast() — so we must NOT inject is_echo
-        # (spells don't accept it). Read it from cast_kwargs for the journal and
-        # forward cast_kwargs untouched.
-        is_echo = cast_kwargs.get('is_echo', False)
-        # cast_begin fires BEFORE original_act_cast runs, so the spell
-        # snapshot here captures pre-cost charges. EventOnSpellCast
-        # (raised inside act_cast after queueing) captures post-cost.
-        # pay_costs=False indicates a passive / proc / auto-cast — used by
-        # consumers (e.g., the digest) to distinguish real player keypresses
-        # from passive end-of-turn auto-fires (Explosive Spore Manual,
-        # similar amulets) and from internal recursive recasts.
-        cast_record = journal.begin_chain({
+        # R3: act_cast is the ENQUEUE boundary (Level.py:3074), not the per-cast one
+        # — it appends to pending_casts and drains the whole queue. So it no longer
+        # creates a cast_begin (execute_cast does, per-cast). It only captures the
+        # triggering cause NOW, while it is still live, into the _pending_cause FIFO
+        # that mirrors pending_casts; execute_cast pops it for the cast_begin parent.
+        journal._level = self
+        journal._pending_cause.append(_active_cause(self))
+        return original_act_cast(self, unit, spell, x, y,
+                                 pay_costs=pay_costs, queue=queue, **cast_kwargs)
+
+    def patched_defer_cast(self, unit, spell, x, y, pay_costs=True, queue=True, **cast_kwargs):
+        # Reactions schedule work here (Level.py:3081); it appends to pending_casts
+        # and the running drain picks it up LATER, after the triggering cause is off
+        # the stack. Capturing _active_cause at append time (not drain time) is
+        # exactly what fixes deferred-cast mis-rooting/orphaning.
+        journal._level = self
+        journal._pending_cause.append(_active_cause(self))
+        return original_defer_cast(self, unit, spell, x, y,
+                                   pay_costs=pay_costs, queue=queue, **cast_kwargs)
+
+    def patched_execute_cast(self, unit, spell, x, y, pay_costs=True, queue=True, cast_kwargs=None):
+        # The true per-cast chokepoint (Level.py:3110): every queued/deferred/inline
+        # cast passes through here exactly once. Create the one cast_begin, parented
+        # by the cause captured at request time (popped from _pending_cause in
+        # lockstep with process_pending_casts's popleft). Snapshot BEFORE the
+        # original runs so charges are pre-cost (matches the old act_cast timing).
+        journal._level = self
+        ck = cast_kwargs or {}
+        parent = journal._pending_cause.popleft() if journal._pending_cause else None
+        cast_begin = journal.begin_chain_with_parent({
             'caster': _snapshot_unit(unit),
             'spell': _snapshot_spell(spell),
             'target_x': x,
             'target_y': y,
-            'is_echo': bool(is_echo),
+            'is_echo': bool(ck.get('is_echo', False)),
+            # pay_costs=False marks a passive / proc / auto-cast (vs a real player
+            # keypress) — consumed downstream to split keypresses from auto-fires.
             'is_player': bool(getattr(unit, "is_player_controlled", False)),
             'pay_costs': bool(pay_costs),
-        })
-        journal.push(cast_record)
+        }, parent)
+        # Hand the cast_begin to the CastContext (built inside the original at 3129)
+        # so it rides current_cast_context through deferred/inline resolution. Push
+        # it on cause_stack too, so the SYNCHRONOUS pay-cost events + EventOnSpellCast
+        # (raised inside the original at 3140) parent to it. _pending_queue lets the
+        # CastContext arm the one-shot that skips wrapping ONLY this cast's own gen.
+        journal._pending_cast_begin = cast_begin
+        journal._pending_queue = queue
+        journal.push(cast_begin)
         try:
-            return original_act_cast(self, unit, spell, x, y,
-                                     pay_costs=pay_costs, queue=queue, **cast_kwargs)
+            return original_execute_cast(self, unit, spell, x, y,
+                                         pay_costs=pay_costs, queue=queue, cast_kwargs=cast_kwargs)
         finally:
             journal.pop()
+            journal._pending_cast_begin = None
+            journal._pending_queue = False
+            # Bound any leak: if the own gen was never queued (e.g. an exception
+            # before 3133), don't let the armed token skip an unrelated later wrap.
+            journal._skip_next_queue_wrap = False
+
+    def patched_process_pending_casts(self):
+        # Reconcile the FIFO after the OUTER drain. Normally both queues drain to
+        # empty in lockstep; the DEFERRED_CAST_CAP clear (Level.py:3106) empties
+        # pending_casts while leaving its un-popped causes behind, so we drop those.
+        # But if an exception aborts the drain mid-way, the engine's finally
+        # (Level.py:3108) leaves un-drained tuples in pending_casts — and those stay
+        # PAIRED with their _pending_cause entries (both popleft in lockstep), so
+        # clearing then would let the leftover steal the next cast's cause on the
+        # next drain (adversarial-gate finding). Gate on pending_casts being empty:
+        # clear only when the engine truly drained (or cap-cleared) it; otherwise
+        # leave the aligned remainder. Nested calls (Level.py:3088 guard) must not
+        # touch the FIFO.
+        was_outer = not self.processing_pending_casts
+        try:
+            return original_process_pending_casts(self)
+        finally:
+            if was_outer and not self.pending_casts:
+                journal._pending_cause.clear()
 
     def patched_queue_spell(self, gen):
+        journal._level = self
+        # execute_cast's OWN gen carries its cause via the CastContext
+        # (current_cast_context); wrapping it would desync cast_contexts from
+        # active_spells and break is_manual_cast (docs/IS_MANUAL_CAST_DESYNC.md). The
+        # one-shot skips EXACTLY that one gen. Every OTHER caller is wrapped —
+        # channels, the ~150 content sites, AND reaction handlers that queue_spell
+        # during this same execute_cast's EventOnSpellCast/pay-cost raise (a window
+        # the old flag wrongly swallowed, orphaning e.g. AlchemistMulticastBuff's
+        # free re-cast) — because none of them populate cast_contexts, so cause_stack
+        # is their only carrier.
+        if journal._skip_next_queue_wrap:
+            journal._skip_next_queue_wrap = False
+            return original_queue_spell(self, gen)
         cause = journal.cause_stack[-1] if journal.cause_stack else None
+        if cause is None:
+            # A direct queue from inside a cast's own gen body: no event on the
+            # stack, but current_cast_context holds the running cast — hang the
+            # queued effect under that cast's cast_begin.
+            ctx = getattr(self, "current_cast_context", None)
+            if ctx is not None:
+                cause = getattr(ctx, "_cast_begin", None)
         if cause is not None:
             gen = _wrap_with_cause(gen, cause)
         return original_queue_spell(self, gen)
@@ -1202,7 +1376,11 @@ def install_hooks():
             pass
         return result
 
+    Level.CastContext = _TrackedCastContext
     Level.Level.act_cast = patched_act_cast
+    Level.Level.defer_cast = patched_defer_cast
+    Level.Level.execute_cast = patched_execute_cast
+    Level.Level.process_pending_casts = patched_process_pending_casts
     Level.Level.queue_spell = patched_queue_spell
     Level.EventHandler.raise_event = patched_raise_event
     Level.ChannelBuff.on_advance = patched_channel_advance
