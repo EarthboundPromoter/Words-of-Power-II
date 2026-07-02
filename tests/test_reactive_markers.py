@@ -586,6 +586,127 @@ def test_drain_charges_write_then_flash_still_attributes():
     assert charges[-1]['parent'] == ms[0]['sequence']
 
 
+# ---- Step 4: flash + request taps ----
+
+class _FlashOnlyEq(Level.Equipment):
+    """A flash-only proc: the sighted player sees the icon flash even though
+    no data effect follows. The marker (via='flash') IS that render's
+    capture (capture ⊇ render)."""
+    def on_init(self):
+        self.name = "Flash Only Test Trinket"
+        self.owner_triggers[Level.EventOnPass] = self.on_pass
+
+    def on_pass(self, evt):
+        self.do_ui_flash()
+
+
+class _MaskShapeEq(Level.Equipment):
+    """The MaskOfNihilo residual shape (Equipment.py:7565-68): resists
+    writes BEFORE the only tap (flash) — the deltas flush to the event, the
+    marker stands adjacent."""
+    def on_init(self):
+        self.name = "Mask Shape Test Trinket"
+        self.owner_triggers[Level.EventOnPass] = self.on_pass
+
+    def on_pass(self, evt):
+        self.owner.resists[Level.Tags.Fire] += 10
+        self.do_ui_flash()
+
+
+class _QueueingTB(Level.Buff):
+    """The PsychopompStaff shape (Equipment.py:8071-98): the reaction's
+    effect lives in a generator it queue_spells — the request tap
+    materializes the marker so the deferred work parents to it."""
+    def on_init(self):
+        self.name = "Queueing Test Buff"
+        self.buff_type = Level.BUFF_TYPE_BLESS
+        self.owner_triggers[Level.EventOnPass] = self.on_pass
+        self.target = None
+
+    def on_pass(self, evt):
+        self.owner.level.queue_spell(self.deferred())
+
+    def deferred(self):
+        self.owner.level.event_manager.raise_event(
+            Level.EventOnPass(self.target), self.target)
+        yield
+
+
+def test_flash_only_proc_materializes_marker_no_children():
+    lvl = _fresh_level()
+    ogre = _place(lvl, _unit("Ogre"), 5, 5)
+    eq = _FlashOnlyEq()
+    ogre.apply_buff(eq)
+    count_before = len(journal.records)
+
+    lvl.event_manager.raise_event(Level.EventOnPass(ogre), ogre)
+
+    ms = _markers()
+    assert len(ms) == 1
+    assert ms[0]['payload']['via'] == 'flash'
+    evt_rec = _events_of('EventOnPass')[-1]
+    assert ms[0]['parent'] == evt_rec['sequence']
+    # No children: the raise produced exactly the event record + the marker.
+    assert len(journal.records) == count_before + 2
+
+
+def test_mask_shape_pre_flash_resists_parent_to_event_marker_adjacent():
+    lvl = _fresh_level()
+    ogre = _place(lvl, _unit("Ogre"), 5, 5)
+    eq = _MaskShapeEq()
+    ogre.apply_buff(eq)
+    container_diff.sweep(lvl, site='test:baseline')
+
+    lvl.event_manager.raise_event(Level.EventOnPass(ogre), ogre)
+
+    ms = _markers()
+    assert len(ms) == 1
+    assert ms[0]['payload']['via'] == 'flash'
+    evt_rec = _events_of('EventOnPass')[-1]
+    resists = [r for r in journal.records
+               if r['event_type'] == 'resists_change']
+    assert resists
+    # AS DESIGNED: the pre-tap write flushed OUTWARD to the triggering
+    # event (never the live cast); the marker stands adjacent.
+    assert resists[-1]['parent'] == evt_rec['sequence']
+    assert ms[0]['parent'] == evt_rec['sequence']
+
+
+def test_reaction_queued_cast_parents_to_marker():
+    lvl = _fresh_level()
+    ogre = _place(lvl, _unit("Ogre"), 5, 5)
+    gob = _place(lvl, _unit("Goblin"), 6, 5)
+    tb = _QueueingTB()
+    ogre.apply_buff(tb)
+    tb.target = gob
+
+    lvl.event_manager.raise_event(Level.EventOnPass(ogre), ogre)
+
+    # The queue request materialized the marker even though nothing else
+    # in the handler recorded.
+    ms = _markers()
+    assert len(ms) == 1
+    assert ms[0]['payload']['via'] == 'request'
+
+    # Pump the queued generator: its deferred effect must parent under the
+    # marker (the request-time cause capture saw it).
+    lvl.advance_spells()
+    inner = _events_of('EventOnPass')[-1]
+    assert inner is not _events_of('EventOnPass')[0]
+    assert _has_ancestor(inner, ms[0]['sequence'])
+
+
+def _has_ancestor(rec, ancestor_seq):
+    by_seq = {r["sequence"]: r for r in journal.records}
+    seq = rec["parent"]
+    while seq is not None:
+        if seq == ancestor_seq:
+            return True
+        parent = by_seq.get(seq)
+        seq = parent["parent"] if parent else None
+    return False
+
+
 # ---- Install shape ----
 
 def test_register_functions_are_patched():

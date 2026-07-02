@@ -150,28 +150,51 @@ def _make_wrapper(handler, buff):
     return _reactive_dispatch
 
 
+def _tap(cls, name, via):
+    """Wrap one engine method as a materialization tap: materialize BEFORE
+    calling the original (so the write lands inside the marker window), pass
+    everything through untouched. Empty-stack no-op on the non-reactive 99%
+    of calls."""
+    orig = vars(cls).get(name)
+
+    def tapped(self, *args, **kwargs):
+        if _crumbs and not _materializing:
+            _materialize_crumbs(via)
+        return orig(self, *args, **kwargs)
+    tapped.__name__ = 'tapped_' + name
+    setattr(cls, name, tapped)
+
+
 def _install_write_taps(Level):
     """Taps 2-3: the engine's write chokepoints for the SILENT container
     classes (a pure charge refund or bonus adjust raises nothing and stays
     invisible until a sweep — the census-proven gap the record gate alone
-    cannot see). Materialize BEFORE calling the original, so the write lands
-    inside the marker window and the pop sweep attributes it. Empty-stack
-    no-ops on the non-reactive 99% of calls."""
-    def _tap(cls, name, via):
-        orig = vars(cls).get(name)
-
-        def tapped(self, *args, **kwargs):
-            if _crumbs and not _materializing:
-                _materialize_crumbs(via)
-            return orig(self, *args, **kwargs)
-        tapped.__name__ = 'tapped_' + name
-        setattr(cls, name, tapped)
-
+    cannot see)."""
     _tap(Level.Spell, 'refund_charges', 'charges')
     _tap(Level.Spell, 'drain_charges', 'charges')
     _tap(Level.Unit, 'adjust_spell_bonus', 'adjust')
     _tap(Level.Unit, 'adjust_global_bonus', 'adjust')
     _tap(Level.Unit, 'adjust_tag_bonus', 'adjust')
+
+
+def _install_flash_taps(Level):
+    """Tap 4: do_ui_flash — the game's own "my passive fired" render (a bare
+    flash_color write, defined on Spell AND Equipment). Doubles as
+    capture ⊇ render for flash-only procs: the marker (via='flash') IS the
+    capture of that render even when no data effect follows."""
+    _tap(Level.Spell, 'do_ui_flash', 'flash')
+    _tap(Level.Equipment, 'do_ui_flash', 'flash')
+
+
+def _request_tap():
+    """Tap 5 (installed into journal's pre-request hook): a reaction that
+    queues/defers a cast materializes first, so the request-time cause
+    capture sees the marker and the deferred cast parents to it."""
+    try:
+        if _crumbs and not _materializing:
+            _materialize_crumbs('request')
+    except Exception as e:
+        _note_failure('request_tap', e)
 
 
 def _install_record_gate():
@@ -325,6 +348,9 @@ def install(log_fn=None):
         and 'adjust_spell_bonus' in vars(Level.Unit)
         and 'adjust_global_bonus' in vars(Level.Unit)
         and 'adjust_tag_bonus' in vars(Level.Unit)
+        # The flash render channel (tap 4) — defined on BOTH classes.
+        and 'do_ui_flash' in vars(Level.Spell)
+        and 'do_ui_flash' in vars(Level.Equipment)
     )
     if not seams_ok:
         if _log_fn:
@@ -338,6 +364,8 @@ def install(log_fn=None):
     _install_register_wraps(Level)
     _install_record_gate()
     _install_write_taps(Level)
+    _install_flash_taps(Level)
+    _journal_module._pre_request_hook = _request_tap
 
     _installed = True
     if _log_fn:

@@ -30,6 +30,14 @@ import Level
 
 _UNSET = object()
 
+# Unit 3 (reactive_markers): the pre-request tap. Called at the top of the
+# three cast-request patches (act_cast / defer_cast / queue_spell) BEFORE
+# the request-time cause capture, so a reaction that queues work gets its
+# marker materialized first and the deferred cast parents to it. None until
+# reactive_markers installs; the installed hook is cheap (empty-stack
+# no-op) and exception-guarded on its own side.
+_pre_request_hook = None
+
 
 class _Journal:
     def __init__(self):
@@ -1273,6 +1281,8 @@ def install_hooks():
         # triggering cause NOW, while it is still live, into the _pending_cause FIFO
         # that mirrors pending_casts; execute_cast pops it for the cast_begin parent.
         journal._level = self
+        if _pre_request_hook is not None:
+            _pre_request_hook()
         journal._pending_cause.append(_active_cause(self))
         return original_act_cast(self, unit, spell, x, y,
                                  pay_costs=pay_costs, queue=queue, **cast_kwargs)
@@ -1283,6 +1293,8 @@ def install_hooks():
         # the stack. Capturing _active_cause at append time (not drain time) is
         # exactly what fixes deferred-cast mis-rooting/orphaning.
         journal._level = self
+        if _pre_request_hook is not None:
+            _pre_request_hook()
         journal._pending_cause.append(_active_cause(self))
         return original_defer_cast(self, unit, spell, x, y,
                                    pay_costs=pay_costs, queue=queue, **cast_kwargs)
@@ -1359,6 +1371,8 @@ def install_hooks():
         if journal._skip_next_queue_wrap:
             journal._skip_next_queue_wrap = False
             return original_queue_spell(self, gen)
+        if _pre_request_hook is not None:
+            _pre_request_hook()
         cause = journal.cause_stack[-1] if journal.cause_stack else None
         if cause is None:
             # A direct queue from inside a cast's own gen body: no event on the
