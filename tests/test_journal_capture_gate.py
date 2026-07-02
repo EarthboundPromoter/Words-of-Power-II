@@ -397,6 +397,78 @@ def test_reincarnation_respawn_off_field_dropped():
     assert heals == []
 
 
+# ---- G-M (Unit 4): EventOnAwakened typed capture, parity with unfrozen ----
+
+def _awakened_records(target_id=None):
+    out = [r for r in journal.records if r["event_type"] == "EventOnAwakened"]
+    if target_id is not None:
+        out = [r for r in out
+               if (r["payload"].get("target") or {}).get("id") == target_id]
+    return out
+
+
+def test_awakened_damage_wake_typed_record():
+    # Non-Arcane/Dark damage wakes the sleeper (SleepBuff.on_damage,
+    # CommonContent.py:850-852) -> remove_buff -> on_unapplied raises Awakened.
+    from CommonContent import SleepBuff
+    import Level as L
+    lvl = _fresh_level()
+    ogre = _place(lvl, _unit("Ogre", hp=20), 5, 5)
+    ogre.apply_buff(SleepBuff(), 5)
+    lvl.deal_damage(5, 5, 3, L.Tags.Physical, _src("Jab"))   # non-lethal wake
+    recs = _awakened_records(id(ogre))
+    assert len(recs) == 1
+    p = recs[0]["payload"]
+    assert p["target"]["name"] == "Ogre"      # typed snapshot, not the generic
+    assert p["buff_name"] == "Sleep"          # fallback's field-iteration shape
+    assert ogre.is_alive()
+
+
+def test_awakened_expiry_wake_typed_record():
+    # Natural expiry: the buff's duration runs out -> unapply -> raise.
+    from CommonContent import SleepBuff
+    lvl = _fresh_level()
+    ogre = _place(lvl, _unit("Ogre", hp=20), 5, 5)
+    ogre.apply_buff(SleepBuff(), 1)
+    for _ in range(3):                        # enough ticks to expire a 1-turn buff
+        ogre.advance_buffs()
+    recs = _awakened_records(id(ogre))
+    assert len(recs) == 1
+    assert recs[0]["payload"]["buff_name"] == "Sleep"
+
+
+def test_awakened_fires_when_sleeper_dies_without_waking():
+    # The third wake leg (gate finding): Arcane damage does NOT wake, so a
+    # lethal Arcane hit kills the sleeper; remove_obj then unapplies SleepBuff
+    # and EventOnAwakened fires AFTER the death record. Capture must record it
+    # (the composer-phase wake-line death-dedup decides not to SPEAK it).
+    from CommonContent import SleepBuff
+    import Level as L
+    lvl = _fresh_level()
+    ogre = _place(lvl, _unit("Ogre", hp=5), 5, 5)
+    ogre.apply_buff(SleepBuff(), 5)
+    lvl.deal_damage(5, 5, 10, L.Tags.Arcane, _src("Void"))   # lethal, no wake
+    recs = _awakened_records(id(ogre))
+    assert len(recs) == 1
+    deaths = [r for r in journal.records if r["event_type"] == "EventOnDeath"
+              and (r["payload"].get("target") or {}).get("id") == id(ogre)]
+    assert len(deaths) == 1
+    assert recs[0]["sequence"] > deaths[0]["sequence"], \
+        "death-leg wake must land after the death record (composer dedup order)"
+
+
+def test_awakened_not_raised_on_arcane_nonlethal_hit():
+    # Negative case: Arcane/Dark damage does not end sleep (CommonContent.py:851).
+    from CommonContent import SleepBuff
+    import Level as L
+    lvl = _fresh_level()
+    ogre = _place(lvl, _unit("Ogre", hp=20), 5, 5)
+    ogre.apply_buff(SleepBuff(), 5)
+    lvl.deal_damage(5, 5, 3, L.Tags.Arcane, _src("Void"))    # non-lethal, no wake
+    assert _awakened_records(id(ogre)) == []
+    assert ogre.is_alive()
+
+
 # ---- Invariant tripwire: deal_damage is the SOLE evented HP-change path ----
 
 def test_deal_damage_is_sole_evented_hp_path():

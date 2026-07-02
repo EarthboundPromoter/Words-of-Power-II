@@ -923,6 +923,19 @@ def _payload_unfrozen(event):
     }
 
 
+def _payload_awakened(event):
+    """EventOnAwakened(unit, buff). Status-state-exit at parity with unfrozen
+    (G-M; Sleep is a new RW3 status with no RW2 ancestor). Raised in
+    SleepBuff.on_unapplied (CommonContent.py:855) on EVERY unapply path:
+    damage-wake, natural expiry, AND removal/death (kill -> remove_obj unapplies
+    all buffs). No wake cause in the payload (unlike unfrozen's dtype) — a
+    damage-wake inherits its cause from tree position instead."""
+    return {
+        'target': _snapshot_unit(event.unit),
+        'buff_name': _name_or(event.buff),
+    }
+
+
 def _payload_spell_cast(event):
     """EventOnSpellCast(spell, caster, x, y, pay_costs). Fires AFTER
     act_cast queues the spell and AFTER charges are decremented, so
@@ -999,6 +1012,7 @@ EVENT_PAYLOAD_BUILDERS = {
     'EventOnBuffRemove': _payload_buff_remove,
     'EventOnShieldRemoved': _payload_shield_removed,
     'EventOnUnfrozen': _payload_unfrozen,
+    'EventOnAwakened': _payload_awakened,
     'EventOnSpellCast': _payload_spell_cast,
     'EventOnMoved': _payload_moved,
     'EventOnUnitAdded': _payload_unit_added,
