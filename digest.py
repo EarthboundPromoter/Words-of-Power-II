@@ -2025,6 +2025,13 @@ _COMPOSER_KNOWN_EVENT_TYPES = frozenset({
     # ground truth staged for Track B. Known-set so they don't trip unmodeled
     # telemetry when they land in a chain.
     'silent_heal', 'max_hp_change',
+    # Unit 4 capture-only kinds (G-G/G-F/G-M), staged for the composer phase:
+    # hp_loss = silent cur_hp decreases (a Word-of-Undeath cast lands one per
+    # affected unit in its own chain — without this entry every such cast would
+    # flood digest_unmodeled); xp_change = SP gains/spends; EventOnAwakened =
+    # sleep-end at parity with EventOnUnfrozen (was tripping unmodeled via the
+    # generic payload fallback even before Unit 4 — this also closes that).
+    'hp_loss', 'xp_change', 'EventOnAwakened',
 })
 
 

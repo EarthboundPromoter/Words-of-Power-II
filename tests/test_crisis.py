@@ -1254,3 +1254,42 @@ def test_b5_reblind_longer_duration_escalates():
     s2 = p.fire([fade, apply], w, _noop)
     assert "Wizard blind, 6 turns." in s2[1]
     assert "faded" not in s2[1]
+
+
+# ---- Unit 4 (D6): staged capture-only kinds excluded from unmodeled telemetry ----
+
+
+class _FakeTelemetry:
+    def __init__(self):
+        self.calls = []
+
+    def emit(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+
+
+def test_unit4_staged_kinds_do_not_trip_crisis_unmodeled():
+    # Wizard-subject hp_loss / xp_change / EventOnAwakened are capture-only,
+    # staged for the composer phase — a quiet turn carrying them must not fire
+    # wizard_records_no_output (else every HP-cost cast and SP pickup becomes
+    # routine telemetry noise).
+    prod = _CrisisProducer()
+    tel = _FakeTelemetry()
+    records = [
+        {"event_type": "hp_loss", "payload": {"target": _wizard_snap()}},
+        {"event_type": "xp_change", "payload": {"target": _wizard_snap()}},
+        {"event_type": "EventOnAwakened", "payload": {"target": _wizard_snap()}},
+    ]
+    prod._maybe_emit_unmodeled(tel, records, [])
+    assert tel.calls == []
+
+
+def test_non_staged_wizard_record_still_trips_crisis_unmodeled():
+    # The diagnostic itself is preserved for kinds crisis is expected to render.
+    prod = _CrisisProducer()
+    tel = _FakeTelemetry()
+    prod._maybe_emit_unmodeled(
+        tel,
+        [{"event_type": "silent_heal", "payload": {"target": _wizard_snap()}}],
+        [],
+    )
+    assert len(tel.calls) == 1

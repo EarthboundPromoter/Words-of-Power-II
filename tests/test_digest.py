@@ -2816,3 +2816,33 @@ def test_self_gain_not_in_granted_section():
     wiz = _u('Wizard', team=0, tier='wizard', pid=_WIZARD_ID, player=True)
     chain = [_player_cast(1, "Ironskin"), _sg(wiz)]
     assert compose_shields_granted_section(chain) == ""
+
+
+# ---- Unit 4 (D6): new capture-only kinds are known to digest telemetry ----
+
+
+def test_unit4_capture_only_kinds_known_to_digest_telemetry():
+    # hp_loss / xp_change / EventOnAwakened are capture-only (Unit 4); a chain
+    # carrying them (a Word-of-Undeath cast carries one hp_loss per affected
+    # unit) must not fire digest_unmodeled unknown_event_types.
+    import digest as digest_mod
+
+    for kind in ("hp_loss", "xp_change", "EventOnAwakened"):
+        assert kind in digest_mod._COMPOSER_KNOWN_EVENT_TYPES
+
+    class _Tel:
+        def __init__(self):
+            self.calls = []
+
+        def emit(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+
+    tel = _Tel()
+    chain = [
+        {"event_type": "cast_begin", "payload": {}},
+        {"event_type": "hp_loss", "payload": {}},
+        {"event_type": "xp_change", "payload": {}},
+        {"event_type": "EventOnAwakened", "payload": {}},
+    ]
+    digest_mod._maybe_emit_unmodeled(tel, 1, chain, ["Cast Fireball."])
+    assert tel.calls == []

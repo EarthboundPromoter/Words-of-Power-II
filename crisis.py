@@ -60,6 +60,13 @@ def _is_wizard_snap(snap):
     return bool(snap and snap.get('is_player_controlled'))
 
 
+# Unit 4 (G-G/G-F/G-M) capture-only record kinds, staged for the composer
+# phase (Track B wizard-highlight / mass-aggregation). Excluded from the
+# crisis unmodeled-telemetry scan — see _maybe_emit_unmodeled. Mirror of the
+# digest's known-set additions (digest._COMPOSER_KNOWN_EVENT_TYPES).
+_STAGED_CAPTURE_ONLY_KINDS = frozenset({'hp_loss', 'xp_change', 'EventOnAwakened'})
+
+
 def _claim(record):
     """Stamp CRISIS_MARK on a record so other producers skip it."""
     marks = record.setdefault('marks', [])
@@ -1014,10 +1021,18 @@ class _CrisisProducer:
     def _maybe_emit_unmodeled(self, telemetry, scanned_records, output):
         """Surface forensic telemetry when crisis processed records but
         produced empty output (suggests an event type the producer
-        should claim but doesn't have a render branch for)."""
+        should claim but doesn't have a render branch for).
+
+        Unit-4 capture-only kinds are excluded from the scan: wizard-subject
+        instances land on quiet turns constantly (every HP-cost cast leaves a
+        spend-superseded hp_loss; every SP pickup an xp_change), and they are
+        deliberately staged for the composer phase, not missing crisis
+        branches — counting them would make wizard_records_no_output fire as
+        routine noise instead of a diagnostic."""
         wizard_records = [
             r for r in scanned_records
-            if (
+            if r.get('event_type') not in _STAGED_CAPTURE_ONLY_KINDS
+            and (
                 _is_wizard_snap((r.get('payload') or {}).get('target'))
                 or _is_wizard_snap((r.get('payload') or {}).get('unit'))
             )
