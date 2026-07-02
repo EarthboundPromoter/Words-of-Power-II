@@ -6678,7 +6678,8 @@ if _PyGameView is not None:
                         # the turn's final span BEFORE the pipeline composes,
                         # so late deltas are in the journal the producers read.
                         _container_diff.turn_boundary(
-                            getattr(self.game, 'cur_level', None))
+                            getattr(self.game, 'cur_level', None),
+                            telemetry_mod=_telemetry)
                     except Exception as _cd_e:
                         log(f"[ContainerDiff] turn boundary failed: {_cd_e!r}")
                     try:

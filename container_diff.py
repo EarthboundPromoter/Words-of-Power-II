@@ -363,6 +363,17 @@ _installed = False
 _log_fn = None
 _failed_notes = set()      # once-per-site failure-note dedupe
 
+# The unattributed-drift alarm (plan D6) — the Root-1 analogue of the
+# oracle's unknown-template alarm. A delta with NO mechanism bracket and
+# NO causal parent means a write path escaped every boundary; recurring
+# sources are missing-boundary findings. Dev-only: flushed at the turn
+# boundary through the telemetry seam (shipped installs pass None and
+# this stays inert). Deduped per (domain, unit-name) per realm — the
+# expected sources until Units 2/3 land (pickup / equipment-trigger /
+# craft effects) must not flood the JSONL every turn.
+_drift_seen = set()
+_drift_pending = []
+
 # The suspended cast window (plan D2 boundary 4a, window-defer semantics).
 # The engine clears current_cast_context between steps of the same queued
 # generator (the per-step finally); that restore SUSPENDS the window rather
@@ -418,18 +429,26 @@ def _emit_deltas(level, bracket, detail, parent_fn):
             snap = _snapshot_unit(unit)
             for domain, changes in deltas:
                 parent = parent_fn()
+                # 'unattributed' = neither a causal parent NOR a mechanism
+                # bracket claims this delta (D6 drift). A bracket-tagged
+                # record without a tree parent still knows its mechanism
+                # ("during buff X's apply") — attributed, just rootless.
+                orphaned = parent is None and bracket is None
                 journal.record(domain_kind(domain), {
                     'unit': snap,
                     'domain': domain,
                     'changes': changes,
                     'bracket': bracket,
                     'detail': detail,
-                    'unattributed': parent is None,
+                    'unattributed': orphaned,
                 }, parent)
+                if orphaned:
+                    _note_drift(domain, snap.get('name'))
     player = getattr(level, 'player_unit', None)
     if player is not None:
         for (spell_name, before, after) in store.diff_spells(player):
             parent = parent_fn()
+            orphaned = parent is None and bracket is None
             journal.record(KIND_CHARGES, {
                 'unit': _snapshot_unit(player),
                 'spell': spell_name,
@@ -437,8 +456,10 @@ def _emit_deltas(level, bracket, detail, parent_fn):
                 'after': after,
                 'bracket': bracket,
                 'detail': detail,
-                'unattributed': parent is None,
+                'unattributed': orphaned,
             }, parent)
+            if orphaned:
+                _note_drift('charges', spell_name)
 
 
 def sweep(level, bracket=None, detail=None, site='?', parent_fn=None):
@@ -458,24 +479,45 @@ def sweep(level, bracket=None, detail=None, site='?', parent_fn=None):
         _note_failure(site, e)
 
 
+def _note_drift(domain, name):
+    key = (domain, name)
+    if key in _drift_seen:
+        return
+    _drift_seen.add(key)
+    _drift_pending.append({'domain': domain, 'unit': name})
+
+
 def reseed():
     """Level entry / post-load boundary: drop all snapshots. The first
     sweep after a reseed baselines everything silently (no flood)."""
     global _pending_ctx
     _pending_ctx = None
+    _drift_seen.clear()
+    _drift_pending.clear()
     store.reseed()
 
 
-def turn_boundary(level):
+def turn_boundary(level, telemetry_mod=None):
     """The mod turn boundary (plan D2 boundary 7, the fire_pipeline block):
     closes the turn's final span — including any still-suspended cast
     window. This is where the routine engine ticks (cool_downs sweep,
     turns_to_death decrement — both outside every bracket) get absorbed by
     their signatures, and where any unbracketed drift surfaces as honest
-    unattributed records."""
+    unattributed records. Drift alarms flush here through the telemetry
+    seam (dev-only; None/no-sentinel -> inert)."""
     global _pending_ctx
     sweep(level, site='turn_boundary')
     _pending_ctx = None
+    if _drift_pending:
+        try:
+            enabled = getattr(telemetry_mod, 'is_enabled', None)
+            if callable(enabled) and enabled():
+                for item in _drift_pending:
+                    telemetry_mod.emit('container_drift', **item)
+        except Exception as e:
+            _note_failure('drift_flush', e)
+        finally:
+            _drift_pending.clear()
 
 
 # ----------------------------------------------------------------------

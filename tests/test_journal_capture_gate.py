@@ -1650,3 +1650,84 @@ def test_buff_max_charge_compensation_attributed_to_buff_apply():
     assert len(bonus_recs) == 1
     assert bonus_recs[0]["payload"]["domain"] == 'spell_bonuses'
     assert bonus_recs[0]["payload"]["bracket"] == 'buff_apply'
+
+
+# ---- Unit 1 step 6: the unattributed-drift alarm + the quiet baseline ----
+
+class _DriftTel:
+    def __init__(self):
+        self.calls = []
+
+    def is_enabled(self):
+        return True
+
+    def emit(self, kind, **kw):
+        self.calls.append((kind, kw))
+
+
+def test_drift_alarm_emitted_once_per_domain_and_source():
+    lvl = _fresh_level()
+    ogre = _place(lvl, _unit("Ogre"), 5, 5)
+    container_diff.turn_boundary(lvl)              # baseline
+    tel = _DriftTel()
+    ogre.resists[Level.Tags.Dark] += 50            # unbracketed drift
+    container_diff.turn_boundary(lvl, telemetry_mod=tel)
+    drift = [c for c in tel.calls if c[0] == 'container_drift']
+    assert drift == [('container_drift', {'domain': 'resists', 'unit': 'Ogre'})]
+    ogre.resists[Level.Tags.Dark] += 50            # same source drifts again
+    container_diff.turn_boundary(lvl, telemetry_mod=tel)
+    drift = [c for c in tel.calls if c[0] == 'container_drift']
+    assert len(drift) == 1                          # deduped per realm
+
+
+def test_drift_alarm_inert_without_telemetry():
+    # The shipped-install shape: telemetry_mod is None — the records still
+    # land (capture is never dev-gated), the alarm is a guarded no-op.
+    lvl = _fresh_level()
+    ogre = _place(lvl, _unit("Ogre"), 5, 5)
+    container_diff.turn_boundary(lvl)
+    ogre.resists[Level.Tags.Dark] += 50
+    container_diff.turn_boundary(lvl, telemetry_mod=None)
+    recs = _container_records('resists_change', id(ogre))
+    assert len(recs) == 1
+    assert recs[0]["payload"]["unattributed"] is True
+
+
+def test_quiet_baseline_no_unattributed_records_across_normal_actions():
+    # The D6 pin: a scripted turn of ordinary bracketed activity — buff
+    # apply/remove, a tick, a queued cast, equip/unequip, routine cooldown
+    # decrement — produces ZERO unattributed container records.
+    lvl = _fresh_level()
+    wiz = _place(lvl, _unit("Wizard", player=True), 2, 2)
+    lvl.player_unit = wiz
+    ghost = _place(lvl, _unit("Ghost"), 4, 4)
+    ogre = _place(lvl, _unit("Ogre"), 6, 6)
+
+    ward = _fire_ward()
+    ogre.apply_buff(ward)                          # fold
+    ogre.remove_buff(ward)                         # unfold
+    ogre.apply_buff(_IceAuraBuff())
+    ogre.advance_buffs()                           # tick write
+    robe = _TagRobe()
+    robe.name = "Robe"
+    wiz.equip(robe)                                # tail write
+    wiz.unequip(robe)                              # tail removal
+    spell = _TargetDrainSpell(ghost)
+    spell.caster = wiz
+    spell.owner = wiz
+    lvl.execute_cast(wiz, spell, ghost.x, ghost.y, pay_costs=False, queue=True)
+    while lvl.can_advance_spells():
+        lvl.advance_spells()
+    gaze = _CdKey("Gaze")
+    ogre.cool_downs[gaze] = 3
+    container_diff.turn_boundary(lvl)              # baselines the cooldown
+    ogre.cool_downs = {gaze: 2}                    # routine engine tick
+    tel = _DriftTel()
+    container_diff.turn_boundary(lvl, telemetry_mod=tel)
+
+    stray = [r for r in _container_records()
+             if r["payload"].get("unattributed")]
+    assert stray == [], [
+        (r["event_type"], r["payload"].get("domain"),
+         r["payload"].get("changes")) for r in stray]
+    assert [c for c in tel.calls if c[0] == 'container_drift'] == []
