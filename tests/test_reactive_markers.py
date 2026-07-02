@@ -773,3 +773,39 @@ def test_register_functions_are_patched():
                  'register_entity_trigger', 'unregister_entity_trigger'):
         fn = vars(Level.EventHandler)[name]
         assert fn.__name__.startswith('patched_'), name
+
+
+def test_install_declines_on_missing_seam_and_wraps_nothing():
+    # ⟨GATE⟩ the identity form of the kill/decline story: when a seam is
+    # missing (RW2 backport / API drift), install returns False and the
+    # register functions are the EXACT objects they were before the call —
+    # not merely "no markers observed". (The settings kill switch gates the
+    # install CALL itself, screen_reader Phase 2.8 — same as Units 1/2.)
+    _fresh_level()
+    saved = Level.Spell.refund_charges
+    saved_flag = reactive_markers._installed
+    before = {n: vars(Level.EventHandler)[n]
+              for n in ('register_global_trigger', 'unregister_global_trigger',
+                        'register_entity_trigger', 'unregister_entity_trigger')}
+    try:
+        del Level.Spell.refund_charges
+        reactive_markers._installed = False
+        assert reactive_markers.install() is False
+        for n, fn in before.items():
+            assert vars(Level.EventHandler)[n] is fn, n
+    finally:
+        Level.Spell.refund_charges = saved
+        reactive_markers._installed = saved_flag
+
+
+def test_double_install_noops():
+    _fresh_level()
+    before = vars(Level.EventHandler)['register_global_trigger']
+    assert reactive_markers.install() is True
+    assert vars(Level.EventHandler)['register_global_trigger'] is before
+
+
+def test_reactive_proc_staged_in_composer_known_set():
+    # The Unit-2 gate lesson: nothing guarded known-set registration.
+    import digest
+    assert 'reactive_proc' in digest._COMPOSER_KNOWN_EVENT_TYPES

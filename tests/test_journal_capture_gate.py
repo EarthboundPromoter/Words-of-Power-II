@@ -1089,11 +1089,13 @@ def test_expect_row_kinds_are_journal_producible():
     # are what produce them. Event-class kinds must exist as game event
     # classes (recorded via type(event).__name__); synthetic kinds must
     # appear as literals in a record-producing module (journal.py, or
-    # since Units 1/2: container_diff.py, cause_markers.py). A renamed
-    # kind fails here, not silently in the field.
+    # since Units 1/2/3: container_diff.py, cause_markers.py,
+    # reactive_markers.py). A renamed kind fails here, not silently in
+    # the field.
     import CommonContent
     producer_src = ""
-    for fname in ('journal.py', 'container_diff.py', 'cause_markers.py'):
+    for fname in ('journal.py', 'container_diff.py', 'cause_markers.py',
+                  'reactive_markers.py'):
         with open(os.path.join(mod_dir, fname), encoding='utf-8') as f:
             producer_src += f.read()
     for tpl, row in log_capture.rows().items():
