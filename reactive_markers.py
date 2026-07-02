@@ -104,7 +104,8 @@ def _materialize_crumbs(via):
                 'buff_class': type(buff).__name__,
                 'recipient': (_snapshot_unit(owner_unit)
                               if owner_unit is not None else None),
-                'via': via,
+                'via': via,          # which TAP materialized it
+                'channel': entry[2],  # which registration path: trigger|redirect
             })
             journal.push(rec)
             entry[1] = rec
@@ -114,21 +115,22 @@ def _materialize_crumbs(via):
         _materializing = False
 
 
-def _make_wrapper(handler, buff):
-    """The dispatch wrapper for one (handler, owning buff) registration.
-    Always calls through; breadcrumb push/pop guarded; pops exactly its own
-    entry (a mismatch is noted, never propagated); never swallows the
-    handler's own exceptions."""
-    def _reactive_dispatch(event):
+def _make_wrapper(handler, buff, channel='trigger'):
+    """The dispatch wrapper for one (handler, owning buff) registration —
+    trigger-dict handlers AND redirect closures (channel tells them apart in
+    the payload). Always calls through; breadcrumb push/pop guarded; pops
+    exactly its own entry (a mismatch is noted, never propagated); never
+    swallows the handler's own exceptions."""
+    def _reactive_dispatch(*args, **kwargs):
         entry = None
         try:
-            entry = [buff, None]
+            entry = [buff, None, channel]
             _crumbs.append(entry)
         except Exception as e:
             _note_failure('dispatch:push', e)
             entry = None
         try:
-            return handler(event)
+            return handler(*args, **kwargs)
         finally:
             if entry is not None:
                 try:
@@ -184,6 +186,28 @@ def _install_flash_taps(Level):
     capture of that render even when no data effect follows."""
     _tap(Level.Spell, 'do_ui_flash', 'flash')
     _tap(Level.Equipment, 'do_ui_flash', 'flash')
+
+
+def _install_redirect_wrap(Level):
+    """The redirect leg (D6, owner-approved scope addition): grant_redirect
+    closures are buff-owned reactions outside the trigger dicts (dispatched
+    from deal_damage, Level.py:4023). Pre-wrap redirect_fn with the same
+    breadcrumb bracket — NO translation map needed: the engine chains OUR
+    wrapped fn into ITS closure and remove_redirect operates on that closure
+    (identity check at Level.py:1975), untouched."""
+    orig = vars(Level.Unit).get('grant_redirect')
+    buff_cls = Level.Buff
+
+    def patched_grant_redirect(self, redirect_source, redirect_fn):
+        try:
+            if isinstance(redirect_source, buff_cls) and callable(redirect_fn):
+                redirect_fn = _make_wrapper(redirect_fn, redirect_source,
+                                            channel='redirect')
+        except Exception as e:
+            _note_failure('grant_redirect', e)
+        return orig(self, redirect_source, redirect_fn)
+
+    Level.Unit.grant_redirect = patched_grant_redirect
 
 
 def _request_tap():
@@ -351,6 +375,9 @@ def install(log_fn=None):
         # The flash render channel (tap 4) — defined on BOTH classes.
         and 'do_ui_flash' in vars(Level.Spell)
         and 'do_ui_flash' in vars(Level.Equipment)
+        # The redirect leg (D6).
+        and 'grant_redirect' in vars(Level.Unit)
+        and 'remove_redirect' in vars(Level.Unit)
     )
     if not seams_ok:
         if _log_fn:
@@ -365,6 +392,7 @@ def install(log_fn=None):
     _install_record_gate()
     _install_write_taps(Level)
     _install_flash_taps(Level)
+    _install_redirect_wrap(Level)
     _journal_module._pre_request_hook = _request_tap
 
     _installed = True

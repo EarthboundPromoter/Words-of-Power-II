@@ -707,6 +707,62 @@ def _has_ancestor(rec, ancestor_seq):
     return False
 
 
+# ---- Step 5: the redirect leg ----
+
+class _RedirectTB(Level.Buff):
+    """The LordOfRot shape (Spells.py:16227-33): a buff granting a damage-
+    redirect closure that silently refunds charges when it fires."""
+    def on_init(self):
+        self.name = "Redirect Test Buff"
+        self.buff_type = Level.BUFF_TYPE_BLESS
+        self.spell = None
+
+    def on_applied(self, owner):
+        self.owner.grant_redirect(self, self.redirect)
+
+    def on_unapplied(self):
+        self.owner.remove_redirect(self)
+
+    def redirect(self, amount, damage_type, source):
+        self.spell.refund_charges(1)
+        return None     # leaves the damage untouched
+
+
+def test_redirect_closure_attributes_to_marker_and_removal_is_clean():
+    import types as T
+    lvl = _fresh_level()
+    fireball = _TestSpell('Fireball', 1)
+    wiz = _wizard(lvl, x=5, y=5, spells=[fireball])
+    tb = _RedirectTB()
+    tb.spell = fireball
+    wiz.apply_buff(tb)
+    container_diff.sweep(lvl, site='test:baseline')
+    hp_before = wiz.cur_hp
+
+    src = T.SimpleNamespace(name="Blow", owner=None)
+    lvl.deal_damage(5, 5, 5, Level.Tags.Physical, src)
+
+    ms = _markers()
+    assert len(ms) == 1
+    m = ms[0]
+    assert m['payload']['channel'] == 'redirect'
+    assert m['payload']['via'] == 'charges'
+    assert m['payload']['buff'] == "Redirect Test Buff"
+    charges = [r for r in journal.records
+               if r['event_type'] == 'charges_change']
+    assert charges and charges[-1]['parent'] == m['sequence']
+    # The redirect returned None: damage flowed unchanged.
+    assert wiz.cur_hp == hp_before - 5
+
+    # Removal goes through the ENGINE's chained-closure identity check —
+    # untouched by the wrap. No refund, no new marker on the next hit.
+    wiz.remove_buff(tb)
+    lvl.deal_damage(5, 5, 5, Level.Tags.Physical, src)
+    assert fireball.cur_charges == 2        # unchanged (one refund only)
+    assert len(_markers()) == 1
+    assert wiz.cur_hp == hp_before - 10
+
+
 # ---- Install shape ----
 
 def test_register_functions_are_patched():
