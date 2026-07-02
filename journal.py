@@ -601,11 +601,13 @@ def _payload_shield_removed(event):
 # the interceptor chokepoint + the _is_live_unit gating:
 #   'shields' — numeric delta (gain/strip)
 #   'team'    — categorical allegiance flip
-#   'cur_hp'  — silent heals (GAINS only); losses go through deal_damage
-#               (EventOnDamaged) or raise EventOnSpendHP. deal_damage's own cur_hp
-#               writes are bracketed out (_suppress_cur_hp_capture) since they are
-#               already evented — so what's captured here is exactly the silent
-#               set (Crisis Charm, Soulbound, Ruby Heart, components, undeath, ...).
+#   'cur_hp'  — silent heals (gains) AND silent hp_loss (decreases, G-G Unit 4).
+#               deal_damage's own writes are bracketed out (_suppress_cur_hp_
+#               capture) since they are already evented; an HP-spend's hp_loss is
+#               retro-marked superseded_by_spend by its EventOnSpendHP (D2). What
+#               remains is exactly the silent set: heals (Crisis Charm, Soulbound,
+#               Ruby Heart, components, undeath, ...) and losses (Word of Undeath,
+#               Death Tax, boss steal, clamp-after-drain, chronomancer timeout).
 #   'max_hp'  — any change (no max_hp event exists anywhere, so every max_hp write
 #               is silent): boosts (Ruby Heart +25, undeath, components) and drains
 #               (drain_max_hp, Necrosis, sacrifice). Capture-only interim.
@@ -843,15 +845,20 @@ def _emit_watched_net(unit, name, before):
 # (PRODUCER_TAXONOMY §2). cur_hp/max_hp are in _WATCHED_ATTRS; the interceptor
 # records their SILENT changes — those the game shows (HP bar) but never logs.
 #
-# cur_hp: only GAINS are heals. Losses flow through deal_damage (EventOnDamaged)
-# or raise EventOnSpendHP — both already captured — so a raw cur_hp DECREASE here
-# is not modeled as a heal. deal_damage's own cur_hp writes are bracketed out
-# (_suppress_cur_hp_capture), so what the interceptor sees is exactly the silent
-# heal set: Crisis Charm (Equipment.py:3195), Soulbound (CommonContent.py:1392),
-# Ruby Heart (Level.py:2808), component pickups (Components.py), undeath, and any
-# FUTURE content — no per-site hooks. (Reincarnation's restore happens off-field
-# — the unit is removed from level.units between kill and re-add — so the
-# _is_live_unit gate drops it; it is owned by the reincarnate event, not a heal.)
+# cur_hp: GAINS are heals; DECREASES are hp_loss (G-G, Unit 4). deal_damage's own
+# cur_hp writes are bracketed out (_suppress_cur_hp_capture) — already evented —
+# and an HP-spend's hp_loss is retro-marked by its EventOnSpendHP (D2 supersede),
+# so what the interceptor contributes is exactly the silent set. Heals: Crisis
+# Charm (Equipment.py:3195), Soulbound (CommonContent.py:1392), Ruby Heart
+# (Level.py:2808), component pickups, undeath. Losses: Word of Undeath
+# (Spells.py:5182), Death Tax (:5130), boss steal (FinalBosses.py:606), the
+# clamp-after-max_hp-drain family (CommonContent.py:1149, Necrosis Level.py:1682),
+# chronomancer timeout (RiftWizard3.py:10475) — and any FUTURE content, no
+# per-site hooks. (Reincarnation's restore happens off-field — removed from
+# level.units between kill and re-add — so the _is_live_unit gate drops it;
+# direct kill()'s cur_hp=0 write, Level.py:2601, is likewise off-field because
+# remove_obj at :2600 pops the unit FIRST: load-bearing ordering, see the
+# direct-kill regression test.)
 #
 # max_hp: no max_hp event exists, so EVERY max_hp write is silent. The interceptor
 # records any change (boost or drain) as 'max_hp_change'. Capture-only interim.
@@ -864,21 +871,49 @@ def _emit_watched_net(unit, name, before):
 # ----------------------------------------------------------------------
 
 def _cur_hp_change_record(unit, before, after):
-    """Classify a cur_hp write seen by the interceptor. Only GAINS are silent
-    heals; a decrease (an HP-spend that raised EventOnSpendHP, or any non-heal
-    raw drop) is not modeled here. Returns ('silent_heal', payload) or None."""
+    """Classify a cur_hp write seen by the interceptor. GAINS are silent heals;
+    DECREASES are silent hp_loss (G-G, Unit 4) — the raw non-evented drops
+    (Word of Undeath //= 2, Death Tax, boss HP-steal, the clamp-after-max_hp-
+    drain family, chronomancer timeout). Evented losses stay owned elsewhere:
+    deal_damage's writes are bracketed out, and an HP-spend's record is
+    retro-marked superseded_by_spend by its own EventOnSpendHP (D2).
+
+    Direction branches FIRST (gate finding): the gains-side defensive max_hp
+    clamp must never rewrite a decrease's magnitude. Decrease payloads record
+    STORED TRUTH — no flooring: no shipped site stores negative cur_hp (every
+    raw site clamps/guards; deal_damage caps at cur_hp), and a floored
+    loss_amount would break the spend-supersede exact-amount match.
+
+    A write-then-clamp pair (WoU on a 1-HP unit: 1->0 then max(1,...) 0->1)
+    records BOTH writes — hp_loss then silent_heal, same parent. That is
+    per-write truth of an engine idiom (plan D5), correct capture; the
+    composer phase pairs/collapses at speech time. Do not "fix" here.
+
+    Returns (kind, payload) or None for a no-op."""
     before = before or 0
     after = after or 0
     max_hp = getattr(unit, 'max_hp', None)
-    # Defensive: if a reactive handler raw-overheals above max during an event
-    # raise (un-bracketed), the engine's paired clamp (Level.py:4128/4135) runs
-    # bracketed, so the interceptor would otherwise record the pre-clamp inflated
-    # value. Clamp to max so the recorded magnitude matches the unit's real final
-    # HP. No shipped content does this today (audit); this is forward insurance.
+    if after == before:
+        return None
+    if after < before:
+        return 'hp_loss', {
+            'target': _snapshot_unit(unit),
+            'loss_amount': before - after,
+            'cur_hp_before': before,
+            'cur_hp_after': after,
+            'max_hp_after': max_hp,
+            # Attribution deferred to the cause-walk; unknown at the write.
+            'source_name': None,
+        }
+    # Defensive, GAINS ONLY: if a reactive handler raw-overheals above max
+    # during an event raise (un-bracketed), the engine's paired clamp
+    # (Level.py:4128/4135) runs bracketed, so the interceptor would otherwise
+    # record the pre-clamp inflated value. Clamp to max so the recorded
+    # magnitude matches the unit's real final HP. Forward insurance.
     if max_hp is not None and after > max_hp:
         after = max_hp
-    if after <= before:
-        return None
+        if after <= before:
+            return None
     return 'silent_heal', _silent_heal_payload(unit, before, after, max_hp)
 
 

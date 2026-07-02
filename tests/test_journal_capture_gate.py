@@ -244,6 +244,14 @@ def _silent_heals(target_id=None):
     return out
 
 
+def _hp_losses(target_id=None):
+    out = [r for r in journal.records if r["event_type"] == "hp_loss"]
+    if target_id is not None:
+        out = [r for r in out
+               if (r["payload"].get("target") or {}).get("id") == target_id]
+    return out
+
+
 def _max_hp_changes(target_id=None):
     out = [r for r in journal.records if r["event_type"] == "max_hp_change"]
     if target_id is not None:
@@ -268,13 +276,21 @@ def test_silent_cur_hp_gain_captured_universally():
     assert p["source_name"] is None   # attribution is a Track-B cause-walk
 
 
-def test_raw_cur_hp_loss_not_a_silent_heal():
-    # A raw cur_hp DECREASE (e.g. an HP spend) is not a heal — gains only.
+def test_raw_cur_hp_loss_is_hp_loss_not_silent_heal():
+    # G-G (Unit 4): a raw cur_hp DECREASE is captured as hp_loss — and is
+    # never mis-shaped as a heal. (Pre-Unit-4 this test asserted decreases
+    # produced NOTHING; the gains/losses boundary now lives here.)
     lvl = _fresh_level()
     wiz = _unit("Wizard", hp=50, player=True)
     _place(lvl, wiz, 7, 7)
     wiz.cur_hp = 20                    # from 50 -> 20
     assert _silent_heals(id(wiz)) == []
+    recs = _hp_losses(id(wiz))
+    assert len(recs) == 1
+    p = recs[0]["payload"]
+    assert p["loss_amount"] == 30
+    assert p["cur_hp_before"] == 50 and p["cur_hp_after"] == 20
+    assert p["source_name"] is None   # attribution is the cause-walk's job
 
 
 def test_deal_damage_heal_not_double_captured():
@@ -524,6 +540,166 @@ def test_awakened_not_raised_on_arcane_nonlethal_hit():
     lvl.deal_damage(5, 5, 3, L.Tags.Arcane, _src("Void"))    # non-lethal, no wake
     assert _awakened_records(id(ogre)) == []
     assert ogre.is_alive()
+
+
+# ---- G-G (Unit 4): silent cur_hp DECREASES — the raw non-evented drops ----
+
+def test_floor_wide_halving_one_hp_loss_per_unit():
+    # Word-of-Undeath shape (Spells.py:5182-5183): `//= 2` then max(1,...) per
+    # unit. Above 1 HP the clamp write is a no-op (equal value -> no record),
+    # so each unit yields exactly one hp_loss.
+    lvl = _fresh_level()
+    a = _place(lvl, _unit("Ogre", hp=20), 3, 3)
+    b = _place(lvl, _unit("Ghoul", hp=20), 5, 5)
+    a.cur_hp = 20
+    b.cur_hp = 9
+    seq = journal.sequence
+    for u in (a, b):
+        u.cur_hp //= 2
+        u.cur_hp = max(1, u.cur_hp)
+    la = [r for r in _hp_losses(id(a)) if r["sequence"] > seq]
+    lb = [r for r in _hp_losses(id(b)) if r["sequence"] > seq]
+    assert len(la) == 1 and la[0]["payload"]["loss_amount"] == 10
+    assert len(lb) == 1 and lb[0]["payload"]["loss_amount"] == 5   # 9 -> 4
+    heals = [r for r in journal.records if r["sequence"] > seq
+             and r["event_type"] == "silent_heal"]
+    assert heals == []
+
+
+def test_write_then_clamp_pair_records_both_same_parent():
+    # D5: WoU on a 1-HP unit — 1->0 (hp_loss) then max(1,0) 0->1 (silent_heal).
+    # BOTH record, same parent: per-write truth of an engine idiom; pairing/
+    # collapse is the composer phase's job. This pins that capture never
+    # net-cancels the pair.
+    lvl = _fresh_level()
+    runt = _place(lvl, _unit("Runt", hp=20), 5, 5)
+    runt.cur_hp = 1
+    seq = journal.sequence
+    runt.cur_hp //= 2                  # 1 -> 0
+    runt.cur_hp = max(1, runt.cur_hp)  # 0 -> 1
+    losses = [r for r in _hp_losses(id(runt)) if r["sequence"] > seq]
+    heals = [r for r in _silent_heals(id(runt)) if r["sequence"] > seq]
+    assert len(losses) == 1 and losses[0]["payload"]["cur_hp_after"] == 0
+    assert len(heals) == 1 and heals[0]["payload"]["cur_hp_after"] == 1
+    assert losses[0]["parent"] == heals[0]["parent"]
+    assert runt.is_alive()             # no death at this site (gate correction)
+
+
+def test_write_to_zero_then_kill_ordering():
+    # Orb-of-Anima shape (Spells.py:16012-16014): a raw write to EXACTLY 0,
+    # then an explicit kill(). The hp_loss must precede the death record —
+    # composer mass-aggregation will assume this order.
+    lvl = _fresh_level()
+    orb = _place(lvl, _unit("Orb", hp=20), 5, 5)
+    orb.cur_hp = 3
+    seq = journal.sequence
+    orb.cur_hp -= 3                    # exactly 0, still live at the write
+    orb.kill()
+    losses = [r for r in _hp_losses(id(orb)) if r["sequence"] > seq]
+    assert len(losses) == 1
+    assert losses[0]["payload"]["cur_hp_after"] == 0
+    deaths = [r for r in journal.records if r["sequence"] > seq
+              and r["event_type"] == "EventOnDeath"
+              and (r["payload"].get("target") or {}).get("id") == id(orb)]
+    assert len(deaths) == 1
+    assert losses[0]["sequence"] < deaths[0]["sequence"]
+
+
+def test_boss_steal_shape_wizard_target():
+    # FinalBosses.py:604-606 targets the WIZARD (the D2 overlap case's silent
+    # half): stolen = cur_hp*3//10.
+    lvl = _fresh_level()
+    wiz = _place(lvl, _unit("Wizard", hp=50, player=True), 7, 7)
+    wiz.cur_hp = 5
+    seq = journal.sequence
+    wiz.cur_hp -= (wiz.cur_hp * 3) // 10          # steal 1
+    losses = [r for r in _hp_losses(id(wiz)) if r["sequence"] > seq]
+    assert len(losses) == 1
+    assert losses[0]["payload"]["loss_amount"] == 1
+
+
+def test_clamp_after_max_hp_drain_pairs_with_max_hp_change():
+    # The gate-found clamp family (CommonContent.py:1149 drain_max_hp shape):
+    # max_hp drops, then cur_hp = min(cur_hp, max_hp). The overflow above the
+    # new cap is the hp_loss; it arrives beside the max_hp_change same tick.
+    lvl = _fresh_level()
+    u = _place(lvl, _unit("Husk", hp=30), 5, 5)
+    u.cur_hp = 30
+    seq = journal.sequence
+    u.max_hp -= 10                                # 30 -> 20 (drained)
+    u.cur_hp = min(u.cur_hp, u.max_hp)            # 30 -> 20 (the overflow loss)
+    maxes = [r for r in _max_hp_changes(id(u)) if r["sequence"] > seq]
+    losses = [r for r in _hp_losses(id(u)) if r["sequence"] > seq]
+    assert len(maxes) == 1 and maxes[0]["payload"]["delta"] == -10
+    assert len(losses) == 1 and losses[0]["payload"]["loss_amount"] == 10
+    assert losses[0]["parent"] == maxes[0]["parent"]
+
+
+def test_necrosis_shape_clamp_parented_under_buff_tick():
+    # Necrosis on_advance shape (Level.py:1681-1682): the per-turn clamp fires
+    # inside buff.advance, so the hp_loss parents under the buff_tick cause.
+    lvl = _fresh_level()
+    u = _place(lvl, _unit("Rotting", hp=30), 5, 5)
+    u.cur_hp = 30
+
+    class _ClampDrain(Level.Buff):
+        def on_advance(self):
+            self.owner.max_hp -= 5
+            self.owner.cur_hp = min(self.owner.cur_hp, self.owner.max_hp)
+
+    u.apply_buff(_ClampDrain())
+    seq = journal.sequence
+    u.advance_buffs()
+    losses = [r for r in _hp_losses(id(u)) if r["sequence"] > seq]
+    assert len(losses) == 1 and losses[0]["payload"]["loss_amount"] == 5
+    ticks = [r for r in journal.records if r["sequence"] > seq
+             and r["event_type"] == "buff_tick"]
+    assert len(ticks) == 1
+    assert losses[0]["parent"] == ticks[0]["sequence"]
+
+
+def test_unbracket_handler_decrease_inside_deal_damage():
+    # Death-Tax shape (gate finding): a handler decreasing a BYSTANDER's cur_hp
+    # during an event raised inside deal_damage runs under the raise_event
+    # un-bracket -> hp_loss emitted, parented under the triggering event. The
+    # victim's own evented decrease stays bracketed out.
+    import Level as L
+    lvl = _fresh_level()
+    victim = _place(lvl, _unit("Victim", hp=20), 5, 5)
+    bystander = _place(lvl, _unit("Bystander", hp=20), 3, 3)
+    victim.cur_hp = 20
+    bystander.cur_hp = 20
+
+    def on_damaged(evt):
+        if evt.unit is victim:
+            bystander.cur_hp -= 4
+
+    lvl.event_manager.register_global_trigger(Level.EventOnDamaged, on_damaged)
+    seq = journal.sequence
+    lvl.deal_damage(5, 5, 6, L.Tags.Physical, _src("Blow"))
+    by_losses = [r for r in _hp_losses(id(bystander)) if r["sequence"] > seq]
+    assert len(by_losses) == 1
+    assert by_losses[0]["payload"]["loss_amount"] == 4
+    dmg = [r for r in journal.records if r["sequence"] > seq
+           and r["event_type"] == "EventOnDamaged"
+           and (r["payload"].get("target") or {}).get("id") == id(victim)]
+    assert len(dmg) == 1
+    assert by_losses[0]["parent"] == dmg[0]["sequence"]
+    assert [r for r in _hp_losses(id(victim)) if r["sequence"] > seq] == [], \
+        "deal_damage's own decrease must stay bracketed out"
+
+
+def test_direct_kill_writes_no_hp_loss():
+    # kill() writes cur_hp = 0 (Level.py:2601) AFTER remove_obj pops the unit
+    # (:2600) — load-bearing ordering that keeps ~60 direct-kill sites from
+    # emitting a full-remaining-HP hp_loss. Regression-pin it, don't rely on
+    # the accident silently.
+    lvl = _fresh_level()
+    goner = _place(lvl, _unit("Goner", hp=20), 5, 5)
+    goner.cur_hp = 20
+    seq = journal.sequence
+    goner.kill()
+    assert [r for r in _hp_losses(id(goner)) if r["sequence"] > seq] == []
 
 
 # ---- Invariant tripwire: deal_damage is the SOLE evented HP-change path ----
