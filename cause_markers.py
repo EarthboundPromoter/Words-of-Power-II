@@ -313,6 +313,77 @@ def _iter_component_subclasses(base):
         yield cls
 
 
+# -- The window-fold domains (D4; ledger A10/A13/C4) -------------------
+#
+# Two diff domains that live ONLY inside component_effect windows, never
+# the global container-diff store: pre-existing buff DURATIONS
+# (RunedVellum's turns_left *= 3 — the mechanism-less write) and the
+# player's COMPONENT INVENTORY counts (MirrorStone's self-copy, the
+# Awl's on-craft self-return). New/removed buffs are evented — excluded.
+# ⟨GATE⟩ "Recipient" = EXACTLY the unit passed to the hook: a window
+# effect that buffs a bystander (AstralPhylactery's random ally) is
+# never swept — the snapshot doesn't include them, on top of the new-
+# apply exclusion. Ingredient PAYMENT (pay_components) runs outside the
+# craft bracket by engine design — the +1-return diff inside the window
+# is exactly the escapee story (the craft node's ingredient list carries
+# payment semantics).
+
+def _snap_window_fold(recipient):
+    try:
+        buffs = {}
+        for b in getattr(recipient, 'buffs', ()) or ():
+            tl = getattr(b, 'turns_left', None)
+            if isinstance(tl, int):
+                buffs[id(b)] = (getattr(b, 'name', type(b).__name__), tl)
+        comps = None
+        if getattr(recipient, 'is_player_controlled', False):
+            comps = {}
+            for c in getattr(recipient, 'components', ()) or ():
+                key = type(c).__name__
+                comps[key] = comps.get(key, 0) + 1
+        return (buffs, comps)
+    except Exception:
+        return None
+
+
+def _diff_window_fold(recipient, snap, site):
+    # Runs BEFORE the marker pops — records parent to the window.
+    if snap is None:
+        return
+    try:
+        buffs_before, comps_before = snap
+        for b in getattr(recipient, 'buffs', ()) or ():
+            prev = buffs_before.get(id(b))
+            if prev is None:
+                continue                       # new in-window buff: evented
+            tl = getattr(b, 'turns_left', None)
+            if isinstance(tl, int) and tl != prev[1]:
+                journal.record('buff_duration_change', {
+                    'recipient': _snapshot_unit(recipient),
+                    'buff': prev[0],
+                    'before': prev[1],
+                    'after': tl,
+                })
+        if (comps_before is not None
+                and getattr(recipient, 'is_player_controlled', False)):
+            comps_after = {}
+            for c in getattr(recipient, 'components', ()) or ():
+                key = type(c).__name__
+                comps_after[key] = comps_after.get(key, 0) + 1
+            for key in set(comps_before) | set(comps_after):
+                before = comps_before.get(key, 0)
+                after = comps_after.get(key, 0)
+                if before != after:
+                    journal.record('component_inventory_change', {
+                        'recipient': _snapshot_unit(recipient),
+                        'component': key,
+                        'before': before,
+                        'after': after,
+                    })
+    except Exception as e:
+        _note_failure(site + ':fold', e)
+
+
 def _wrap_component_pickup(cls):
     original = vars(cls)['on_pickup']
     site = 'component_effect:%s.on_pickup' % cls.__name__
@@ -328,9 +399,12 @@ def _wrap_component_pickup(cls):
             _note_failure(site, e)
         rec = (_open_marker('component_effect', payload, level, site)
                if payload is not None else None)
+        snap = _snap_window_fold(player) if rec is not None else None
         try:
             return original(self, player, level)
         finally:
+            if rec is not None:
+                _diff_window_fold(player, snap, site)
             _close_marker(rec, site)
 
     cls.on_pickup = patched_on_pickup
@@ -353,9 +427,12 @@ def _wrap_component_craft(cls):
         rec = (_open_marker('component_effect', payload,
                             getattr(player, 'level', None), site)
                if payload is not None else None)
+        snap = _snap_window_fold(player) if rec is not None else None
         try:
             return original(self, player, equipment)
         finally:
+            if rec is not None:
+                _diff_window_fold(player, snap, site)
             _close_marker(rec, site)
 
     cls.on_craft = patched_on_craft

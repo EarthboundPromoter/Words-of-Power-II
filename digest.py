@@ -2058,6 +2058,7 @@ _COMPOSER_KNOWN_EVENT_TYPES = frozenset({
     # wizard-subject scan structurally never sees them (pinned in
     # test_crisis, game_log precedent).
     'item_pickup', 'equipment_trigger', 'craft', 'component_effect',
+    'buff_duration_change', 'component_inventory_change',
 })
 
 

@@ -2175,6 +2175,110 @@ def test_direct_on_pickup_bypass_covered_under_cast():
     assert _has_ancestor(effects[0], outer["sequence"])
 
 
+# ---- Unit 2 step 4: window-fold domains (buff durations + inventory) ----
+
+def test_runed_vellum_duration_fold():
+    # A10: turns_left *= 3 is a mechanism-less write (no event, no
+    # container domain) — snapshot-diffed inside the component window,
+    # recorded under it.
+    from Components import RunedVellum
+    lvl = _fresh_level()
+    wiz = _wiz_with_inventory(lvl)
+    bless = Level.Buff()
+    bless.name = "Blessy"
+    bless.buff_type = Level.BUFF_TYPE_BLESS
+    wiz.apply_buff(bless, 5)
+    pickup = Level.ComponentPickup(RunedVellum())
+    lvl.add_prop(pickup, 8, 8)
+    pickup.on_player_enter(wiz)
+    folds = _markers_of("buff_duration_change")
+    assert len(folds) == 1
+    p = folds[0]["payload"]
+    assert (p["buff"], p["before"], p["after"]) == ("Blessy", 5, 15)
+    effects = _markers_of("component_effect")
+    assert _has_ancestor(folds[0], effects[0]["sequence"])
+
+
+def test_mirror_stone_inventory_fold():
+    # A13: the self-copy. The picked-up stone lands in inventory BEFORE
+    # on_pickup (Level.py:2820) — the window diff shows exactly the
+    # in-window duplicate (1 -> 2).
+    from Components import MirrorStone
+    lvl = _fresh_level()
+    wiz = _wiz_with_inventory(lvl)
+    pickup = Level.ComponentPickup(MirrorStone())
+    lvl.add_prop(pickup, 8, 8)
+    pickup.on_player_enter(wiz)
+    folds = _markers_of("component_inventory_change")
+    assert len(folds) == 1
+    p = folds[0]["payload"]
+    assert (p["component"], p["before"], p["after"]) == ("MirrorStone", 1, 2)
+    effects = _markers_of("component_effect")
+    assert _has_ancestor(folds[0], effects[0]["sequence"])
+
+
+class _EnchantGear(Level.Equipment):
+    def on_init(self):
+        self.name = "Enchant Gear"
+        self.recipe = []
+        self.tags = [Level.Tags.Enchantment]
+
+
+def test_awl_return_folds_inside_craft_window():
+    # C4: the Awl's on-craft self-return (+1 inventory) diffs inside ITS
+    # component window, under the craft node. Ingredient PAYMENT
+    # (pay_components) runs outside the bracket by engine design — the
+    # in-window story is exactly the escapee (+1 return).
+    import Game as GameMod
+    from Components import EnchantersAwl
+    lvl = _fresh_level()
+    wiz = _wiz_with_inventory(lvl)
+    lvl.player_unit = wiz
+    lvl.cur_shop = None
+    g = object.__new__(GameMod.Game)
+    g.cur_level = lvl
+    g.p1 = wiz
+    g.recent_upgrades = []
+    g.shop_craft_component_ingredients = [EnchantersAwl()]
+    g.record_equipment_crafted = lambda e: None
+    g.clear_wishlist = lambda e: None
+    assert g.try_shop(_EnchantGear()) is True
+    folds = _markers_of("component_inventory_change")
+    assert len(folds) == 1
+    p = folds[0]["payload"]
+    assert (p["component"], p["before"], p["after"]) == ("EnchantersAwl", 0, 1)
+    crafts = _markers_of("craft")
+    effects = [r for r in _markers_of("component_effect")
+               if r["payload"]["hook"] == "craft"]
+    assert len(crafts) == 1 and len(effects) == 1
+    assert _has_ancestor(folds[0], effects[0]["sequence"])
+    assert _has_ancestor(effects[0], crafts[0]["sequence"])
+
+
+def test_astral_phylactery_bystander_never_swept():
+    # ⟨GATE⟩ D4 pin: the pickup's effect lands on a random ALLY
+    # (PhylacterySoulbound via on_applied->trigger) — a bystander the
+    # recipient-scoped snapshot must never sweep. The ally's records are
+    # the ordinary evented buff-apply; ZERO window-fold records name them.
+    from Components import AstralPhylactery
+    lvl = _fresh_level()
+    wiz = _wiz_with_inventory(lvl)
+    lvl.player_unit = wiz
+    ally = _place(lvl, _unit("Wolf"), 5, 5)
+    stale = Level.Buff()
+    stale.name = "Wolfward"
+    stale.buff_type = Level.BUFF_TYPE_BLESS
+    ally.apply_buff(stale, 7)
+    pickup = Level.ComponentPickup(AstralPhylactery())
+    lvl.add_prop(pickup, 8, 8)
+    pickup.on_player_enter(wiz)
+    assert any(b.name == "Soulbound" for b in ally.buffs)   # effect landed
+    for kind in ("buff_duration_change", "component_inventory_change"):
+        for r in _markers_of(kind):
+            assert r["payload"]["recipient"]["name"] != "Wolf"
+    assert not journal.cause_stack
+
+
 def test_non_equipment_purchase_gets_no_craft_marker():
     # try_shop's other branches (shop purchases, spell/upgrade buys) are
     # NOT crafts — the marker is Equipment-branch-only.
