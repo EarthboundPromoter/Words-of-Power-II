@@ -363,6 +363,15 @@ _installed = False
 _log_fn = None
 _failed_notes = set()      # once-per-site failure-note dedupe
 
+# The suspended cast window (plan D2 boundary 4a, window-defer semantics).
+# The engine clears current_cast_context between steps of the same queued
+# generator (the per-step finally); that restore SUSPENDS the window rather
+# than closing it — _pending_ctx remembers whose window is open so the next
+# boundary attributes the span correctly. Set/cleared ONLY by: a ctx switch
+# (a DIFFERENT cast arrives), an action push (a new action definitively
+# interrupts the window), the turn boundary, and reseed.
+_pending_ctx = None
+
 
 def _note_failure(site, exc):
     if site in _failed_notes:
@@ -375,7 +384,30 @@ def _note_failure(site, exc):
             pass
 
 
-def _emit_deltas(level, bracket, detail):
+def _span_parent_seq():
+    """Parent for a delta record = the cause live for the just-closed span:
+    the cause-stack top (nested actions/events) -> the SUSPENDED cast window
+    (pending) -> the LIVE cast context (mid-step spans) -> None (drift).
+    Extends journal._current_parent_seq with the pending-window rung."""
+    from journal import journal
+    if journal.cause_stack:
+        return journal.cause_stack[-1]['sequence']
+    pend = _pending_ctx
+    if pend is not None:
+        cb = getattr(pend, '_cast_begin', None)
+        if cb is not None:
+            return cb['sequence']
+    lvl = journal._level
+    if lvl is not None:
+        ctx = getattr(lvl, 'current_cast_context', None)
+        if ctx is not None:
+            cb = getattr(ctx, '_cast_begin', None)
+            if cb is not None:
+                return cb['sequence']
+    return None
+
+
+def _emit_deltas(level, bracket, detail, parent_fn):
     from journal import journal, _snapshot_unit
     units = getattr(level, 'units', None)
     if units:
@@ -385,7 +417,7 @@ def _emit_deltas(level, bracket, detail):
                 continue
             snap = _snapshot_unit(unit)
             for domain, changes in deltas:
-                parent = journal._current_parent_seq()
+                parent = parent_fn()
                 journal.record(domain_kind(domain), {
                     'unit': snap,
                     'domain': domain,
@@ -397,7 +429,7 @@ def _emit_deltas(level, bracket, detail):
     player = getattr(level, 'player_unit', None)
     if player is not None:
         for (spell_name, before, after) in store.diff_spells(player):
-            parent = journal._current_parent_seq()
+            parent = parent_fn()
             journal.record(KIND_CHARGES, {
                 'unit': _snapshot_unit(player),
                 'spell': spell_name,
@@ -409,16 +441,19 @@ def _emit_deltas(level, bracket, detail):
             }, parent)
 
 
-def sweep(level, bracket=None, detail=None, site='?'):
+def sweep(level, bracket=None, detail=None, site='?', parent_fn=None):
     """Full sweep of the level (plan D1: every snapshotted unit + the spell
     shelf, no owner-only fast path). bracket names the mechanism of the
     JUST-CLOSED span for exit sweeps ('buff_apply', 'equip', ...); entry
     sweeps pass None — their deltas belong to the enclosing span, whose
-    identity is the record's parent, not a mechanism tag."""
+    identity is the record's parent, not a mechanism tag. parent_fn
+    overrides parent resolution (the ctx-switch sweep pins the CLOSING
+    window's cast explicitly — the live context already points at the new
+    one by store-first time)."""
     if level is None:
         return
     try:
-        _emit_deltas(level, bracket, detail)
+        _emit_deltas(level, bracket, detail, parent_fn or _span_parent_seq)
     except Exception as e:
         _note_failure(site, e)
 
@@ -426,16 +461,21 @@ def sweep(level, bracket=None, detail=None, site='?'):
 def reseed():
     """Level entry / post-load boundary: drop all snapshots. The first
     sweep after a reseed baselines everything silently (no flood)."""
+    global _pending_ctx
+    _pending_ctx = None
     store.reseed()
 
 
 def turn_boundary(level):
     """The mod turn boundary (plan D2 boundary 7, the fire_pipeline block):
-    closes the turn's final span. This is where the routine engine ticks
-    (cool_downs sweep, turns_to_death decrement — both outside every
-    bracket) get absorbed by their signatures, and where any unbracketed
-    drift surfaces as honest unattributed records."""
+    closes the turn's final span — including any still-suspended cast
+    window. This is where the routine engine ticks (cool_downs sweep,
+    turns_to_death decrement — both outside every bracket) get absorbed by
+    their signatures, and where any unbracketed drift surfaces as honest
+    unattributed records."""
+    global _pending_ctx
     sweep(level, site='turn_boundary')
+    _pending_ctx = None
 
 
 # ----------------------------------------------------------------------
@@ -538,6 +578,7 @@ def install(log_fn=None):
     level_cls.remove_obj = patched_remove_obj
 
     _install_span_sweeps()
+    _install_ctx_property(level_cls)
 
     _installed = True
     if _log_fn:
@@ -546,6 +587,75 @@ def install(log_fn=None):
         except Exception:
             pass
     return True
+
+
+# ----------------------------------------------------------------------
+# Boundary 4a — the current_cast_context property (owner-ruled Option A,
+# S28). The engine assigns this attribute around every queued-generator
+# step (Level.py:3320-3323) and every inline run (4209-4213) — the engine
+# announces its own cast-window transitions. The property observes them.
+#
+# Safety invariants (plan D2 / gate-confirmed):
+#   - STORE FIRST: the setter lands the value in the instance __dict__
+#     before any mod code runs; observation is exception-guarded. A bug
+#     here can only lose a sweep, never disturb the cast flow.
+#   - SAME KEY: storage is __dict__['current_cast_context'] — the exact
+#     key Level.__getstate__ copies and nulls (Level.py:2924/2928), so
+#     pickle output is byte-identical to vanilla and no mod-named slot
+#     (which could carry live spell/unit refs) ever enters a save.
+#   - Window-defer: a restore to None SUSPENDS the window (pending); the
+#     sweep fires only when a DIFFERENT cast arrives — consecutive steps
+#     of one generator form one window; interleaved generators still
+#     close against their own casts.
+# ----------------------------------------------------------------------
+
+def _install_ctx_property(level_cls):
+    def _ctx_get(self):
+        return self.__dict__.get('current_cast_context')
+
+    def _ctx_set(self, value):
+        # STORE FIRST — zero mod code before this line (named invariant).
+        self.__dict__['current_cast_context'] = value
+        try:
+            _on_ctx_set(self, value)
+        except Exception as e:
+            _note_failure('ctx:set', e)
+
+    level_cls.current_cast_context = property(_ctx_get, _ctx_set)
+
+
+def _on_ctx_set(level, value):
+    global _pending_ctx
+    if value is None or value is _pending_ctx:
+        # None = the engine's per-step restore: SUSPEND, window stays open.
+        # Same ctx = the same generator's next step: the window continues.
+        return
+    old = _pending_ctx
+    _pending_ctx = None
+    if old is not None:
+        # A different cast arrived: close the suspended window. Parent is
+        # pinned to the CLOSING cast explicitly — the live context already
+        # points at the new cast (store-first), and the stack is empty
+        # between generator steps.
+        cb = getattr(old, '_cast_begin', None)
+        cb_seq = cb['sequence'] if cb is not None else None
+        sweep(level, bracket='cast_window', detail=_ctx_detail(old),
+              site='ctx:switch', parent_fn=lambda: cb_seq)
+    else:
+        # No suspended window (first cast of a batch): close whatever span
+        # was open, WITHOUT the live-ctx fallback (it would misattribute
+        # the pre-cast span to the cast that just arrived).
+        from journal import journal
+        stack_seq = (journal.cause_stack[-1]['sequence']
+                     if journal.cause_stack else None)
+        sweep(level, site='ctx:open', parent_fn=lambda: stack_seq)
+    _pending_ctx = value
+
+
+def _ctx_detail(ctx):
+    spell = getattr(ctx, 'spell', None)
+    return {'spell': getattr(spell, 'name', None)
+            or (type(spell).__name__ if spell is not None else None)}
 
 
 # Cause kinds whose push/pop marks an ACTION span (plan D2 boundaries
@@ -582,10 +692,15 @@ def _install_span_sweeps():
     original_pop = journal.pop
 
     def patched_push(record):
+        global _pending_ctx
         try:
             if (record is not None
                     and record.get('event_type') in _ACTION_KINDS):
+                # The sweep first (parent resolution may claim the suspended
+                # window's span), then the new action definitively interrupts
+                # any suspended cast window.
                 sweep(journal._level, site='span:push')
+                _pending_ctx = None
         except Exception as e:
             _note_failure('span:push', e)
         return original_push(record)

@@ -1419,3 +1419,133 @@ def test_turn_boundary_records_cooldown_deviation_unattributed():
     assert recs[0]["payload"]["changes"] == {'Gaze': (4, 2)}
     assert recs[0]["payload"]["bracket"] is None
     assert recs[0]["payload"]["unattributed"] is True
+
+
+# ---- Unit 1 step 4: the current_cast_context property (boundary 4a) ----
+
+def test_ctx_property_store_first_even_when_observation_throws():
+    # The named invariant: the engine's write lands BEFORE any mod code;
+    # an observer bug can only lose a sweep, never disturb the cast flow.
+    lvl = _fresh_level()
+    sentinel = object()
+    saved = container_diff._on_ctx_set
+    try:
+        def boom(level, value):
+            raise RuntimeError("observer bug")
+        container_diff._on_ctx_set = boom
+        lvl.current_cast_context = sentinel      # must not raise
+    finally:
+        container_diff._on_ctx_set = saved
+    assert lvl.__dict__['current_cast_context'] is sentinel
+    assert lvl.current_cast_context is sentinel
+    lvl.current_cast_context = None
+
+
+def test_ctx_property_getstate_same_key_and_no_mod_slot():
+    # Pickle transparency: storage shares the exact __dict__ key that
+    # __getstate__ copies and nulls (Level.py:2924/2928) — save output is
+    # shaped exactly like vanilla, and no mod-named slot (which could carry
+    # live spell/unit refs) ever enters the state dict.
+    import types as _types
+    lvl = _fresh_level()
+    lvl.current_cast_context = _types.SimpleNamespace(spell=None)
+    state = lvl.__getstate__()
+    assert state['current_cast_context'] is None
+    assert 'current_cast_context' in lvl.__dict__
+    stray = [k for k in state
+             if 'ctx' in k.lower() and k != 'current_cast_context']
+    assert stray == []
+
+
+def test_unpickled_instance_reads_none_through_property():
+    lvl2 = Level.Level.__new__(Level.Level)
+    lvl2.__dict__['current_cast_context'] = None   # what unpickling restores
+    assert lvl2.current_cast_context is None
+
+
+class _TargetDrainSpell(Level.Spell):
+    # The essence-Reincarnation shape: eventless container writes on a
+    # TARGET unit from inside a queued cast generator.
+    def __init__(self, target):
+        self._target = target
+        Level.Spell.__init__(self)
+
+    def on_init(self):
+        self.name = "Target Drain"
+        self.range = 20
+
+    def cast(self, x, y):
+        self._target.resists[Level.Tags.Dark] += 100
+        yield
+
+
+def test_two_queued_same_spell_casts_attribute_per_cast_window():
+    # Two casts of the SAME spell class share one advance_spells batch —
+    # the exactness Option A buys: each write still attributes to the one
+    # cast whose generator produced it.
+    lvl = _fresh_level()
+    wiz = _place(lvl, _unit("Wizard", player=True), 2, 2)
+    g1 = _place(lvl, _unit("Ghost1"), 4, 4)
+    g2 = _place(lvl, _unit("Ghost2"), 6, 6)
+    s1, s2 = _TargetDrainSpell(g1), _TargetDrainSpell(g2)
+    for s in (s1, s2):
+        s.caster = wiz
+        s.owner = wiz
+    seq = journal.sequence
+    lvl.execute_cast(wiz, s1, g1.x, g1.y, pay_costs=False, queue=True)
+    lvl.execute_cast(wiz, s2, g2.x, g2.y, pay_costs=False, queue=True)
+    casts = [r for r in journal.records
+             if r["event_type"] == "cast_begin" and r["sequence"] > seq]
+    assert len(casts) == 2
+    while lvl.can_advance_spells():
+        lvl.advance_spells()
+    container_diff.turn_boundary(lvl)      # close any final suspended window
+    r1 = [r for r in _container_records('resists_change', id(g1))
+          if r["sequence"] > seq]
+    r2 = [r for r in _container_records('resists_change', id(g2))
+          if r["sequence"] > seq]
+    assert len(r1) == 1 and len(r2) == 1
+    assert r1[0]["parent"] == casts[0]["sequence"]
+    assert r2[0]["parent"] == casts[1]["sequence"]
+    assert r1[0]["payload"]["unattributed"] is False
+    assert r2[0]["payload"]["unattributed"] is False
+
+
+class _TwoStepDrainSpell(Level.Spell):
+    def __init__(self, target):
+        self._target = target
+        Level.Spell.__init__(self)
+
+    def on_init(self):
+        self.name = "Two Step Drain"
+        self.range = 20
+
+    def cast(self, x, y):
+        self._target.resists[Level.Tags.Dark] += 100
+        yield
+        self._target.resists[Level.Tags.Dark] += 100
+        yield
+
+
+def test_same_cast_suspend_resume_is_one_window():
+    # Window-defer semantics: the engine's per-step None restore SUSPENDS
+    # the window; the same generator's next step resumes it. Both steps'
+    # writes merge into ONE delta under the one cast — no per-step noise.
+    lvl = _fresh_level()
+    wiz = _place(lvl, _unit("Wizard", player=True), 2, 2)
+    ghost = _place(lvl, _unit("Ghost"), 4, 4)
+    spell = _TwoStepDrainSpell(ghost)
+    spell.caster = wiz
+    spell.owner = wiz
+    seq = journal.sequence
+    lvl.execute_cast(wiz, spell, ghost.x, ghost.y, pay_costs=False, queue=True)
+    casts = [r for r in journal.records
+             if r["event_type"] == "cast_begin" and r["sequence"] > seq]
+    while lvl.can_advance_spells():
+        lvl.advance_spells()
+    container_diff.turn_boundary(lvl)
+    recs = [r for r in _container_records('resists_change', id(ghost))
+            if r["sequence"] > seq]
+    assert len(recs) == 1                              # one window, one record
+    assert recs[0]["payload"]["changes"] == {'Dark': (0, 200)}
+    assert recs[0]["parent"] == casts[0]["sequence"]
