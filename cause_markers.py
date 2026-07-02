@@ -144,6 +144,138 @@ def _wrap_collect_component(cls):
 
 
 # ----------------------------------------------------------------------
+# Leg 2 — equipment_trigger markers
+#
+# The stored-component replay, two dispatch shapes (Equipment.py
+# 6563-6591): the base trigger_component_on_pickups loop (Rod fires it
+# from an EventOnSpellCast when its tag requirements fill — its own
+# override calls super(), so wrapping the BASE covers it) and Chalice's
+# on_sp_pickup (ONE random stored component, chosen inside the method —
+# per-component identity arrives at the component grain, step 3). The
+# game's "{equipment} triggered {component}" log line stays what the
+# ledger demoted it to: validation + phrasing, never the detector.
+# ----------------------------------------------------------------------
+
+def _wrap_trigger_replay(cls):
+    original = cls.trigger_component_on_pickups
+    site = 'equipment_trigger:replay_all'
+
+    def patched_trigger_component_on_pickups(self, player):
+        payload = None
+        try:
+            payload = {'equipment': getattr(self, 'name', 'equipment'),
+                       'mode': 'all'}
+        except Exception as e:
+            _note_failure(site, e)
+        rec = (_open_marker('equipment_trigger', payload,
+                            getattr(player, 'level', None), site)
+               if payload is not None else None)
+        try:
+            return original(self, player)
+        finally:
+            _close_marker(rec, site)
+
+    cls.trigger_component_on_pickups = patched_trigger_component_on_pickups
+
+
+def _wrap_chalice_pickup(cls):
+    original = cls.on_sp_pickup
+    site = 'equipment_trigger:chalice'
+
+    def patched_on_sp_pickup(self, evt):
+        payload = None
+        try:
+            payload = {'equipment': getattr(self, 'name', 'equipment'),
+                       'mode': 'random'}
+        except Exception as e:
+            _note_failure(site, e)
+        owner = getattr(self, 'owner', None)
+        rec = (_open_marker('equipment_trigger', payload,
+                            getattr(owner, 'level', None), site)
+               if payload is not None else None)
+        try:
+            return original(self, evt)
+        finally:
+            _close_marker(rec, site)
+
+    cls.on_sp_pickup = patched_on_sp_pickup
+
+
+# ----------------------------------------------------------------------
+# Leg 3 — craft markers (G-Q, escapees-only size)
+#
+# The craft node is ALWAYS recorded — "crafted X from A, B, C" — at both
+# sites: Game.try_shop's Equipment branch (Game.py:563-572; only
+# reachable via confirm_buy, which asserts success, so a marker on a
+# declined craft is unreachable in-game) and the minion-copy re-craft
+# (Level.py:2063-2069, re-runs every on_craft mid-combat inside a summon
+# cast -> the marker nests under that cast). Equipment internals
+# (stamps) are write-once query-layer state — never captured (G-Q).
+# Ingredient names: display names at the shop site (instances in hand,
+# game.shop_craft_component_ingredients set by confirm_buy just before);
+# class names at the minion site (crafting_input_fns holds constructors
+# — instantiating them just for labels would run content code).
+# ----------------------------------------------------------------------
+
+def _wrap_try_shop(game_cls, equipment_cls):
+    original = game_cls.try_shop
+    site = 'craft:shop'
+
+    def patched_try_shop(self, item):
+        rec = None
+        if isinstance(item, equipment_cls):
+            payload = None
+            try:
+                ingredients = [
+                    getattr(c, 'name', type(c).__name__)
+                    for c in getattr(self, 'shop_craft_component_ingredients',
+                                     ())]
+                payload = {'equipment': getattr(item, 'name', 'equipment'),
+                           'ingredients': ingredients,
+                           'recipient': _snapshot_unit(self.p1),
+                           'site': 'shop'}
+            except Exception as e:
+                _note_failure(site, e)
+            if payload is not None:
+                rec = _open_marker('craft', payload,
+                                   getattr(self, 'cur_level', None), site)
+        try:
+            return original(self, item)
+        finally:
+            _close_marker(rec, site)
+
+    game_cls.try_shop = patched_try_shop
+
+
+def _wrap_minion_copy(unit_cls):
+    original = unit_cls.grant_equipment_copy_to_minion
+    site = 'craft:minion_copy'
+
+    def patched_grant_equipment_copy_to_minion(self, recipient, equipment):
+        payload = None
+        try:
+            ingredients = []
+            fns = getattr(equipment, 'crafting_input_fns', None) or {}
+            for c_type, count in fns.items():
+                ingredients.extend([c_type.__name__] * count)
+            payload = {'equipment': getattr(equipment, 'name', 'equipment'),
+                       'ingredients': ingredients,
+                       'recipient': _snapshot_unit(recipient),
+                       'site': 'minion_copy'}
+        except Exception as e:
+            _note_failure(site, e)
+        rec = (_open_marker('craft', payload,
+                            getattr(self, 'level', None), site)
+               if payload is not None else None)
+        try:
+            return original(self, recipient, equipment)
+        finally:
+            _close_marker(rec, site)
+
+    unit_cls.grant_equipment_copy_to_minion = patched_grant_equipment_copy_to_minion
+
+
+# ----------------------------------------------------------------------
 # Install — self-gating, idempotent, separable
 # ----------------------------------------------------------------------
 
@@ -162,6 +294,8 @@ def install(log_fn=None):
     try:
         import Level
         import LevelRewards
+        import Equipment
+        import Game
     except Exception as e:
         _note_failure('install:import', e)
         return False
@@ -172,18 +306,25 @@ def install(log_fn=None):
     # override), and the Component base must carry both no-op hooks (the
     # own-__dict__ wrap predicate in later steps depends on the base
     # identities).
-    pickup_seams = (
+    seams_ok = (
         'on_player_enter' in vars(Level.ComponentPickup)
         and 'on_player_enter' in vars(Level.MemoryOrb)
         and 'on_player_enter' in vars(Level.HeartDot)
         and 'collect_component' in vars(LevelRewards.DissolutionShop)
         and callable(getattr(Level.Component, 'on_pickup', None))
         and callable(getattr(Level.Component, 'on_craft', None))
+        # Leg 2/3 seams
+        and 'trigger_component_on_pickups' in vars(
+            Equipment.OnPickupTriggerEquipment)
+        and 'on_sp_pickup' in vars(Equipment.ArtificersChalice)
+        and 'try_shop' in vars(Game.Game)
+        and 'grant_equipment_copy_to_minion' in vars(Level.Unit)
+        and isinstance(getattr(Level, 'Equipment', None), type)
     )
-    if not pickup_seams:
+    if not seams_ok:
         if _log_fn:
             try:
-                _log_fn("[CauseMarkers] install declined: pickup seams "
+                _log_fn("[CauseMarkers] install declined: marker seams "
                         "missing/mis-shaped (RW2 or API drift)")
             except Exception:
                 pass
@@ -194,12 +335,16 @@ def install(log_fn=None):
     _wrap_prop_enter(Level.MemoryOrb, 'memory_orb', lambda prop: None)
     _wrap_prop_enter(Level.HeartDot, 'ruby_heart', lambda prop: None)
     _wrap_collect_component(LevelRewards.DissolutionShop)
+    _wrap_trigger_replay(Equipment.OnPickupTriggerEquipment)
+    _wrap_chalice_pickup(Equipment.ArtificersChalice)
+    _wrap_try_shop(Game.Game, Level.Equipment)
+    _wrap_minion_copy(Level.Unit)
 
     _installed = True
     if _log_fn:
         try:
-            _log_fn("[CauseMarkers] pickup markers installed "
-                    "(4 dispatch sites)")
+            _log_fn("[CauseMarkers] markers installed: pickup (4 sites), "
+                    "equipment-trigger (2), craft (2)")
         except Exception:
             pass
     return True

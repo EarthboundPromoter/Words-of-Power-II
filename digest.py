@@ -2057,7 +2057,7 @@ _COMPOSER_KNOWN_EVENT_TYPES = frozenset({
     # payloads carry a 'recipient' snapshot, not 'unit'/'target', so the
     # wizard-subject scan structurally never sees them (pinned in
     # test_crisis, game_log precedent).
-    'item_pickup',
+    'item_pickup', 'equipment_trigger', 'craft',
 })
 
 

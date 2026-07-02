@@ -1943,3 +1943,147 @@ def test_cause_markers_double_install_noops():
     before = Level.ComponentPickup.on_player_enter
     assert cause_markers.install() is True
     assert Level.ComponentPickup.on_player_enter is before
+
+
+# ---- Unit 2 step 2: equipment_trigger + craft cause-markers (legs 2-3) ----
+
+def _markers_of(kind):
+    return [r for r in journal.records if r["event_type"] == kind]
+
+
+def test_chalice_trigger_nests_under_pickup_marker():
+    # The G-P mis-parent fix: the EventOnItemPickup raise happens INSIDE the
+    # prop-level pickup window (Level.py:2824), so Chalice's replay marker
+    # descends from the item_pickup marker — effects stop hanging off the
+    # raw orb event.
+    import Equipment as Eq
+    from Components import Frostpetal
+    lvl = _fresh_level()
+    wiz = _wiz_with_inventory(lvl)
+    lvl.player_unit = wiz
+    chalice = Eq.ArtificersChalice()
+    chalice.stored_components = [Frostpetal()]
+    wiz.equip(chalice)
+    orb = Level.MemoryOrb()
+    lvl.add_prop(orb, 8, 8)
+    orb.on_player_enter(wiz)
+    pickups = _markers_of("item_pickup")
+    triggers = _markers_of("equipment_trigger")
+    assert len(pickups) == 1 and len(triggers) == 1
+    assert triggers[0]["payload"]["equipment"] == "Artificer's Chalice"
+    assert triggers[0]["payload"]["mode"] == "random"
+    assert _has_ancestor(triggers[0], pickups[0]["sequence"])
+    # Frostpetal's buffs landed inside the trigger window
+    applies = [r for r in journal.records
+               if r["event_type"] == "EventOnBuffApply"
+               and _has_ancestor(r, triggers[0]["sequence"])]
+    assert applies
+
+
+def test_replay_all_marker_owns_component_effects():
+    # The base replay loop (Rod shape): mode 'all', every stored component's
+    # effects inside ONE trigger window; the game's own "triggered" log
+    # lines ride along as in-window game_log records (phrasing channel).
+    import Equipment as Eq
+    from Components import Frostpetal, SilverDragonscale
+    lvl = _fresh_level()
+    wiz = _wiz_with_inventory(lvl)
+    lvl.player_unit = wiz
+    gear = Eq.OnPickupTriggerEquipment()
+    gear.name = "Test Rod"
+    gear.stored_components = [Frostpetal(), SilverDragonscale()]
+    gear.owner = wiz
+    gear.trigger_component_on_pickups(wiz)
+    triggers = _markers_of("equipment_trigger")
+    assert len(triggers) == 1
+    assert triggers[0]["payload"]["mode"] == "all"
+    seq = triggers[0]["sequence"]
+    applies = [r for r in journal.records
+               if r["event_type"] == "EventOnBuffApply"
+               and _has_ancestor(r, seq)]
+    assert len(applies) >= 3          # Frostpetal x2 + Dragonscale x2 buffs
+    logs = [r for r in journal.records
+            if r["event_type"] == "game_log"
+            and "triggered" in (r["payload"].get("template") or "")
+            and _has_ancestor(r, seq)]
+    assert len(logs) == 2             # one "triggered" line per component
+
+
+class _TestGear(Level.Equipment):
+    def on_init(self):
+        self.name = "Test Gear"
+        self.recipe = []              # trivially craftable
+
+
+def test_craft_marker_shop_site_always_recorded():
+    # G-Q: the craft node is ALWAYS recorded — "crafted X from A, B, C" —
+    # with the on_craft escapees (Awl-style add_component) and the equip
+    # tail all inside the window. Steam-stats tails are no-op'd per
+    # instance (they write real achievement state).
+    import Game as GameMod
+    from Components import EnchantersAwl, Frostpetal
+    lvl = _fresh_level()
+    wiz = _wiz_with_inventory(lvl)
+    lvl.player_unit = wiz
+    lvl.cur_shop = None
+    wiz.wishlist_equipment = []
+    g = object.__new__(GameMod.Game)
+    g.cur_level = lvl
+    g.p1 = wiz
+    g.recent_upgrades = []
+    g.shop_craft_component_ingredients = [EnchantersAwl(), Frostpetal()]
+    g.record_equipment_crafted = lambda e: None
+    g.clear_wishlist = lambda e: None
+    item = _TestGear()
+    assert g.try_shop(item) is True
+    crafts = _markers_of("craft")
+    assert len(crafts) == 1
+    p = crafts[0]["payload"]
+    assert p["equipment"] == "Test Gear"
+    assert p["site"] == "shop"
+    assert p["ingredients"] == ["Enchanter's Awl", "Frostpetal"]
+    assert crafts[0]["parent"] is None            # shop confirm: no live cause
+    # the equip tail ran inside the window: the crafted clone is worn
+    assert any(e.name == "Test Gear" for e in wiz.equipment)
+
+
+def test_craft_marker_minion_copy_nests_under_live_cause():
+    # The audit-missed re-craft (Level.py:2063-2069): mid-combat replay on
+    # a minion, nested under whatever cause is live (in-game: the summon
+    # cast). Class-name ingredients (constructors, not instances).
+    from Components import EnchantersAwl
+    lvl = _fresh_level()
+    wiz = _wiz_with_inventory(lvl)
+    lvl.player_unit = wiz
+    minion = _place(lvl, _unit("Wolf"), 5, 5)
+    minion.equipment = []
+    gear = _TestGear()
+    gear.crafting_input_fns[EnchantersAwl] = 2
+    outer = journal.record("cast_begin", {"spell": "Wolf"})
+    journal.push(outer)
+    try:
+        wiz.grant_equipment_copy_to_minion(minion, gear)
+    finally:
+        journal.pop()
+    crafts = _markers_of("craft")
+    assert len(crafts) == 1
+    p = crafts[0]["payload"]
+    assert p["site"] == "minion_copy"
+    assert p["ingredients"] == ["EnchantersAwl", "EnchantersAwl"]
+    assert p["recipient"]["name"] == "Wolf"
+    assert _has_ancestor(crafts[0], outer["sequence"])
+
+
+def test_non_equipment_purchase_gets_no_craft_marker():
+    # try_shop's other branches (shop purchases, spell/upgrade buys) are
+    # NOT crafts — the marker is Equipment-branch-only.
+    import Game as GameMod
+    lvl = _fresh_level()
+    wiz = _wiz_with_inventory(lvl)
+    g = object.__new__(GameMod.Game)
+    g.cur_level = lvl
+    g.p1 = wiz
+    g.recent_upgrades = []
+    lvl.cur_shop = None
+    assert g.try_shop(None) is False              # the no-item call shape
+    assert _markers_of("craft") == []
