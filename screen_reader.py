@@ -72,8 +72,6 @@ log("=" * 60)
 # ============================================================================
 # SETTINGS
 # ============================================================================
-import configparser as _configparser
-
 # Schema-driven settings: single source of truth for default values + comment
 # blocks. Adding a new setting? Add to this list once. Both default-write (for
 # fresh installs) and back-fill (for upgraders whose settings.ini predates the
@@ -228,78 +226,26 @@ _SETTINGS_SCHEMA = [
 ]
 
 
-def _render_default_settings():
-    """Build the default settings.ini content from the schema, grouping
-    keys by their declared section in declaration order. New sections
-    appear in the file in the order they first appear in the schema."""
-    parts = [
-        "# Words of Power settings",
-        "# Edit this file to customize mod behavior. Restart the game after changes.",
-        "",
-    ]
-    section_order = []
-    by_section = {}
-    for section, key, default, comment in _SETTINGS_SCHEMA:
-        if section not in by_section:
-            section_order.append(section)
-            by_section[section] = []
-        by_section[section].append((key, default, comment))
-
-    for section in section_order:
-        parts.append(f"[{section}]")
-        parts.append("")
-        for key, default, comment in by_section[section]:
-            parts.append(comment)
-            parts.append(f"{key} = {default}")
-            parts.append("")
-    return "\n".join(parts)
-
-
-def _backfill_missing(path, parser):
-    """Append schema keys missing from the loaded settings.ini.
-
-    Existing user values are preserved untouched. Missing keys are appended
-    with their default value and comment block, grouped under their
-    declared section header (which may also need to be appended if the
-    user's settings.ini predates the section). Upgraders see new options
-    without having to delete settings.ini and lose their existing
-    customizations."""
-    missing_by_section = {}
-    for section, key, default, comment in _SETTINGS_SCHEMA:
-        if not parser.has_section(section) or not parser.has_option(section, key):
-            missing_by_section.setdefault(section, []).append((key, default, comment))
-    if not missing_by_section:
-        return
-
-    with open(path, 'a', encoding='utf-8') as f:
-        for section, items in missing_by_section.items():
-            section_existed = parser.has_section(section)
-            f.write("\n")
-            if not section_existed:
-                f.write(f"[{section}]\n\n")
-            for key, default, comment in items:
-                f.write(comment + "\n")
-                f.write(f"{key} = {default}\n")
-                f.write("\n")
-
-    keys = ', '.join(
-        f"[{s}].{k}" for s, items in missing_by_section.items() for k, _, _ in items
-    )
-    log(f"[Settings] Back-filled missing keys: {keys}")
-
+# Rendering, back-fill, and the tolerant parser live in settings_schema.py
+# (testable mechanism; the S29 load-brick — end-of-file back-fill landing
+# keys in the wrong section, duplicating them, and killing the next parse —
+# is pinned there). The schema above stays here as the single content
+# source of truth.
+import settings_schema as _settings_schema
 
 _settings_path = os.path.join(mod_dir, "settings.ini")
-_settings = _configparser.ConfigParser()
+_settings = _settings_schema.make_parser()
 
 if not os.path.exists(_settings_path):
     with open(_settings_path, 'w', encoding='utf-8') as _f:
-        _f.write(_render_default_settings())
+        _f.write(_settings_schema.render_default_settings(_SETTINGS_SCHEMA))
     _settings.read(_settings_path, encoding='utf-8')
     log("[Settings] Created default settings.ini")
 else:
     _settings.read(_settings_path, encoding='utf-8')
     log("[Settings] Loaded settings.ini")
-    _backfill_missing(_settings_path, _settings)
+    _settings_schema.backfill_missing(
+        _settings_path, _settings, _SETTINGS_SCHEMA, log_fn=log)
 
 class _Cfg:
     show_coordinates = _settings.getboolean('words_of_power', 'show_coordinates', fallback=True)
