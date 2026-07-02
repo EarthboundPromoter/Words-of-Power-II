@@ -397,6 +397,63 @@ def test_reincarnation_respawn_off_field_dropped():
     assert heals == []
 
 
+# ---- G-F (Unit 4): xp (SP) watch — bidirectional, uniform, name-explicit ----
+
+def _xp_changes(target_id=None):
+    out = [r for r in journal.records if r["event_type"] == "xp_change"]
+    if target_id is not None:
+        out = [r for r in out
+               if (r["payload"].get("target") or {}).get("id") == target_id]
+    return out
+
+
+def test_xp_gain_captured_with_none_coercion():
+    lvl = _fresh_level()
+    wiz = _place(lvl, _unit("Wizard", hp=50, player=True), 7, 7)
+    wiz.xp = 5                          # first live write: before is None -> 0
+    recs = _xp_changes(id(wiz))
+    assert len(recs) == 1
+    p = recs[0]["payload"]
+    assert p["xp_before"] == 0 and p["xp_after"] == 5 and p["delta"] == 5
+    wiz.xp += 3                         # Memory-Orb-shaped gain (Level.py:2796)
+    recs = _xp_changes(id(wiz))
+    assert len(recs) == 2
+    assert recs[1]["payload"]["delta"] == 3
+
+
+def test_xp_spend_captured():
+    # Upgrade-buy shape (Game.py:628). Capture is uniform; voice-ignores-spends
+    # is a composer ruling, not a capture filter.
+    lvl = _fresh_level()
+    wiz = _place(lvl, _unit("Wizard", hp=50, player=True), 7, 7)
+    wiz.xp = 10
+    wiz.xp -= 4
+    recs = _xp_changes(id(wiz))
+    assert len(recs) == 2
+    p = recs[1]["payload"]
+    assert p["delta"] == -4 and p["xp_after"] == 6
+
+
+def test_xp_prelive_write_dropped():
+    # Game.py:498 (`player.xp = 1` at game creation) fires before the player is
+    # in any level's units list -> gated, no phantom record.
+    lvl = _fresh_level()
+    wiz = _unit("Wizard", hp=50, player=True)   # constructed, NOT placed
+    wiz.xp = 1
+    assert _xp_changes(id(wiz)) == []
+
+
+def test_xp_write_yields_no_shield_records():
+    # Gate finding: _classify_watched's old fallback-else WAS the shields branch;
+    # a mis-wired xp branch would voice Memory Orb pickups as shield gains. Pin
+    # the negative alongside the positive.
+    lvl = _fresh_level()
+    wiz = _place(lvl, _unit("Wizard", hp=50, player=True), 7, 7)
+    wiz.xp = 7
+    assert len(_xp_changes(id(wiz))) == 1
+    assert _shield_records(id(wiz)) == []
+
+
 # ---- G-M (Unit 4): EventOnAwakened typed capture, parity with unfrozen ----
 
 def _awakened_records(target_id=None):

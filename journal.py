@@ -609,9 +609,13 @@ def _payload_shield_removed(event):
 #   'max_hp'  — any change (no max_hp event exists anywhere, so every max_hp write
 #               is silent): boosts (Ruby Heart +25, undeath, components) and drains
 #               (drain_max_hp, Necrosis, sacrifice). Capture-only interim.
+#   'xp'      — SP total (G-F, Unit 4). Player-only in practice (no non-player .xp
+#               write exists); gains AND spends record (voice-ignores-spends is a
+#               composer ruling). Init writes (Game.py:498, Mutators.py:1105) fire
+#               pre-live -> gated; unpickle bypasses __setattr__ -> no load flood.
 # This is the taxonomy's universal-chokepoint capture (§2) — no per-site hooks, so
 # future content is caught automatically.
-_WATCHED_ATTRS = frozenset({'shields', 'team', 'cur_hp', 'max_hp'})
+_WATCHED_ATTRS = frozenset({'shields', 'team', 'cur_hp', 'max_hp', 'xp'})
 
 
 def _is_live_unit(unit):
@@ -795,14 +799,23 @@ def _classify_watched(unit, name, before, after):
     """Dispatch a watched-attr before/after to its change-record builder, or
     None for a no-op. Shared by the __setattr__ interceptor (per-write) and the
     shield-setter net-emit (one net diff over a bracketed add_shields/
-    remove_shields body), so both classify identically."""
+    remove_shields body), so both classify identically.
+
+    Every branch is NAME-EXPLICIT with no fallback (Unit-4 gate finding: the
+    old fallback-else was the shields branch, so a watched attr added without
+    its own branch would have classified — and VOICED — as a shield change).
+    An unmatched name is a wiring error and records nothing."""
+    if name == 'shields':
+        return _shield_change_record(unit, before, after)
     if name == 'team':
         return _team_change_record(unit, before, after)
     if name == 'cur_hp':
         return _cur_hp_change_record(unit, before, after)
     if name == 'max_hp':
         return _max_hp_change_record(unit, before, after)
-    return _shield_change_record(unit, before, after)
+    if name == 'xp':
+        return _xp_change_record(unit, before, after)
+    return None
 
 
 def _emit_watched_net(unit, name, before):
@@ -896,6 +909,24 @@ def _max_hp_change_record(unit, before, after):
         'max_hp_before': before,
         'max_hp_after': after,
         'direction': 'gained' if after > before else 'drained',
+    }
+
+
+def _xp_change_record(unit, before, after):
+    """Classify an xp (SP) write seen by the interceptor (G-F, Unit 4).
+    Bidirectional and uniform — gains and spends both record; which of them is
+    ever SPOKEN is the composer's call, never a capture filter. `before` may be
+    None on the first live write (Unit.__init__ sets no xp attr) -> coerce to 0.
+    Returns ('xp_change', payload) or None for a no-op."""
+    before = before or 0
+    after = after or 0
+    if after == before:
+        return None
+    return 'xp_change', {
+        'target': _snapshot_unit(unit),
+        'delta': after - before,
+        'xp_before': before,
+        'xp_after': after,
     }
 
 
