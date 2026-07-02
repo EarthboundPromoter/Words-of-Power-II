@@ -712,9 +712,14 @@ def test_direct_kill_writes_no_hp_loss():
 # ---- G-G step 4 (Unit 4): EventOnSpendHP supersedes its own hp_loss (D2) ----
 
 def _spend(lvl, unit, amount):
-    """A spend site's exact shape (Level.py:917->920): raw write, then the
-    raise adjacent in the same synchronous body."""
+    """A spend site's PRODUCTION shape (Level.py:917->920): raw write, then
+    the PAY_HP log line, then the raise — one synchronous body. The log write
+    puts a game_log record BETWEEN the hp_loss and the spend record, so every
+    test through this helper also exercises the adjacency matcher's
+    game_log transparency (the live shape once the oracle wrap installed)."""
     unit.cur_hp -= amount
+    lvl.log(("{unit} pays {cost} HP to cast {spell}",
+             {"unit": unit.name, "cost": amount, "spell": "Test Spell"}))
     lvl.event_manager.raise_event(Level.EventOnSpendHP(unit, amount), unit)
 
 
@@ -778,6 +783,44 @@ def test_spend_with_no_coincident_loss_no_false_mark():
     assert len(losses) == 1
     assert "superseded_by_spend" not in losses[0]["marks"]
     assert [r for r in _hp_losses(id(ghost)) if r["sequence"] > seq] == []
+
+
+def test_spend_supersede_survives_interleaved_game_log_record():
+    # The Unit-4 pre-declaration made live: with the oracle wrap installed, a
+    # game_log record physically sits between the hp_loss and the spend record
+    # (write -> log -> raise). Adjacency must look through it.
+    lvl = _fresh_level()
+    wiz = _place(lvl, _unit("Wizard", hp=50, player=True), 7, 7)
+    wiz.cur_hp = 20
+    seq = journal.sequence
+    _spend(lvl, wiz, 3)
+    window = [r for r in journal.records if r["sequence"] > seq]
+    kinds = [r["event_type"] for r in window]
+    assert kinds == ["hp_loss", "game_log", "EventOnSpendHP"], (
+        "the live interleave shape itself is the fixture premise: %r" % kinds)
+    assert "superseded_by_spend" in window[0]["marks"]
+
+
+def test_spend_supersede_through_real_pay_costs():
+    # End-to-end through the game's own Spell.pay_costs (Level.py:912-921):
+    # charge/cooldown bookkeeping, the real PAY_HP log line, the real raise.
+    lvl = _fresh_level()
+    wiz = _place(lvl, _unit("Wizard", hp=50, player=True), 7, 7)
+    wiz.cur_hp = 20
+    spell = Level.Spell()
+    spell.name = "Blood Test"
+    spell.hp_cost = 5
+    spell.caster = wiz
+    spell.owner = wiz
+    seq = journal.sequence
+    spell.pay_costs()
+    assert wiz.cur_hp == 15
+    losses = [r for r in _hp_losses(id(wiz)) if r["sequence"] > seq]
+    assert len(losses) == 1
+    assert "superseded_by_spend" in losses[0]["marks"]
+    logs = [r for r in journal.records if r["sequence"] > seq
+            and r["event_type"] == "game_log"]
+    assert len(logs) == 1 and "pays" in logs[0]["payload"]["template"]
 
 
 def test_spend_amount_mismatch_not_marked():
