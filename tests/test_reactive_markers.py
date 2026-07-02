@@ -253,6 +253,127 @@ def test_pickle_contains_no_wrapper():
     assert b'_reactive_dispatch' not in blob
 
 
+# ---- Step 2: lazy materialization via the record gate ----
+
+class _NestedRaiseTB(Level.Buff):
+    """A reaction whose only effect is raising another event — the
+    record-gate materialization shape (any record created during the
+    handler promotes the breadcrumb)."""
+    def on_init(self):
+        self.name = "Nested Raise Test Buff"
+        self.buff_type = Level.BUFF_TYPE_BLESS
+        self.owner_triggers[Level.EventOnPass] = self.on_pass
+        self.target = None
+
+    def on_pass(self, evt):
+        self.owner.level.event_manager.raise_event(
+            Level.EventOnPass(self.target), self.target)
+
+
+def _markers():
+    return [r for r in journal.records if r['event_type'] == 'reactive_proc']
+
+
+def _events_of(kind):
+    return [r for r in journal.records if r['event_type'] == kind]
+
+
+def test_record_gate_materializes_marker_parented_to_event():
+    lvl = _fresh_level()
+    ogre = _place(lvl, _unit("Ogre"), 5, 5)
+    gob = _place(lvl, _unit("Goblin"), 6, 5)
+    tb = _NestedRaiseTB()
+    ogre.apply_buff(tb)
+    tb.target = gob
+
+    lvl.event_manager.raise_event(Level.EventOnPass(ogre), ogre)
+
+    ms = _markers()
+    assert len(ms) == 1
+    m = ms[0]
+    assert m['payload']['via'] == 'record_gate'
+    assert m['payload']['buff'] == "Nested Raise Test Buff"
+    assert (m['payload']['recipient'] or {}).get('name') == "Ogre"
+
+    passes = _events_of('EventOnPass')
+    assert len(passes) == 2
+    outer, inner = passes
+    # Marker parents to the triggering event; the reaction's own record
+    # (the nested raise) parents to the marker.
+    assert m['parent'] == outer['sequence']
+    assert inner['parent'] == m['sequence']
+
+
+def test_noop_reaction_evaporates():
+    lvl = _fresh_level()
+    ogre = _place(lvl, _unit("Ogre"), 5, 5)
+    tb = _ReactiveTB()          # handler only bumps a python counter
+    ogre.apply_buff(tb)
+
+    lvl.event_manager.raise_event(Level.EventOnPass(ogre), ogre)
+    assert tb.pass_count == 1
+    assert _markers() == []
+
+
+def test_nested_reaction_chain_outermost_first():
+    # A reacts to E1 by raising E2; B (another unit's buff) reacts to E2 by
+    # raising E3. Marker nesting must mirror dispatch nesting:
+    # E1 -> markerA -> E2 -> markerB -> E3.
+    lvl = _fresh_level()
+    ogre = _place(lvl, _unit("Ogre"), 5, 5)
+    gob = _place(lvl, _unit("Goblin"), 6, 5)
+    troll = _place(lvl, _unit("Troll"), 7, 5)
+
+    a = _NestedRaiseTB()
+    ogre.apply_buff(a)
+    a.target = gob
+    b = _NestedRaiseTB()
+    gob.apply_buff(b)
+    b.target = troll
+
+    lvl.event_manager.raise_event(Level.EventOnPass(ogre), ogre)
+
+    ms = _markers()
+    assert len(ms) == 2
+    m_a, m_b = ms
+    e1, e2, e3 = _events_of('EventOnPass')
+    assert m_a['parent'] == e1['sequence']
+    assert e2['parent'] == m_a['sequence']
+    assert m_b['parent'] == e2['sequence']
+    assert e3['parent'] == m_b['sequence']
+
+
+def test_marker_never_clears_suspended_cast_window():
+    # ⟨GATE⟩ pin, the second parent-resolution branch: a marker fires while
+    # a cast window is SUSPENDED (_pending_ctx set, cause_stack empty). The
+    # marker must not clear the window, and a post-marker delta still
+    # attributes to the suspended cast.
+    import types as T
+    lvl = _fresh_level()
+    ogre = _place(lvl, _unit("Ogre"), 5, 5)
+    gob = _place(lvl, _unit("Goblin"), 6, 5)
+    tb = _NestedRaiseTB()
+    ogre.apply_buff(tb)
+    tb.target = gob
+    container_diff.sweep(lvl, site='test:baseline')
+
+    cb = journal.record('cast_begin', {'detail': 'suspended-test'})
+    ctx = T.SimpleNamespace(_cast_begin=cb)
+    container_diff._pending_ctx = ctx
+
+    lvl.event_manager.raise_event(Level.EventOnPass(ogre), ogre)
+    assert len(_markers()) == 1
+    assert container_diff._pending_ctx is ctx
+
+    ogre.turns_to_death = 7
+    container_diff.sweep(lvl, site='test:delta')
+    lifespans = [r for r in journal.records
+                 if r['event_type'] == 'lifespan_change']
+    assert lifespans
+    assert lifespans[-1]['parent'] == cb['sequence']
+    container_diff._pending_ctx = None
+
+
 # ---- Install shape ----
 
 def test_register_functions_are_patched():

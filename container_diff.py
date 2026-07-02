@@ -717,6 +717,10 @@ _ACTION_KINDS = frozenset((
 # a new tick/cast (a definitive turn action) does.
 _MARKER_KINDS = frozenset((
     'item_pickup', 'equipment_trigger', 'craft', 'component_effect',
+    # Unit 3: the reactive-proc marker (leg 4) — a lazily-materialized
+    # window around a reacting buff's handler; sweeps like the other
+    # markers, never clears the suspended cast window.
+    'reactive_proc',
 ))
 
 _SWEEP_KINDS = _ACTION_KINDS | _MARKER_KINDS

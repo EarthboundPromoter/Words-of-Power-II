@@ -2059,6 +2059,11 @@ _COMPOSER_KNOWN_EVENT_TYPES = frozenset({
     # test_crisis, game_log precedent).
     'item_pickup', 'equipment_trigger', 'craft', 'component_effect',
     'buff_duration_change', 'component_inventory_change',
+    # Root-2 leg 4 (Unit 3, capture-only), staged for the composer phase:
+    # the reactive-proc marker — WHICH buff/gear/passive reacted; its
+    # window's effects parent to it. Payload carries 'recipient' like the
+    # other marker kinds, so crisis structurally never sees it.
+    'reactive_proc',
 })
 
 

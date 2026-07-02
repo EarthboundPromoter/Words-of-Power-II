@@ -34,6 +34,9 @@
 # seam shapes verified before wrapping, declines cleanly otherwise (RW2
 # backport inert). Records-only; all voicing is composer-phase.
 
+from journal import journal, _snapshot_unit
+import journal as _journal_module
+
 _installed = False
 _log_fn = None
 _failed_sites = set()       # once-per-site failure-note dedupe
@@ -60,10 +63,62 @@ def _note_failure(site, exc):
             pass
 
 
+# ----------------------------------------------------------------------
+# Lazy materialization (plan D3-D5).
+#
+# A breadcrumb becomes a real `reactive_proc` marker record + cause window
+# only when a tap fires. The record gate (journal.record wrap below) is tap
+# 1: ANY record created while unmaterialized breadcrumbs are live promotes
+# the whole chain outermost-first, so marker nesting mirrors dispatch
+# nesting and the incoming record parents to the innermost marker. The
+# marker's own parent = the cause-stack top at materialization (the
+# triggering event's record — journal's raise_event wrap pushed it).
+# journal.push routes through container_diff's sweep wrap: `reactive_proc`
+# is a _MARKER_KINDS member, so the entry sweep flushes pending deltas
+# OUTWARD (to the event record — the graceful direction) and the close's
+# pop sweep attributes the window's deltas to the marker.
+# ----------------------------------------------------------------------
+
+_materializing = False
+
+
+def _materialize_crumbs(via):
+    """Promote every unmaterialized breadcrumb, outermost first."""
+    global _materializing
+    if _materializing or not _crumbs:
+        return
+    _materializing = True
+    try:
+        for entry in list(_crumbs):
+            if entry[1] is not None:
+                continue
+            buff = entry[0]
+            owner_unit = getattr(buff, 'owner', None)
+            # Shop-path staleness ⟨GATE⟩: reactions can fire outside any
+            # combat action root — refresh journal._level like _open_marker.
+            level = getattr(owner_unit, 'level', None)
+            if level is not None:
+                journal._level = level
+            rec = journal.record('reactive_proc', {
+                'buff': getattr(buff, 'name', None) or type(buff).__name__,
+                'buff_class': type(buff).__name__,
+                'recipient': (_snapshot_unit(owner_unit)
+                              if owner_unit is not None else None),
+                'via': via,
+            })
+            journal.push(rec)
+            entry[1] = rec
+    except Exception as e:
+        _note_failure('materialize', e)
+    finally:
+        _materializing = False
+
+
 def _make_wrapper(handler, buff):
     """The dispatch wrapper for one (handler, owning buff) registration.
     Always calls through; breadcrumb push/pop guarded; pops exactly its own
-    entry (a mismatch is noted, never propagated)."""
+    entry (a mismatch is noted, never propagated); never swallows the
+    handler's own exceptions."""
     def _reactive_dispatch(event):
         entry = None
         try:
@@ -77,7 +132,14 @@ def _make_wrapper(handler, buff):
         finally:
             if entry is not None:
                 try:
-                    # Later steps close a materialized marker here (entry[1]).
+                    if entry[1] is not None:
+                        # Close the materialized window — the pop routes
+                        # through container_diff's exit sweep (bracket =
+                        # 'reactive_proc').
+                        journal.pop()
+                except Exception as e:
+                    _note_failure('dispatch:close', e)
+                try:
                     if _crumbs and _crumbs[-1] is entry:
                         _crumbs.pop()
                     else:
@@ -86,6 +148,21 @@ def _make_wrapper(handler, buff):
                 except Exception as e:
                     _note_failure('dispatch:pop', e)
     return _reactive_dispatch
+
+
+def _install_record_gate():
+    """Tap 1: wrap the journal's single record-creation gate. A record
+    created during a live breadcrumb materializes the chain FIRST, so the
+    record parents to the innermost marker. Recursion-guarded — the marker
+    records themselves pass straight through."""
+    orig_record = journal.record
+
+    def gated_record(event_type, payload, parent_seq=_journal_module._UNSET):
+        if _crumbs and not _materializing:
+            _materialize_crumbs('record_gate')
+        return orig_record(event_type, payload, parent_seq)
+
+    journal.record = gated_record
 
 
 # ----------------------------------------------------------------------
@@ -229,6 +306,7 @@ def install(log_fn=None):
         return False
 
     _install_register_wraps(Level)
+    _install_record_gate()
 
     _installed = True
     if _log_fn:
