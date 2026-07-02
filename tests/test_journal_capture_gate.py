@@ -27,6 +27,7 @@ if mod_dir not in sys.path:
 import Level
 from journal import journal, install_hooks
 import log_capture
+import container_diff
 
 
 # ---- Harness ----
@@ -39,6 +40,11 @@ def _fresh_level():
     # production Level.log shape (game_log records interleaved; all helpers
     # filter by kind).
     log_capture.install()
+    # Same category for the Root-1 container-diff wraps (Unit 1); the store
+    # reseeds per fresh level like the journal resets — first sweep after a
+    # reseed baselines silently.
+    container_diff.install()
+    container_diff.reseed()
     lvl = Level.Level(15, 15)
     journal.reset(id(lvl))
     journal._level = lvl
@@ -1078,3 +1084,163 @@ def test_log_capture_install_declines_on_missing_sink():
     finally:
         Level.Level.log = saved_log
         log_capture._installed = saved_flag
+
+
+# ---- Unit 1 step 2: Root-1 container-diff — synchronous boundary brackets ----
+
+def _container_records(kind=None, target_id=None):
+    kinds = set(container_diff.ALL_KINDS) if kind is None else {kind}
+    out = [r for r in journal.records if r["event_type"] in kinds]
+    if target_id is not None:
+        out = [r for r in out
+               if (r["payload"].get("unit") or {}).get("id") == target_id]
+    return out
+
+
+def _fire_ward(amount=50):
+    b = Level.Buff()
+    b.name = "Fire Ward"
+    b.resists[Level.Tags.Fire] = amount
+    return b
+
+
+def test_buff_apply_resist_fold_recorded_with_bracket():
+    lvl = _fresh_level()
+    ogre = _place(lvl, _unit("Ogre"), 5, 5)
+    ogre.apply_buff(_fire_ward())
+    recs = _container_records('resists_change', id(ogre))
+    assert len(recs) == 1
+    p = recs[0]["payload"]
+    assert p["changes"] == {'Fire': (0, 50)}
+    assert p["bracket"] == 'buff_apply'
+    assert p["detail"] == {'buff': 'Fire Ward'}
+
+
+def test_buff_unapply_unfold_recorded_with_bracket():
+    lvl = _fresh_level()
+    ogre = _place(lvl, _unit("Ogre"), 5, 5)
+    ward = _fire_ward()
+    ogre.apply_buff(ward)
+    ogre.remove_buff(ward)
+    recs = _container_records('resists_change', id(ogre))
+    assert len(recs) == 2
+    p = recs[1]["payload"]
+    assert p["changes"] == {'Fire': (50, 0)}
+    assert p["bracket"] == 'buff_unapply'
+
+
+class _TagRobe(Level.Equipment):
+    # The equip/unequip TAIL shape (SpiderCarapaceRobe/NecromancersLocket,
+    # Equipment.py:860-865/924-928): container writes in on_equip/on_unequip,
+    # which run OUTSIDE apply_buff/remove_buff (Level.py:2052/2060).
+    def on_equip(self, unit):
+        unit.tags.append(Level.Tags.Arcane)
+
+    def on_unequip(self, unit):
+        if Level.Tags.Arcane in unit.tags:
+            unit.tags.remove(Level.Tags.Arcane)
+
+
+def test_equip_tail_tag_write_attributed_to_equip_not_buff_bracket():
+    lvl = _fresh_level()
+    wiz = _place(lvl, _unit("Wizard", player=True), 2, 2)
+    robe = _TagRobe()
+    robe.name = "Test Robe"
+    wiz.equip(robe)
+    recs = _container_records('tags_change', id(wiz))
+    assert len(recs) == 1
+    p = recs[0]["payload"]
+    assert p["changes"] == {'added': ['Arcane'], 'removed': []}
+    # The append happens in the on_equip tail, after Buff.apply's exit sweep
+    # already ran — so the delta belongs to the equip bracket, not the
+    # nested buff_apply bracket.
+    assert p["bracket"] == 'equip'
+    assert p["detail"] == {'item': 'Test Robe'}
+
+
+def test_unequip_tail_tag_removal_attributed_to_unequip_bracket():
+    lvl = _fresh_level()
+    wiz = _place(lvl, _unit("Wizard", player=True), 2, 2)
+    robe = _TagRobe()
+    robe.name = "Test Robe"
+    wiz.equip(robe)
+    wiz.unequip(robe)
+    recs = _container_records('tags_change', id(wiz))
+    assert len(recs) == 2
+    p = recs[1]["payload"]
+    assert p["changes"] == {'added': [], 'removed': ['Arcane']}
+    assert p["bracket"] == 'unequip'
+
+
+def test_death_cleanup_unapply_swept_before_snapshot_drop():
+    # remove_obj unapplies buffs directly (bypassing remove_buff); the
+    # un-fold must be captured before the unit's snapshot is dropped.
+    lvl = _fresh_level()
+    ogre = _place(lvl, _unit("Ogre"), 5, 5)
+    ogre.apply_buff(_fire_ward())
+    lvl.remove_obj(ogre)
+    recs = _container_records('resists_change', id(ogre))
+    assert len(recs) == 2
+    assert recs[1]["payload"]["changes"] == {'Fire': (50, 0)}
+    assert recs[1]["payload"]["bracket"] == 'buff_unapply'
+    assert id(ogre) not in container_diff.store._units
+
+
+def test_eventless_direct_write_caught_at_next_boundary_unattributed():
+    # The D1 counterexample shape: essence-Reincarnation re-cast writes
+    # resists+tags on a target with ZERO events. Outside any bracket, the
+    # drift surfaces at the next boundary's entry sweep — recorded honestly
+    # with no mechanism tag and no claimed cause, never pinned on the
+    # adjacent bracket.
+    lvl = _fresh_level()
+    ally = _place(lvl, _unit("Ghost"), 4, 4)
+    other = _place(lvl, _unit("Ogre"), 6, 6)
+    ally.apply_buff(_fire_ward())          # boundary: baselines both units
+    ally.resists[Level.Tags.Dark] += 100   # eventless direct writes...
+    ally.tags.append(Level.Tags.Undead)    # ...outside every bracket
+    other.apply_buff(_fire_ward())         # next boundary's ENTRY sweep
+    resist_recs = _container_records('resists_change', id(ally))
+    drift = [r for r in resist_recs if r["payload"]["changes"] == {'Dark': (0, 100)}]
+    assert len(drift) == 1
+    assert drift[0]["payload"]["bracket"] is None
+    assert drift[0]["payload"]["unattributed"] is True
+    tag_recs = _container_records('tags_change', id(ally))
+    assert len(tag_recs) == 1
+    assert tag_recs[0]["payload"]["changes"] == {'added': ['Undead'], 'removed': []}
+    assert tag_recs[0]["payload"]["bracket"] is None
+
+
+def test_reseed_rebaselines_without_flood():
+    lvl = _fresh_level()
+    ogre = _place(lvl, _unit("Ogre"), 5, 5)
+    ogre.apply_buff(_fire_ward())          # baseline + fold record
+    container_diff.reseed()                # level boundary
+    ogre.resists[Level.Tags.Ice] += 75     # changed while unobserved
+    seq_before = journal.sequence
+    _place(lvl, _unit("Newt"), 7, 7).apply_buff(_fire_ward())  # boundary
+    ogre_recs = [r for r in _container_records('resists_change', id(ogre))
+                 if r["sequence"] > seq_before]
+    assert ogre_recs == []                 # baseline, not change
+
+
+def test_container_diff_install_declines_on_missing_shapes():
+    # RW2 backport / future restructure: decline cleanly, wrap nothing.
+    # Level.Buff.apply is shared process state — save/restore in try/finally.
+    _fresh_level()
+    saved_apply = Level.Buff.apply
+    saved_flag = container_diff._installed
+    try:
+        del Level.Buff.apply
+        container_diff._installed = False
+        assert container_diff.install() is False
+        assert not hasattr(Level.Buff, 'apply')      # left unwrapped
+    finally:
+        Level.Buff.apply = saved_apply
+        container_diff._installed = saved_flag
+
+
+def test_container_diff_double_install_noops():
+    _fresh_level()
+    before = Level.Buff.apply
+    assert container_diff.install() is True
+    assert Level.Buff.apply is before

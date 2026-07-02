@@ -348,3 +348,207 @@ store = ContainerStore()
 
 def domain_kind(domain):
     return _DOMAIN_KINDS[domain]
+
+
+# ----------------------------------------------------------------------
+# The sweep — journal-coupled. Runs at every boundary where the live
+# cause can change (plan D2); every delta records under the cause live
+# for the just-closed span via the journal's normal parenting. The sweep
+# is pure observation behind an exception guard: a bug here loses a
+# record, never touches the game (the wraps below call the original
+# unconditionally).
+# ----------------------------------------------------------------------
+
+_installed = False
+_log_fn = None
+_failed_notes = set()      # once-per-site failure-note dedupe
+
+
+def _note_failure(site, exc):
+    if site in _failed_notes:
+        return
+    _failed_notes.add(site)
+    if _log_fn:
+        try:
+            _log_fn(f"[ContainerDiff] sweep failed at {site}: {exc!r}")
+        except Exception:
+            pass
+
+
+def _emit_deltas(level, bracket, detail):
+    from journal import journal, _snapshot_unit
+    units = getattr(level, 'units', None)
+    if units:
+        for unit in list(units):
+            deltas = store.diff_unit(unit)
+            if not deltas:
+                continue
+            snap = _snapshot_unit(unit)
+            for domain, changes in deltas:
+                parent = journal._current_parent_seq()
+                journal.record(domain_kind(domain), {
+                    'unit': snap,
+                    'domain': domain,
+                    'changes': changes,
+                    'bracket': bracket,
+                    'detail': detail,
+                    'unattributed': parent is None,
+                }, parent)
+    player = getattr(level, 'player_unit', None)
+    if player is not None:
+        for (spell_name, before, after) in store.diff_spells(player):
+            parent = journal._current_parent_seq()
+            journal.record(KIND_CHARGES, {
+                'unit': _snapshot_unit(player),
+                'spell': spell_name,
+                'before': before,
+                'after': after,
+                'bracket': bracket,
+                'detail': detail,
+                'unattributed': parent is None,
+            }, parent)
+
+
+def sweep(level, bracket=None, detail=None, site='?'):
+    """Full sweep of the level (plan D1: every snapshotted unit + the spell
+    shelf, no owner-only fast path). bracket names the mechanism of the
+    JUST-CLOSED span for exit sweeps ('buff_apply', 'equip', ...); entry
+    sweeps pass None — their deltas belong to the enclosing span, whose
+    identity is the record's parent, not a mechanism tag."""
+    if level is None:
+        return
+    try:
+        _emit_deltas(level, bracket, detail)
+    except Exception as e:
+        _note_failure(site, e)
+
+
+def reseed():
+    """Level entry / post-load boundary: drop all snapshots. The first
+    sweep after a reseed baselines everything silently (no flood)."""
+    store.reseed()
+
+
+# ----------------------------------------------------------------------
+# Boundary wraps (plan D2, boundaries 1 / 5 / 6) — the synchronous set.
+# Entry sweep closes the outer span; the original runs untouched; exit
+# sweep (in finally) closes this bracket's span with its mechanism tag.
+# Boundaries 2/3/4 (tick, cast root, cast windows) hook the journal's
+# own push/pop and the current_cast_context property in later steps.
+# ----------------------------------------------------------------------
+
+def install(log_fn=None):
+    """Wrap the synchronous boundary methods. Self-gating: verifies the
+    RW3 shapes first and declines cleanly (mod runs diff-less) when absent
+    — the RW2 backport story. Idempotent; joins the shared, unrestored,
+    whole-process monkeypatch category (no teardown)."""
+    global _installed, _log_fn
+    if _installed:
+        return True
+    if log_fn is not None:
+        _log_fn = log_fn
+
+    try:
+        import Level
+    except ImportError:
+        _decline("game Level module not importable")
+        return False
+
+    buff_cls = getattr(Level, 'Buff', None)
+    unit_cls = getattr(Level, 'Unit', None)
+    level_cls = getattr(Level, 'Level', None)
+    needed = (
+        getattr(buff_cls, 'apply', None),
+        getattr(buff_cls, 'unapply', None),
+        getattr(unit_cls, 'equip', None),
+        getattr(unit_cls, 'unequip', None),
+        getattr(level_cls, 'remove_obj', None),
+    )
+    if not all(callable(f) for f in needed):
+        _decline("RW3 buff/equip/remove shapes not found")
+        return False
+
+    original_buff_apply = buff_cls.apply
+    original_buff_unapply = buff_cls.unapply
+    original_unit_equip = unit_cls.equip
+    original_unit_unequip = unit_cls.unequip
+    original_remove_obj = level_cls.remove_obj
+
+    def patched_buff_apply(self, owner):
+        lvl = getattr(owner, 'level', None)
+        sweep(lvl, site='buff_apply:entry')
+        try:
+            return original_buff_apply(self, owner)
+        finally:
+            sweep(lvl, bracket='buff_apply',
+                  detail=_buff_detail(self), site='buff_apply:exit')
+
+    def patched_buff_unapply(self):
+        lvl = getattr(getattr(self, 'owner', None), 'level', None)
+        sweep(lvl, site='buff_unapply:entry')
+        try:
+            return original_buff_unapply(self)
+        finally:
+            sweep(lvl, bracket='buff_unapply',
+                  detail=_buff_detail(self), site='buff_unapply:exit')
+
+    def patched_unit_equip(self, item):
+        lvl = getattr(self, 'level', None)
+        sweep(lvl, site='equip:entry')
+        try:
+            return original_unit_equip(self, item)
+        finally:
+            sweep(lvl, bracket='equip',
+                  detail=_item_detail(item), site='equip:exit')
+
+    def patched_unit_unequip(self, item):
+        lvl = getattr(self, 'level', None)
+        sweep(lvl, site='unequip:entry')
+        try:
+            return original_unit_unequip(self, item)
+        finally:
+            sweep(lvl, bracket='unequip',
+                  detail=_item_detail(item), site='unequip:exit')
+
+    def patched_remove_obj(self, obj):
+        # Final-state sweep BEFORE the removal (deltas belong to the
+        # enclosing span — e.g. the killing cast), then drop the snapshot.
+        sweep(self, site='remove_obj')
+        try:
+            return original_remove_obj(self, obj)
+        finally:
+            try:
+                store.drop_unit(obj)
+            except Exception:
+                pass
+
+    buff_cls.apply = patched_buff_apply
+    buff_cls.unapply = patched_buff_unapply
+    unit_cls.equip = patched_unit_equip
+    unit_cls.unequip = patched_unit_unequip
+    level_cls.remove_obj = patched_remove_obj
+
+    _installed = True
+    if _log_fn:
+        try:
+            _log_fn("[ContainerDiff] boundary wraps installed")
+        except Exception:
+            pass
+    return True
+
+
+def _buff_detail(buff):
+    return {'buff': getattr(buff, 'name', None) or type(buff).__name__}
+
+
+def _item_detail(item):
+    return {'item': getattr(item, 'name', None) or type(item).__name__}
+
+
+def _decline(reason):
+    if _log_fn:
+        try:
+            _log_fn(f"[ContainerDiff] install declined: {reason} — "
+                    "mod runs container-diff-less")
+        except Exception:
+            pass
