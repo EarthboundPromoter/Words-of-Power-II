@@ -103,6 +103,12 @@ _SETTINGS_SCHEMA = [
      "# (coverage checking only — never spoken). Safe to leave on; set false\n"
      "# as a field kill switch if instructed to diagnose a problem.\n"
      "# Default: true"),
+    ('words_of_power', 'container_diff_enabled', 'true',
+     "# Capture in-place stat-container changes (resistances, tags, spell\n"
+     "# charges, stat bonuses) as internal records for future narration —\n"
+     "# nothing is spoken yet. Safe to leave on; set false as a field kill\n"
+     "# switch if instructed to diagnose a problem.\n"
+     "# Default: true"),
     ('words_of_power', 'digest_enabled', 'false',
      "# Enable the direct-action digest: a composed summary of one player\n"
      "# keypress's full effect chain (cast, damage, kills, procs, side-effects)\n"
@@ -293,6 +299,7 @@ class _Cfg:
     pathfind_marked = _settings.getboolean('words_of_power', 'pathfind_marked', fallback=True)
     journal_log_enabled = _settings.getboolean('words_of_power', 'journal_log_enabled', fallback=False)
     log_capture_enabled = _settings.getboolean('words_of_power', 'log_capture_enabled', fallback=True)
+    container_diff_enabled = _settings.getboolean('words_of_power', 'container_diff_enabled', fallback=True)
     digest_enabled = _settings.getboolean('words_of_power', 'digest_enabled', fallback=False)
     # [Composer] — new-pipeline flags. Defaults match the conservative
     # strangler-fig rollout: producers off, legacy batcher on. Flip
@@ -322,6 +329,7 @@ log(f"[Settings] show_coordinates = {cfg.show_coordinates}")
 log(f"[Settings] pathfind_marked = {cfg.pathfind_marked}")
 log(f"[Settings] journal_log_enabled = {cfg.journal_log_enabled}")
 log(f"[Settings] log_capture_enabled = {cfg.log_capture_enabled}")
+log(f"[Settings] container_diff_enabled = {cfg.container_diff_enabled}")
 log(f"[Settings] digest_enabled = {cfg.digest_enabled}")
 log(f"[Settings] crisis_enabled = {cfg.crisis_enabled}")
 log(f"[Settings] orphan_enabled = {cfg.orphan_enabled}")
@@ -514,6 +522,13 @@ if cfg.log_capture_enabled:
     _log_capture.install(log_fn=log)
 else:
     log("[LogCapture] disabled (log_capture_enabled=false)")
+
+# ----- Phase 2.6: Root-1 container-diff capture (records-only; separable) -----
+import container_diff as _container_diff
+if cfg.container_diff_enabled:
+    _container_diff.install(log_fn=log)
+else:
+    log("[ContainerDiff] disabled (container_diff_enabled=false)")
 
 # ----- Phase 3: Direct-action digest composer (gated by digest_enabled) -----
 import digest as _digest
@@ -6650,7 +6665,22 @@ if _PyGameView is not None:
                         _log_capture.checker.reset()
                     except Exception as _oc_e:
                         log(f"[LogCapture] checker reset failed: {_oc_e!r}")
+                    try:
+                        # Container-diff boundary hygiene: drop all snapshots
+                        # with the journal reset — the first sweep on the new
+                        # floor baselines silently (no spawn flood).
+                        _container_diff.reseed()
+                    except Exception as _cd_e:
+                        log(f"[ContainerDiff] reseed failed: {_cd_e!r}")
                 else:
+                    try:
+                        # Container-diff turn boundary (D2 boundary 7): closes
+                        # the turn's final span BEFORE the pipeline composes,
+                        # so late deltas are in the journal the producers read.
+                        _container_diff.turn_boundary(
+                            getattr(self.game, 'cur_level', None))
+                    except Exception as _cd_e:
+                        log(f"[ContainerDiff] turn boundary failed: {_cd_e!r}")
                     try:
                         _wizard_unit = getattr(self.game, 'p1', None)
                         _pipeline.fire_pipeline(

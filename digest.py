@@ -2039,6 +2039,15 @@ _COMPOSER_KNOWN_EVENT_TYPES = frozenset({
     # no unit snapshot, so the wizard-subject scan never sees them
     # (structural, pinned in test_crisis).
     'game_log',
+    # Root-1 container-diff kinds (Unit 1, capture-only), staged for the
+    # composer phase: in-place container mutation — resists/tags folds on
+    # every buff apply/unapply, wizard stat bonuses, spell charges,
+    # cooldowns, lifespans. A single buff-applying cast lands several in
+    # its chain; without these entries every such cast would flood
+    # digest_unmodeled. Crisis twin: _STAGED_CAPTURE_ONLY_KINDS (these
+    # payloads DO carry unit snapshots, unlike game_log).
+    'resists_change', 'tags_change', 'stat_bonus_change',
+    'charges_change', 'cooldown_change', 'lifespan_change',
 })
 
 

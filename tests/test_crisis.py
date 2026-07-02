@@ -1309,3 +1309,20 @@ def test_non_staged_wizard_record_still_trips_crisis_unmodeled():
         [],
     )
     assert len(tel.calls) == 1
+
+
+# ---- Unit 1: container-diff kinds excluded from crisis unmodeled telemetry ----
+
+
+def test_unit1_container_kinds_do_not_trip_crisis_unmodeled():
+    # Container-diff payloads DO carry unit snapshots (unlike game_log), so
+    # wizard-subject instances land on routine turns constantly — every
+    # wizard buff apply folds resists, every cast decrements charges. They
+    # are composer-staged, not missing crisis branches.
+    import container_diff as cd
+    prod = _CrisisProducer()
+    tel = _FakeTelemetry()
+    records = [{"event_type": k, "payload": {"unit": _wizard_snap()}}
+               for k in cd.ALL_KINDS]
+    prod._maybe_emit_unmodeled(tel, records, [])
+    assert tel.calls == []

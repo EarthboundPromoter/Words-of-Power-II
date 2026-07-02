@@ -1549,3 +1549,104 @@ def test_same_cast_suspend_resume_is_one_window():
     assert len(recs) == 1                              # one window, one record
     assert recs[0]["payload"]["changes"] == {'Dark': (0, 200)}
     assert recs[0]["parent"] == casts[0]["sequence"]
+
+
+# ---- Unit 1 step 5: the spell shelf (charges) + buff charge compensation ----
+
+def test_pay_costs_charge_decrement_attributed_to_cast_span():
+    lvl = _fresh_level()
+    wiz = _place(lvl, _unit("Wizard", player=True), 2, 2)
+    lvl.player_unit = wiz
+    spell = Level.Spell()
+    spell.name = "Zap"
+    spell.max_charges = 3
+    spell.cur_charges = 3
+    spell.caster = wiz
+    spell.owner = wiz
+    wiz.spells.append(spell)
+    container_diff.turn_boundary(lvl)          # baseline the shelf
+    cast = journal.record('cast_begin', {'spell': {'name': 'Zap'}})
+    journal.push(cast)                         # the execute_cast span shape
+    spell.pay_costs()
+    journal.pop()
+    recs = [r for r in journal.records
+            if r["event_type"] == 'charges_change'
+            and r["payload"].get("spell") == 'Zap']
+    assert len(recs) == 1
+    p = recs[0]["payload"]
+    assert (p["before"], p["after"]) == (3, 2)
+    assert p["bracket"] == 'cast_begin'
+    assert recs[0]["parent"] == cast["sequence"]
+    assert p["unattributed"] is False
+
+
+class _RefundTickBuff(Level.Buff):
+    # The gear-proc refund shape (G-D sub 3): charges restored during a
+    # per-turn tick.
+    def __init__(self, spell):
+        self._spell = spell
+        Level.Buff.__init__(self)
+
+    def on_init(self):
+        self.name = "Recharger"
+
+    def on_advance(self):
+        self._spell.refund_charges(1)
+
+
+def test_refund_during_tick_attributed_to_tick():
+    lvl = _fresh_level()
+    wiz = _place(lvl, _unit("Wizard", player=True), 2, 2)
+    lvl.player_unit = wiz
+    spell = Level.Spell()
+    spell.name = "Zap"
+    spell.max_charges = 3
+    spell.cur_charges = 1
+    spell.caster = wiz
+    spell.owner = wiz
+    wiz.spells.append(spell)
+    wiz.apply_buff(_RefundTickBuff(spell))     # boundary: baselines shelf
+    seq = journal.sequence
+    wiz.advance_buffs()
+    ticks = [r for r in journal.records
+             if r["event_type"] == "buff_tick" and r["sequence"] > seq]
+    assert len(ticks) == 1
+    recs = [r for r in journal.records
+            if r["sequence"] > seq
+            and r["event_type"] == 'charges_change']
+    assert len(recs) == 1
+    p = recs[0]["payload"]
+    assert (p["before"], p["after"]) == (1, 2)
+    assert recs[0]["parent"] == ticks[0]["sequence"]
+
+
+def test_buff_max_charge_compensation_attributed_to_buff_apply():
+    # Buff.apply's discovery write (Level.py:1190-1193): a max_charges bonus
+    # nudges cur_charges inside the apply fold — BOTH the bonus-dict delta
+    # and the charge delta belong to the buff_apply bracket.
+    lvl = _fresh_level()
+    wiz = _place(lvl, _unit("Wizard", player=True), 2, 2)
+    lvl.player_unit = wiz
+    spell = Level.Spell()
+    spell.name = "Zap"
+    spell.max_charges = 3
+    spell.cur_charges = 3
+    spell.caster = wiz
+    spell.owner = wiz
+    wiz.spells.append(spell)
+    container_diff.turn_boundary(lvl)          # baseline
+    locket = Level.Buff()
+    locket.name = "Charge Locket"
+    locket.spell_bonuses[type(spell)]['max_charges'] = 2
+    wiz.apply_buff(locket)
+    charge_recs = [r for r in journal.records
+                   if r["event_type"] == 'charges_change'
+                   and r["payload"].get("spell") == 'Zap']
+    assert len(charge_recs) == 1
+    p = charge_recs[0]["payload"]
+    assert (p["before"], p["after"]) == (3, 5)
+    assert p["bracket"] == 'buff_apply'
+    bonus_recs = [r for r in _container_records('stat_bonus_change', id(wiz))]
+    assert len(bonus_recs) == 1
+    assert bonus_recs[0]["payload"]["domain"] == 'spell_bonuses'
+    assert bonus_recs[0]["payload"]["bracket"] == 'buff_apply'

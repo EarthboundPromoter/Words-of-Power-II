@@ -64,7 +64,16 @@ def _is_wizard_snap(snap):
 # phase (Track B wizard-highlight / mass-aggregation). Excluded from the
 # crisis unmodeled-telemetry scan — see _maybe_emit_unmodeled. Mirror of the
 # digest's known-set additions (digest._COMPOSER_KNOWN_EVENT_TYPES).
-_STAGED_CAPTURE_ONLY_KINDS = frozenset({'hp_loss', 'xp_change', 'EventOnAwakened'})
+_STAGED_CAPTURE_ONLY_KINDS = frozenset({
+    'hp_loss', 'xp_change', 'EventOnAwakened',
+    # Root-1 container-diff kinds (Unit 1, capture-only, composer-staged).
+    # These payloads carry unit snapshots — wizard-subject instances land
+    # on routine turns constantly (every wizard buff apply folds resists;
+    # every cast decrements charges), so counting them would turn
+    # wizard_records_no_output into noise, exactly like hp_loss/xp_change.
+    'resists_change', 'tags_change', 'stat_bonus_change',
+    'charges_change', 'cooldown_change', 'lifespan_change',
+})
 
 
 def _claim(record):

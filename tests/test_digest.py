@@ -2847,3 +2847,30 @@ def test_unit4_capture_only_kinds_known_to_digest_telemetry():
     ]
     digest_mod._maybe_emit_unmodeled(tel, 1, chain, ["Cast Fireball."])
     assert tel.calls == []
+
+
+# ---- Unit 1: container-diff kinds are known to digest telemetry ----
+
+
+def test_unit1_container_kinds_known_to_digest_telemetry():
+    # The six Root-1 container-diff kinds are capture-only (composer-staged);
+    # a chain carrying them (any buff-applying cast folds resists; any cast
+    # decrements charges) must not fire digest_unmodeled unknown_event_types.
+    import digest as digest_mod
+    import container_diff as cd
+
+    for kind in cd.ALL_KINDS:
+        assert kind in digest_mod._COMPOSER_KNOWN_EVENT_TYPES
+
+    class _Tel:
+        def __init__(self):
+            self.calls = []
+
+        def emit(self, *args, **kwargs):
+            self.calls.append((args, kwargs))
+
+    tel = _Tel()
+    chain = [{"event_type": "cast_begin", "payload": {}}]
+    chain += [{"event_type": k, "payload": {}} for k in cd.ALL_KINDS]
+    digest_mod._maybe_emit_unmodeled(tel, 1, chain, ["Cast Fireball."])
+    assert tel.calls == []
