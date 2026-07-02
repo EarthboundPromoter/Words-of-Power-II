@@ -26,12 +26,19 @@ if mod_dir not in sys.path:
 
 import Level
 from journal import journal, install_hooks
+import log_capture
 
 
 # ---- Harness ----
 
 def _fresh_level():
     install_hooks()  # idempotent
+    # The canonical (sole) install site for the oracle wrap in the suite —
+    # log_capture.install() joins install_hooks() in the shared, unrestored,
+    # whole-process monkeypatch category, so every test here runs with the
+    # production Level.log shape (game_log records interleaved; all helpers
+    # filter by kind).
+    log_capture.install()
     lvl = Level.Level(15, 15)
     journal.reset(id(lvl))
     journal._level = lvl
@@ -815,3 +822,166 @@ def test_deal_damage_is_sole_evented_hp_path():
         assert dd_start < sites[0] < dd_end, (
             "%s no longer constructed inside deal_damage (%d not in %d..%d)."
             % (ev, sites[0], dd_start, dd_end))
+
+
+# ---- Oracle step 1: the Level.log wrap and its record shape (O1/O4) ----
+
+def _game_logs():
+    return [r for r in journal.records if r["event_type"] == "game_log"]
+
+
+def test_log_capture_record_shape_tuple_entry():
+    lvl = _fresh_level()
+    lvl.turn_no = 3
+    lvl.log(("{unit} tests {thing}", {"unit": "Ogre", "thing": "capture"}))
+    recs = _game_logs()
+    assert len(recs) == 1
+    p = recs[0]["payload"]
+    assert p["template"] == "{unit} tests {thing}"
+    assert p["values"] == {"unit": "Ogre", "thing": "capture"}
+    assert p["resolved"] == "Ogre tests capture"
+    assert p["turn"] == 3
+    # The game's own write landed too, in the same bucket.
+    assert lvl.combat_log[3][-1] == "Ogre tests capture"
+
+
+def test_log_capture_bare_string_entry():
+    # Mutators.py:122/155/184 and Level.py:2138/2154 pass bare strings.
+    lvl = _fresh_level()
+    lvl.log("Object removed from level due to mutator.")
+    recs = _game_logs()
+    assert len(recs) == 1
+    p = recs[0]["payload"]
+    assert p["template"] == "Object removed from level due to mutator."
+    assert p["values"] == {}
+    assert p["resolved"] == "Object removed from level due to mutator."
+
+
+def test_log_capture_setup_writes_bucket_to_turn_one():
+    # turn_no is 0 during setup/deploy; the game folds those into bucket 1
+    # (max(1, turn_no)) and the record mirrors that.
+    lvl = _fresh_level()
+    assert lvl.turn_no == 0
+    lvl.log("setup line")
+    assert _game_logs()[0]["payload"]["turn"] == 1
+
+
+def test_log_capture_coerces_non_primitive_values():
+    # Nested markup tuples (color_entity) and arbitrary objects coerce to str;
+    # no live references may reach the journal.
+    lvl = _fresh_level()
+    marker = object()
+    lvl.log(("{who} does {what}",
+             {"who": ("[{name}:{color}]", {"name": "Ogre", "color": "enemy"}),
+              "what": marker}))
+    values = _game_logs()[0]["payload"]["values"]
+    assert isinstance(values["who"], str)
+    assert isinstance(values["what"], str)
+
+
+def test_log_capture_non_ascii_roundtrips_jsonl(tmp_path):
+    # A localized resolved string must survive journal.record + JSONL emission.
+    lvl = _fresh_level()
+    path = tmp_path / "journal_test.jsonl"
+    journal.open_log(str(path))
+    try:
+        lvl.log(("{unit} frappé", {"unit": "Ogre"}))
+    finally:
+        journal.close_log()
+    recs = _game_logs()
+    assert recs and "frappé" in recs[0]["payload"]["resolved"]
+    import json
+    lines = [json.loads(ln) for ln in
+             path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    emitted = [d for d in lines if d.get("event_type") == "game_log"]
+    assert emitted and "frappé" in emitted[0]["payload"]["resolved"]
+
+
+def test_log_capture_ordering_invariant_capture_failure_never_blocks_game():
+    # THE safety property: the game's write lands even when the ENTIRE capture
+    # path throws. Original-first, zero mod code before it.
+    lvl = _fresh_level()
+    real_capture = log_capture._capture
+
+    def exploding_capture(level, entry):
+        raise RuntimeError("boom")
+
+    log_capture._capture = exploding_capture
+    try:
+        lvl.log(("{unit} survives", {"unit": "Ogre"}))
+    finally:
+        log_capture._capture = real_capture
+    assert lvl.combat_log[1][-1] == "Ogre survives"   # game write landed
+    assert _game_logs() == []                          # record lost, nothing else
+
+
+def test_log_capture_failure_note_deduped_per_template():
+    lvl = _fresh_level()
+    real_capture = log_capture._capture
+    notes = []
+    real_log_fn = log_capture._log_fn
+    log_capture._log_fn = notes.append
+    log_capture._failed_templates.clear()
+
+    def exploding_capture(level, entry):
+        raise RuntimeError("boom")
+
+    log_capture._capture = exploding_capture
+    try:
+        lvl.log(("dup {n}", {"n": 1}))
+        lvl.log(("dup {n}", {"n": 2}))
+        lvl.log("other line")
+    finally:
+        log_capture._capture = real_capture
+        log_capture._log_fn = real_log_fn
+        log_capture._failed_templates.clear()
+    assert len([n for n in notes if "dup {n}" in n]) == 1
+    assert len([n for n in notes if "other line" in n]) == 1
+
+
+def test_log_capture_reentrant_log_call_guarded():
+    # No capture path reaches Level.log today (resolve_text verified log-free);
+    # pin the guard anyway: a reentrant call must neither recurse nor lose the
+    # game's writes.
+    lvl = _fresh_level()
+    real_capture = log_capture._capture
+
+    def reentrant_capture(level, entry):
+        template, _ = log_capture._entry_parts(entry)
+        if template == "outer":
+            level.log("inner")   # re-enters the wrap; guard skips its capture
+        real_capture(level, entry)
+
+    log_capture._capture = reentrant_capture
+    try:
+        lvl.log("outer")
+    finally:
+        log_capture._capture = real_capture
+    assert "outer" in lvl.combat_log[1]
+    assert "inner" in lvl.combat_log[1]                # both game writes landed
+    templates = [r["payload"]["template"] for r in _game_logs()]
+    assert templates == ["outer"]                      # inner capture skipped
+
+
+def test_log_capture_double_install_noops():
+    _fresh_level()
+    wrapped = Level.Level.log
+    assert log_capture.install() is True
+    assert Level.Level.log is wrapped                  # not re-wrapped
+
+
+def test_log_capture_install_declines_on_missing_sink():
+    # Simulate the RW2 backport / a future sink restructure. Level.Level.log
+    # is shared process state — save/restore in try/finally, and restore the
+    # module's installed flag so later tests keep the live wrap.
+    _fresh_level()
+    saved_log = Level.Level.log
+    saved_flag = log_capture._installed
+    try:
+        del Level.Level.log
+        log_capture._installed = False
+        assert log_capture.install() is False
+        assert not hasattr(Level.Level, 'log')         # left unwrapped
+    finally:
+        Level.Level.log = saved_log
+        log_capture._installed = saved_flag

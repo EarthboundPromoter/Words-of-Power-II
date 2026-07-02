@@ -98,6 +98,11 @@ _SETTINGS_SCHEMA = [
      "# to journal_debug.log. Used by the mod author for debugging the data-model\n"
      "# pipeline. No effect on speech behavior. Leave false unless instructed.\n"
      "# Default: false"),
+    ('words_of_power', 'log_capture_enabled', 'true',
+     "# Capture the game's combat-log writes as internal validation records\n"
+     "# (coverage checking only — never spoken). Safe to leave on; set false\n"
+     "# as a field kill switch if instructed to diagnose a problem.\n"
+     "# Default: true"),
     ('words_of_power', 'digest_enabled', 'false',
      "# Enable the direct-action digest: a composed summary of one player\n"
      "# keypress's full effect chain (cast, damage, kills, procs, side-effects)\n"
@@ -287,6 +292,7 @@ class _Cfg:
     show_coordinates = _settings.getboolean('words_of_power', 'show_coordinates', fallback=True)
     pathfind_marked = _settings.getboolean('words_of_power', 'pathfind_marked', fallback=True)
     journal_log_enabled = _settings.getboolean('words_of_power', 'journal_log_enabled', fallback=False)
+    log_capture_enabled = _settings.getboolean('words_of_power', 'log_capture_enabled', fallback=True)
     digest_enabled = _settings.getboolean('words_of_power', 'digest_enabled', fallback=False)
     # [Composer] — new-pipeline flags. Defaults match the conservative
     # strangler-fig rollout: producers off, legacy batcher on. Flip
@@ -315,6 +321,7 @@ if cfg.spawn_coord_cap < 0:
 log(f"[Settings] show_coordinates = {cfg.show_coordinates}")
 log(f"[Settings] pathfind_marked = {cfg.pathfind_marked}")
 log(f"[Settings] journal_log_enabled = {cfg.journal_log_enabled}")
+log(f"[Settings] log_capture_enabled = {cfg.log_capture_enabled}")
 log(f"[Settings] digest_enabled = {cfg.digest_enabled}")
 log(f"[Settings] crisis_enabled = {cfg.crisis_enabled}")
 log(f"[Settings] orphan_enabled = {cfg.orphan_enabled}")
@@ -500,6 +507,13 @@ if cfg.journal_log_enabled:
     log(f"[Journal] Capture hooks installed; debug log -> {_journal_log_path}")
 else:
     log("[Journal] Capture hooks installed; debug log disabled (journal_log_enabled=false)")
+
+# ----- Phase 2.5: Combat-log oracle capture (validation-only; separable) -----
+import log_capture as _log_capture
+if cfg.log_capture_enabled:
+    _log_capture.install(log_fn=log)
+else:
+    log("[LogCapture] disabled (log_capture_enabled=false)")
 
 # ----- Phase 3: Direct-action digest composer (gated by digest_enabled) -----
 import digest as _digest
