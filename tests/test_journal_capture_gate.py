@@ -1785,8 +1785,10 @@ def _wiz_with_inventory(lvl, x=7, y=7):
 
 
 class _InertComponent(Level.Component):
-    # Defined AFTER install -> deliberately unwrapped at the component grain;
-    # exercises the dispatch-grain marker alone.
+    # Defined at module import — BEFORE the fixture's install — so the
+    # component-grain walk wraps it like game content (step 3). Tests
+    # filtering by item_pickup are unaffected; its component_effect
+    # window is empty.
     def on_init(self):
         self.name = "Inert Test Component"
 
@@ -2072,6 +2074,105 @@ def test_craft_marker_minion_copy_nests_under_live_cause():
     assert p["ingredients"] == ["EnchantersAwl", "EnchantersAwl"]
     assert p["recipient"]["name"] == "Wolf"
     assert _has_ancestor(crafts[0], outer["sequence"])
+
+
+# ---- Unit 2 step 3: component-grain component_effect windows ----
+
+def test_component_walk_census_floor():
+    # The ancestry walk wrapped the full census (68 pickup + 15 craft hooks
+    # at S29; loose floors tolerate content updates, alert on API drift).
+    _fresh_level()
+    assert cause_markers._wrapped_pickup_count >= 60
+    assert cause_markers._wrapped_craft_count >= 12
+
+
+def test_component_effect_child_of_item_pickup_same_identity():
+    # Dual grain, the common case: prop marker "picked up Frostpetal" with
+    # a component_effect child carrying the SAME identity (the composer's
+    # collapse rule), effects under the child.
+    from Components import Frostpetal
+    lvl = _fresh_level()
+    wiz = _wiz_with_inventory(lvl)
+    pickup = Level.ComponentPickup(Frostpetal())
+    lvl.add_prop(pickup, 8, 8)
+    pickup.on_player_enter(wiz)
+    pickups = _markers_of("item_pickup")
+    effects = _markers_of("component_effect")
+    assert len(pickups) == 1 and len(effects) == 1
+    assert effects[0]["payload"]["component"] == "Frostpetal"
+    assert effects[0]["payload"]["hook"] == "pickup"
+    assert pickups[0]["payload"]["component"] == "Frostpetal"
+    assert _has_ancestor(effects[0], pickups[0]["sequence"])
+    applies = [r for r in journal.records
+               if r["event_type"] == "EventOnBuffApply"
+               and _has_ancestor(r, effects[0]["sequence"])]
+    assert applies
+
+
+def test_engine_hook_predicates_survive_wrap():
+    # ⟨GATE⟩ D5 pins: the engine's own-hook identity tests must be
+    # UNCHANGED post-install. (1) Component.__init__ overlay/is_rare
+    # branches (Level.py:980-987) on freshly-built instances; (2) the
+    # Chalice valid_choices predicate (Equipment.py:6586) keeps craft-only
+    # components OUT and pickup components IN.
+    from Components import Frostpetal, EnchantersAwl
+    _fresh_level()
+    petal = Frostpetal()          # own on_pickup -> pickup overlay, not rare
+    awl = EnchantersAwl()         # own on_craft only -> craft overlay + rare
+    assert petal.overlay_asset == ['tiles', 'crafting', 'component_on_pickup']
+    assert petal.is_rare is False
+    assert awl.overlay_asset == ['tiles', 'crafting', 'component_on_craft']
+    assert awl.is_rare is True
+    assert type(petal).on_pickup is not Level.Component.on_pickup
+    assert type(awl).on_pickup is Level.Component.on_pickup   # untouched base
+    valid = [c for c in (petal, awl)
+             if type(c).on_pickup is not Level.Component.on_pickup]
+    assert valid == [petal]
+
+
+def test_chalice_component_effect_carries_random_choice_identity():
+    # The which-component earmark, satisfied structurally: the Chalice's
+    # random choice surfaces as a component_effect child of the trigger
+    # marker — no game_log dependency.
+    import Equipment as Eq
+    from Components import Frostpetal
+    lvl = _fresh_level()
+    wiz = _wiz_with_inventory(lvl)
+    lvl.player_unit = wiz
+    chalice = Eq.ArtificersChalice()
+    chalice.stored_components = [Frostpetal()]
+    wiz.equip(chalice)
+    orb = Level.MemoryOrb()
+    lvl.add_prop(orb, 8, 8)
+    orb.on_player_enter(wiz)
+    triggers = _markers_of("equipment_trigger")
+    effects = _markers_of("component_effect")
+    assert len(triggers) == 1 and len(effects) == 1
+    assert effects[0]["payload"]["component"] == "Frostpetal"
+    assert _has_ancestor(effects[0], triggers[0]["sequence"])
+
+
+def test_direct_on_pickup_bypass_covered_under_cast():
+    # The Gold Drake shape (Spells.py:7114): content code replays
+    # component.on_pickup on a minion directly, bypassing on_player_enter.
+    # No item_pickup moment exists — the component_effect window alone
+    # carries identity, nested under the live cast.
+    from Components import Frostpetal
+    lvl = _fresh_level()
+    _wiz_with_inventory(lvl)
+    drake = _place(lvl, _unit("Gold Drake"), 9, 9)
+    comp = Frostpetal()
+    outer = journal.record("cast_begin", {"spell": "Gold Drake"})
+    journal.push(outer)
+    try:
+        comp.on_pickup(drake, lvl)
+    finally:
+        journal.pop()
+    assert _markers_of("item_pickup") == []
+    effects = _markers_of("component_effect")
+    assert len(effects) == 1
+    assert effects[0]["payload"]["recipient"]["name"] == "Gold Drake"
+    assert _has_ancestor(effects[0], outer["sequence"])
 
 
 def test_non_equipment_purchase_gets_no_craft_marker():

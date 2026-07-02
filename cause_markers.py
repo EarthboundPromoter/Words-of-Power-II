@@ -276,6 +276,104 @@ def _wrap_minion_copy(unit_cls):
 
 
 # ----------------------------------------------------------------------
+# Component grain — component_effect windows ⟨OWNER-RULED S29: dual grain⟩
+#
+# The per-component identity carrier: every Component subclass that
+# defines its OWN on_pickup/on_craft gets a component_effect window
+# around it. This is what delivers Chalice's which-component and the
+# Rod's per-component boundaries STRUCTURALLY (capture ⊇ render: the
+# game renders the identity via its log line, which downstream may
+# never REQUIRE), and it covers every dispatch site — including
+# bypasses like Gold Drake's minion replay (Spells.py:7114) — by
+# construction, self-maintaining over added content.
+#
+# ⚠ CARE (gate): NEVER wrap the base hooks. The engine tests hook
+# identity against the base (Level.py:980-981 overlay/is_rare;
+# Equipment.py:6586 Chalice valid_choices) — wrapping only own-__dict__
+# overrides keeps both predicates truthful (a wrapped override is still
+# `is not Component.on_pickup`). Enumeration is ANCESTRY-based (never
+# method-name matching: Mutators.py:1145 / Equipment.py:8249 define
+# same-named event handlers on non-Component classes). Classes defined
+# after install (later-loading mods) are not wrapped — accepted.
+# ----------------------------------------------------------------------
+
+_wrapped_pickup_count = 0
+_wrapped_craft_count = 0
+
+
+def _iter_component_subclasses(base):
+    seen = set()
+    stack = list(base.__subclasses__())
+    while stack:
+        cls = stack.pop()
+        if cls in seen:
+            continue
+        seen.add(cls)
+        stack.extend(cls.__subclasses__())
+        yield cls
+
+
+def _wrap_component_pickup(cls):
+    original = vars(cls)['on_pickup']
+    site = 'component_effect:%s.on_pickup' % cls.__name__
+
+    def patched_on_pickup(self, player, level):
+        payload = None
+        try:
+            payload = {'component': type(self).__name__,
+                       'name': getattr(self, 'name', type(self).__name__),
+                       'hook': 'pickup',
+                       'recipient': _snapshot_unit(player)}
+        except Exception as e:
+            _note_failure(site, e)
+        rec = (_open_marker('component_effect', payload, level, site)
+               if payload is not None else None)
+        try:
+            return original(self, player, level)
+        finally:
+            _close_marker(rec, site)
+
+    cls.on_pickup = patched_on_pickup
+
+
+def _wrap_component_craft(cls):
+    original = vars(cls)['on_craft']
+    site = 'component_effect:%s.on_craft' % cls.__name__
+
+    def patched_on_craft(self, player, equipment):
+        payload = None
+        try:
+            payload = {'component': type(self).__name__,
+                       'name': getattr(self, 'name', type(self).__name__),
+                       'hook': 'craft',
+                       'equipment': getattr(equipment, 'name', None),
+                       'recipient': _snapshot_unit(player)}
+        except Exception as e:
+            _note_failure(site, e)
+        rec = (_open_marker('component_effect', payload,
+                            getattr(player, 'level', None), site)
+               if payload is not None else None)
+        try:
+            return original(self, player, equipment)
+        finally:
+            _close_marker(rec, site)
+
+    cls.on_craft = patched_on_craft
+
+
+def _walk_and_wrap_components(component_base):
+    global _wrapped_pickup_count, _wrapped_craft_count
+    for cls in _iter_component_subclasses(component_base):
+        d = vars(cls)
+        if 'on_pickup' in d:
+            _wrap_component_pickup(cls)
+            _wrapped_pickup_count += 1
+        if 'on_craft' in d:
+            _wrap_component_craft(cls)
+            _wrapped_craft_count += 1
+
+
+# ----------------------------------------------------------------------
 # Install — self-gating, idempotent, separable
 # ----------------------------------------------------------------------
 
@@ -296,6 +394,12 @@ def install(log_fn=None):
         import LevelRewards
         import Equipment
         import Game
+        # The three modules that define Component subclasses — imported so
+        # the ancestry walk sees the full census (in the running game these
+        # are sys.modules hits; Mutators' one hook-defining class rides the
+        # Component ancestry, not its Mutator classes).
+        import Components   # noqa: F401
+        import Mutators     # noqa: F401
     except Exception as e:
         _note_failure('install:import', e)
         return False
@@ -339,12 +443,15 @@ def install(log_fn=None):
     _wrap_chalice_pickup(Equipment.ArtificersChalice)
     _wrap_try_shop(Game.Game, Level.Equipment)
     _wrap_minion_copy(Level.Unit)
+    _walk_and_wrap_components(Level.Component)
 
     _installed = True
     if _log_fn:
         try:
             _log_fn("[CauseMarkers] markers installed: pickup (4 sites), "
-                    "equipment-trigger (2), craft (2)")
+                    "equipment-trigger (2), craft (2), component grain "
+                    "(%d pickup / %d craft hooks)"
+                    % (_wrapped_pickup_count, _wrapped_craft_count))
         except Exception:
             pass
     return True
