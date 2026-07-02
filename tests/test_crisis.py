@@ -1299,6 +1299,24 @@ def test_game_log_records_never_trip_crisis_unmodeled():
     assert tel.calls == []
 
 
+def test_cause_marker_records_never_trip_crisis_unmodeled():
+    # Unit 2: marker payloads carry a 'recipient' snapshot, not
+    # 'unit'/'target', so the wizard-subject scan structurally never sees
+    # them (game_log precedent — no _STAGED_CAPTURE_ONLY_KINDS twin needed).
+    # Pinned so a payload-key change re-raises the question.
+    prod = _CrisisProducer()
+    tel = _FakeTelemetry()
+    prod._maybe_emit_unmodeled(
+        tel,
+        [{"event_type": "item_pickup",
+          "payload": {"item": "Frostpetal", "item_kind": "component",
+                      "component": "Frostpetal",
+                      "recipient": _wizard_snap()}}],
+        [],
+    )
+    assert tel.calls == []
+
+
 def test_non_staged_wizard_record_still_trips_crisis_unmodeled():
     # The diagnostic itself is preserved for kinds crisis is expected to render.
     prod = _CrisisProducer()

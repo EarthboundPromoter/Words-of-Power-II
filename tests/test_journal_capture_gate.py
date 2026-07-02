@@ -25,9 +25,21 @@ if mod_dir not in sys.path:
     sys.path.insert(0, mod_dir)
 
 import Level
+
+# Unit 2's collect_component wrap lives in LevelRewards, whose import chain
+# only resolves in the game entry point's order (Game first — RiftWizard3.py
+# line 20) and reaches SteamAdapter -> steamworks, a frozen-bundle-only
+# module used at runtime init, never at import: stub it. Dev-harness-only —
+# in the running game everything is already in sys.modules when the mod
+# loads, so cause_markers.install() there is order-blind.
+import types as _types
+sys.modules.setdefault('steamworks', _types.ModuleType('steamworks'))
+import Game  # noqa: F401  -- resolves the LevelRewards/Spells/Monsters cycle
+
 from journal import journal, install_hooks
 import log_capture
 import container_diff
+import cause_markers
 
 
 # ---- Harness ----
@@ -45,6 +57,10 @@ def _fresh_level():
     # reseed baselines silently.
     container_diff.install()
     container_diff.reseed()
+    # Same category for the Root-2 cause-marker wraps (Unit 2): every heavy
+    # test runs with the production dispatch shapes (item_pickup markers on
+    # the pickup paths; all helpers filter by kind).
+    cause_markers.install()
     lvl = Level.Level(15, 15)
     journal.reset(id(lvl))
     journal._level = lvl
@@ -68,6 +84,19 @@ def _src(name="Test"):
     # Minimal damage source: deal_damage reads source.name / source.owner.
     import types
     return types.SimpleNamespace(name=name, owner=None)
+
+
+def _has_ancestor(rec, ancestor_seq):
+    # Walk the parent chain (records are append-ordered; parents precede
+    # children) — true if ancestor_seq appears anywhere above rec.
+    by_seq = {r["sequence"]: r for r in journal.records}
+    seq = rec["parent"]
+    while seq is not None:
+        if seq == ancestor_seq:
+            return True
+        parent = by_seq.get(seq)
+        seq = parent["parent"] if parent else None
+    return False
 
 
 def _shield_records(target_id=None):
@@ -378,8 +407,10 @@ def test_ruby_heart_captures_heal_and_max_change():
 
 
 def test_component_pickup_captured_universally():
-    # Heart Fragment on_pickup (max += 10, cur += 10) via the floor pickup path —
-    # captured by the interceptor with no ComponentPickup-specific hook.
+    # Heart Fragment on_pickup (max += 10, cur += 10) via the floor pickup
+    # path — the writes captured by the interceptor, and (Unit 2) BOTH
+    # records parented to the item_pickup marker the wrapped
+    # ComponentPickup.on_player_enter opens around the whole entry.
     from Components import HeartFragment
     import collections
     lvl = _fresh_level()
@@ -393,6 +424,11 @@ def test_component_pickup_captured_universally():
     assert len(_silent_heals(id(wiz))) == 1
     assert _silent_heals(id(wiz))[0]["payload"]["heal_amount"] == 10   # 40 -> 50
     assert len(_max_hp_changes(id(wiz))) == 1
+    markers = [r for r in journal.records if r["event_type"] == "item_pickup"]
+    assert len(markers) == 1
+    assert markers[0]["payload"]["component"] == "HeartFragment"
+    for rec in _silent_heals(id(wiz)) + _max_hp_changes(id(wiz)):
+        assert _has_ancestor(rec, markers[0]["sequence"])
 
 
 def test_max_hp_drain_captured():
@@ -1731,3 +1767,179 @@ def test_quiet_baseline_no_unattributed_records_across_normal_actions():
         (r["event_type"], r["payload"].get("domain"),
          r["payload"].get("changes")) for r in stray]
     assert [c for c in tel.calls if c[0] == 'container_drift'] == []
+
+
+# ---- Unit 2 step 1: item_pickup cause-markers (Root-2 leg 1) ----
+
+def _pickup_markers():
+    return [r for r in journal.records if r["event_type"] == "item_pickup"]
+
+
+def _wiz_with_inventory(lvl, x=7, y=7):
+    import collections
+    wiz = _unit("Wizard", hp=50, player=True)
+    wiz.component_tags = collections.defaultdict(int)
+    wiz.xp = 0
+    _place(lvl, wiz, x, y)
+    return wiz
+
+
+class _InertComponent(Level.Component):
+    # Defined AFTER install -> deliberately unwrapped at the component grain;
+    # exercises the dispatch-grain marker alone.
+    def on_init(self):
+        self.name = "Inert Test Component"
+
+    def on_pickup(self, player, level):
+        pass
+
+
+def test_item_pickup_marker_root_when_bare():
+    # A bare floor pickup (no live cause): the marker is a ROOT with the D3
+    # payload shape — the self-covering nested-marker design's base case.
+    lvl = _fresh_level()
+    wiz = _wiz_with_inventory(lvl)
+    pickup = Level.ComponentPickup(_InertComponent())
+    lvl.add_prop(pickup, 8, 8)
+    pickup.on_player_enter(wiz)
+    markers = _pickup_markers()
+    assert len(markers) == 1
+    m = markers[0]
+    assert m["parent"] is None
+    assert m["payload"]["item"] == "Inert Test Component"
+    assert m["payload"]["item_kind"] == "component"
+    assert m["payload"]["component"] == "_InertComponent"
+    assert m["payload"]["recipient"]["is_player_controlled"] is True
+    assert not journal.cause_stack                 # window closed
+
+
+def test_item_pickup_marker_nests_under_live_cause():
+    # The ledger's NESTED refinement: with a cause live (a cast, a tick, an
+    # enemy push), the marker attaches as its CHILD, never a second root.
+    lvl = _fresh_level()
+    wiz = _wiz_with_inventory(lvl)
+    pickup = Level.ComponentPickup(_InertComponent())
+    lvl.add_prop(pickup, 8, 8)
+    outer = journal.record("cast_begin", {"spell": "Blink"})
+    journal.push(outer)
+    try:
+        pickup.on_player_enter(wiz)
+    finally:
+        journal.pop()
+    markers = _pickup_markers()
+    assert len(markers) == 1
+    assert markers[0]["parent"] == outer["sequence"]
+
+
+def test_memory_orb_and_ruby_heart_markers_own_their_writes():
+    # The componentless peers: MemoryOrb's xp write and HeartDot's heal/max
+    # writes all land under their item_pickup markers.
+    lvl = _fresh_level()
+    wiz = _wiz_with_inventory(lvl)
+    wiz.cur_hp = 20
+    orb = Level.MemoryOrb()
+    lvl.add_prop(orb, 8, 8)
+    orb.on_player_enter(wiz)
+    heart = Level.HeartDot()
+    lvl.add_prop(heart, 8, 7)
+    heart.on_player_enter(wiz)
+    markers = _pickup_markers()
+    assert [m["payload"]["item_kind"] for m in markers] == \
+        ["memory_orb", "ruby_heart"]
+    assert all("component" not in m["payload"] for m in markers)
+    heart_seq = markers[1]["sequence"]
+    for rec in _silent_heals(id(wiz)) + _max_hp_changes(id(wiz)):
+        assert _has_ancestor(rec, heart_seq)
+    xp = [r for r in journal.records if r["event_type"] == "xp_change"]
+    assert len(xp) == 1
+    assert _has_ancestor(xp[0], markers[0]["sequence"])
+
+
+def test_collect_component_marker_shrine_grant():
+    # The fifth pickup shape (S29 walk find): Dissolution Shrine overflow
+    # goes straight to inventory via collect_component — same marker, the
+    # shrine_grant item_kind.
+    import LevelRewards
+    from Components import HeartFragment
+    lvl = _fresh_level()
+    wiz = _wiz_with_inventory(lvl)
+    lvl.player_unit = wiz
+    wiz.cur_hp = 40
+    shop = object.__new__(LevelRewards.DissolutionShop)   # state unused
+    shop.collect_component(wiz, HeartFragment())
+    markers = _pickup_markers()
+    assert len(markers) == 1
+    assert markers[0]["payload"]["item_kind"] == "shrine_grant"
+    assert markers[0]["payload"]["component"] == "HeartFragment"
+    assert _has_ancestor(_silent_heals(id(wiz))[0], markers[0]["sequence"])
+
+
+def test_relocator_beacon_nested_pickup_windows():
+    # ⟨GATE⟩ D5 pin: the reentrant pickup — RelocatorBeacon's on_pickup
+    # applies its buff, whose on_applied fires trigger() IMMEDIATELY
+    # (Components.py:18-20), teleporting another prop into inventory via a
+    # nested on_player_enter. Two markers; the inner one descends from the
+    # outer (cause-stack discipline holds under reentry).
+    from Components import RelocatorBeacon
+    lvl = _fresh_level()
+    wiz = _wiz_with_inventory(lvl)
+    lvl.player_unit = wiz              # trigger() reads level.player_unit
+    orb = Level.MemoryOrb()
+    lvl.add_prop(orb, 3, 3)                        # the only teleport target
+    pickup = Level.ComponentPickup(RelocatorBeacon())
+    lvl.add_prop(pickup, 8, 8)
+    pickup.on_player_enter(wiz)
+    markers = _pickup_markers()
+    assert [m["payload"]["item_kind"] for m in markers] == \
+        ["component", "memory_orb"]
+    assert _has_ancestor(markers[1], markers[0]["sequence"])
+    assert not journal.cause_stack
+
+
+def test_pickup_marker_exception_propagates_stack_intact():
+    # ⟨GATE⟩ D5 pin 5: no caller guards on_pickup — a mid-window exception
+    # must propagate exactly as the engine expects, and the cause stack must
+    # come back intact (finally-pop; stack integrity, NOT game-state
+    # integrity — the engine itself leaves the prop removed on a crash).
+    class _BoomComponent(Level.Component):
+        def on_init(self):
+            self.name = "Boom"
+
+        def on_pickup(self, player, level):
+            raise RuntimeError("mid-pickup crash")
+
+    lvl = _fresh_level()
+    wiz = _wiz_with_inventory(lvl)
+    pickup = Level.ComponentPickup(_BoomComponent())
+    lvl.add_prop(pickup, 8, 8)
+    depth = len(journal.cause_stack)
+    with pytest.raises(RuntimeError):
+        pickup.on_player_enter(wiz)
+    assert len(journal.cause_stack) == depth
+    assert len(_pickup_markers()) == 1             # the moment was recorded
+
+
+def test_cause_markers_install_declines_on_missing_shapes():
+    # RW2 backport / future restructure: decline cleanly, wrap nothing.
+    # ComponentPickup.on_player_enter is shared process state — save/restore
+    # in try/finally. Deleting the override leaves the Prop-base no-op
+    # (Level.py:2669) inherited, which the own-__dict__ seam check must
+    # treat as MISSING, not present.
+    _fresh_level()
+    saved = Level.ComponentPickup.on_player_enter
+    saved_flag = cause_markers._installed
+    try:
+        del Level.ComponentPickup.on_player_enter
+        cause_markers._installed = False
+        assert cause_markers.install() is False
+        assert 'on_player_enter' not in vars(Level.ComponentPickup)
+    finally:
+        Level.ComponentPickup.on_player_enter = saved
+        cause_markers._installed = saved_flag
+
+
+def test_cause_markers_double_install_noops():
+    _fresh_level()
+    before = Level.ComponentPickup.on_player_enter
+    assert cause_markers.install() is True
+    assert Level.ComponentPickup.on_player_enter is before

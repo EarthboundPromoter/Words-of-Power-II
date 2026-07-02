@@ -2048,6 +2048,16 @@ _COMPOSER_KNOWN_EVENT_TYPES = frozenset({
     # payloads DO carry unit snapshots, unlike game_log).
     'resists_change', 'tags_change', 'stat_bonus_change',
     'charges_change', 'cooldown_change', 'lifespan_change',
+    # Root-2 cause-marker kinds (Unit 2, capture-only), staged for the
+    # composer phase: the marker is the CAUSE NODE its window's effects
+    # parent to (pickup / equipment-triggered replay / craft), never a
+    # rendered fact of its own this phase. A Blink-onto-a-pickup cast
+    # lands one in its chain; without these entries such chains would
+    # trip digest_unmodeled. Crisis needs NO twin entries: marker
+    # payloads carry a 'recipient' snapshot, not 'unit'/'target', so the
+    # wizard-subject scan structurally never sees them (pinned in
+    # test_crisis, game_log precedent).
+    'item_pickup',
 })
 
 

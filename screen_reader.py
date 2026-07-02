@@ -109,6 +109,13 @@ _SETTINGS_SCHEMA = [
      "# nothing is spoken yet. Safe to leave on; set false as a field kill\n"
      "# switch if instructed to diagnose a problem.\n"
      "# Default: true"),
+    ('words_of_power', 'cause_markers_enabled', 'true',
+     "# Record cause-markers around component pickups, equipment-triggered\n"
+     "# component replays, and equipment crafting, so their effects carry\n"
+     "# their true cause internally — nothing is spoken yet. Safe to leave\n"
+     "# on; set false as a field kill switch if instructed to diagnose a\n"
+     "# problem.\n"
+     "# Default: true"),
     ('words_of_power', 'digest_enabled', 'false',
      "# Enable the direct-action digest: a composed summary of one player\n"
      "# keypress's full effect chain (cast, damage, kills, procs, side-effects)\n"
@@ -300,6 +307,7 @@ class _Cfg:
     journal_log_enabled = _settings.getboolean('words_of_power', 'journal_log_enabled', fallback=False)
     log_capture_enabled = _settings.getboolean('words_of_power', 'log_capture_enabled', fallback=True)
     container_diff_enabled = _settings.getboolean('words_of_power', 'container_diff_enabled', fallback=True)
+    cause_markers_enabled = _settings.getboolean('words_of_power', 'cause_markers_enabled', fallback=True)
     digest_enabled = _settings.getboolean('words_of_power', 'digest_enabled', fallback=False)
     # [Composer] — new-pipeline flags. Defaults match the conservative
     # strangler-fig rollout: producers off, legacy batcher on. Flip
@@ -330,6 +338,7 @@ log(f"[Settings] pathfind_marked = {cfg.pathfind_marked}")
 log(f"[Settings] journal_log_enabled = {cfg.journal_log_enabled}")
 log(f"[Settings] log_capture_enabled = {cfg.log_capture_enabled}")
 log(f"[Settings] container_diff_enabled = {cfg.container_diff_enabled}")
+log(f"[Settings] cause_markers_enabled = {cfg.cause_markers_enabled}")
 log(f"[Settings] digest_enabled = {cfg.digest_enabled}")
 log(f"[Settings] crisis_enabled = {cfg.crisis_enabled}")
 log(f"[Settings] orphan_enabled = {cfg.orphan_enabled}")
@@ -529,6 +538,13 @@ if cfg.container_diff_enabled:
     _container_diff.install(log_fn=log)
 else:
     log("[ContainerDiff] disabled (container_diff_enabled=false)")
+
+# ----- Phase 2.7: Root-2 cause-markers (records-only; separable) -----
+import cause_markers as _cause_markers
+if cfg.cause_markers_enabled:
+    _cause_markers.install(log_fn=log)
+else:
+    log("[CauseMarkers] disabled (cause_markers_enabled=false)")
 
 # ----- Phase 3: Direct-action digest composer (gated by digest_enabled) -----
 import digest as _digest
