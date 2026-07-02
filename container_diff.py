@@ -709,6 +709,18 @@ _ACTION_KINDS = frozenset((
     'buff_tick', 'equipment_tick', 'cloud_tick', 'cast_begin',
 ))
 
+# Unit 2: the Root-2 cause-marker kinds are sweep boundaries too — deltas
+# inside a marker window attribute to the marker (RiftResidue's bonus
+# write lands under its component_effect instead of unattributed drift).
+# They are NOT action kinds: a marker is a transient window inside the
+# turn's flow, so it must never clear the suspended cast window the way
+# a new tick/cast (a definitive turn action) does.
+_MARKER_KINDS = frozenset((
+    'item_pickup', 'equipment_trigger', 'craft', 'component_effect',
+))
+
+_SWEEP_KINDS = _ACTION_KINDS | _MARKER_KINDS
+
 
 def _install_span_sweeps():
     """Boundaries 2/3/4 in one seam: the journal's own cause machinery.
@@ -737,12 +749,13 @@ def _install_span_sweeps():
         global _pending_ctx
         try:
             if (record is not None
-                    and record.get('event_type') in _ACTION_KINDS):
+                    and record.get('event_type') in _SWEEP_KINDS):
                 # The sweep first (parent resolution may claim the suspended
-                # window's span), then the new action definitively interrupts
-                # any suspended cast window.
+                # window's span); then a new ACTION (never a mere marker)
+                # definitively interrupts any suspended cast window.
                 sweep(journal._level, site='span:push')
-                _pending_ctx = None
+                if record.get('event_type') in _ACTION_KINDS:
+                    _pending_ctx = None
         except Exception as e:
             _note_failure('span:push', e)
         return original_push(record)
@@ -752,7 +765,7 @@ def _install_span_sweeps():
             stack = journal.cause_stack
             if stack:
                 kind = stack[-1].get('event_type')
-                if kind in _ACTION_KINDS:
+                if kind in _SWEEP_KINDS:
                     sweep(journal._level, bracket=kind, site='span:pop')
         except Exception as e:
             _note_failure('span:pop', e)

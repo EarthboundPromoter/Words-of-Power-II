@@ -285,24 +285,30 @@ def rows():
                 note="movement speech, view layer"),
             "[Wizard:wizard] channeled {spell}": _status(VIEW_LAYER,
                 note="channel speech + synthesized channel cast_begin"),
-            "Wizard picked up {component}.": _status(VIEW_LAYER,
-                note="Level.py:2822 + LevelRewards.py:277; on_item_pickup "
-                     "speaks name+description; the fired-EFFECT confirmations "
-                     "are the PENDING component rows"),
+            "Wizard picked up {component}.":
+                _expect('item_pickup',
+                        note="Level.py:2822 + LevelRewards.py:277; Unit 2's "
+                             "marker owns the moment (both sites wrapped); "
+                             "on_item_pickup speech stays view-layer"),
             "Level {lvl}, Turn {turn} begins": _status(VIEW_LAYER,
                 note="every combat turn; the mod's own 'Turn N' announcement "
                      "is the counterpart (owner may flip to JUSTIFIED_DROP)"),
 
             # --- PENDING (bin beta): composer-phase voice-or-justify agenda ---
-            text.HP_INCREASE: _status(PENDING,
-                note="component max-HP grant; max_hp_change record likely "
-                     "exists (interceptor) — upgrade to EXPECT after the "
-                     "write path is verified (Unit 2 territory)"),
-            text.SPELL_STAT_INCREASE: _status(PENDING,
-                note="CG1: spell-stat attrs unwatched, NO record exists — "
-                     "the named-data loss the oracle documents"),
-            "{equipment} triggered {component}": _status(PENDING,
-                note="CG2, Equipment.py:6570; Unit 3 territory"),
+            text.HP_INCREASE: _expect('max_hp_change',
+                note="component max-HP grant; write path verified Unit 2 "
+                     "(interceptor capture pinned in the pickup tests)"),
+            text.SPELL_STAT_INCREASE:
+                _expect('stat_bonus_change', 'charges_change',
+                        note="three sites (Components.py:253/338/547), all "
+                             "adjust_spell_bonus + refund_charges — watched "
+                             "Unit-1 domains, marker-attributed since Unit 2 "
+                             "(supersedes the CG1 no-record note)"),
+            "{equipment} triggered {component}":
+                _expect('equipment_trigger', 'component_effect',
+                        note="CG2, Equipment.py:6570/6591; Unit 2's trigger "
+                             "markers own the replay, the component window "
+                             "carries the identity"),
             "[Wizard:wizard] lost a charge from {spell} due to mutator.":
                 _status(PENDING),
             "[Wizard:wizard] stunned for 1 turn due to mutator.":

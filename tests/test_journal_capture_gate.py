@@ -1085,24 +1085,27 @@ def test_oracle_sweep_clean_on_real_spend_and_damage():
 
 
 def test_expect_row_kinds_are_journal_producible():
-    # Drift guard: the row table names record kinds; the journal is what
-    # produces them. Event-class kinds must exist as game event classes
-    # (recorded via type(event).__name__); synthetic kinds must appear as
-    # literals in journal.py. A renamed kind fails here, not silently in
-    # the field.
+    # Drift guard: the row table names record kinds; the capture modules
+    # are what produce them. Event-class kinds must exist as game event
+    # classes (recorded via type(event).__name__); synthetic kinds must
+    # appear as literals in a record-producing module (journal.py, or
+    # since Units 1/2: container_diff.py, cause_markers.py). A renamed
+    # kind fails here, not silently in the field.
     import CommonContent
-    with open(os.path.join(mod_dir, 'journal.py'), encoding='utf-8') as f:
-        journal_src = f.read()
+    producer_src = ""
+    for fname in ('journal.py', 'container_diff.py', 'cause_markers.py'):
+        with open(os.path.join(mod_dir, fname), encoding='utf-8') as f:
+            producer_src += f.read()
     for tpl, row in log_capture.rows().items():
         for kind in row['kinds']:
             if kind.startswith('EventOn'):
                 assert hasattr(Level, kind) or hasattr(CommonContent, kind), (
                     "row %r names unknown event class %r" % (tpl, kind))
             else:
-                assert ("'%s'" % kind) in journal_src or \
-                       ('"%s"' % kind) in journal_src, (
-                    "row %r names synthetic kind %r not found in journal.py"
-                    % (tpl, kind))
+                assert ("'%s'" % kind) in producer_src or \
+                       ('"%s"' % kind) in producer_src, (
+                    "row %r names synthetic kind %r not found in any "
+                    "record-producing module" % (tpl, kind))
 
 
 def test_log_capture_install_declines_on_missing_sink():
@@ -1732,12 +1735,20 @@ def test_drift_alarm_inert_without_telemetry():
 def test_quiet_baseline_no_unattributed_records_across_normal_actions():
     # The D6 pin: a scripted turn of ordinary bracketed activity — buff
     # apply/remove, a tick, a queued cast, equip/unequip, routine cooldown
-    # decrement — produces ZERO unattributed container records.
+    # decrement, and (Unit 2) a component pickup — produces ZERO
+    # unattributed container records.
+    import collections
+    from Components import Frostpetal
     lvl = _fresh_level()
     wiz = _place(lvl, _unit("Wizard", player=True), 2, 2)
+    wiz.component_tags = collections.defaultdict(int)
     lvl.player_unit = wiz
     ghost = _place(lvl, _unit("Ghost"), 4, 4)
     ogre = _place(lvl, _unit("Ogre"), 6, 6)
+
+    petal = Level.ComponentPickup(Frostpetal())
+    lvl.add_prop(petal, 2, 3)
+    petal.on_player_enter(wiz)                     # marker-owned writes
 
     ward = _fire_ward()
     ogre.apply_buff(ward)                          # fold
@@ -2292,3 +2303,68 @@ def test_non_equipment_purchase_gets_no_craft_marker():
     lvl.cur_shop = None
     assert g.try_shop(None) is False              # the no-item call shape
     assert _markers_of("craft") == []
+
+
+# ---- Unit 2 step 5: sweep boundaries, known-set guard, drift goes quiet ----
+
+def test_all_unit2_kinds_known_to_digest():
+    # ⟨GATE⟩ registration guard: no pre-existing test watched this seam —
+    # a forgotten known-set entry would flood digest_unmodeled silently.
+    import digest
+    for kind in ("item_pickup", "equipment_trigger", "craft",
+                 "component_effect", "buff_duration_change",
+                 "component_inventory_change"):
+        assert kind in digest._COMPOSER_KNOWN_EVENT_TYPES, kind
+
+
+def test_marker_kinds_sweep_but_never_interrupt():
+    # Markers are sweep boundaries (deltas attribute to the window) but
+    # NOT action kinds — a transient marker must never clear the
+    # suspended cast window the way a new tick/cast does.
+    for kind in ("item_pickup", "equipment_trigger", "craft",
+                 "component_effect"):
+        assert kind in container_diff._SWEEP_KINDS
+        assert kind not in container_diff._ACTION_KINDS
+
+
+class _BlinkStone(Level.Spell):
+    # A Translocation spell with charges — RiftResidue's target shape.
+    def on_init(self):
+        self.name = "Blink Stone"
+        self.max_charges = 3
+        self.tags = [Level.Tags.Translocation]
+
+
+def test_rift_residue_writes_attribute_to_marker_no_drift():
+    # Unit 1's D6 named RiftResidue as the expected-drift example; Unit 2's
+    # validation hook cashes in: adjust_spell_bonus + refund_charges now
+    # attribute to the component window — ZERO unattributed records, ZERO
+    # drift alarms across the whole pickup.
+    from Components import RiftResidue
+    lvl = _fresh_level()
+    wiz = _wiz_with_inventory(lvl)
+    lvl.player_unit = wiz
+    sp = _BlinkStone()
+    sp.caster = wiz
+    sp.owner = wiz
+    sp.cur_charges = 1
+    wiz.spells = [sp]
+    container_diff.turn_boundary(lvl)              # baseline wiz + shelf
+    pickup = Level.ComponentPickup(RiftResidue())
+    lvl.add_prop(pickup, 8, 8)
+    pickup.on_player_enter(wiz)
+    tel = _DriftTel()
+    container_diff.turn_boundary(lvl, telemetry_mod=tel)
+    effects = _markers_of("component_effect")
+    pickups = _markers_of("item_pickup")
+    assert len(effects) == 1 and len(pickups) == 1
+    bonus = [r for r in journal.records
+             if r["event_type"] == "stat_bonus_change"]
+    charges = [r for r in journal.records
+               if r["event_type"] == "charges_change"]
+    assert bonus and charges
+    for r in bonus + charges:
+        assert r["payload"]["unattributed"] is False
+        assert (_has_ancestor(r, effects[0]["sequence"])
+                or _has_ancestor(r, pickups[0]["sequence"]))
+    assert [c for c in tel.calls if c[0] == 'container_drift'] == []
