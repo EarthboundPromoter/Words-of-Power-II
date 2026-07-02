@@ -2827,7 +2827,7 @@ def test_unit4_capture_only_kinds_known_to_digest_telemetry():
     # unit) must not fire digest_unmodeled unknown_event_types.
     import digest as digest_mod
 
-    for kind in ("hp_loss", "xp_change", "EventOnAwakened"):
+    for kind in ("hp_loss", "xp_change", "EventOnAwakened", "game_log"):
         assert kind in digest_mod._COMPOSER_KNOWN_EVENT_TYPES
 
     class _Tel:
@@ -2843,6 +2843,7 @@ def test_unit4_capture_only_kinds_known_to_digest_telemetry():
         {"event_type": "hp_loss", "payload": {}},
         {"event_type": "xp_change", "payload": {}},
         {"event_type": "EventOnAwakened", "payload": {}},
+        {"event_type": "game_log", "payload": {"template": "{unit} takes ..."}},
     ]
     digest_mod._maybe_emit_unmodeled(tel, 1, chain, ["Cast Fireball."])
     assert tel.calls == []

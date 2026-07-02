@@ -1283,6 +1283,22 @@ def test_unit4_staged_kinds_do_not_trip_crisis_unmodeled():
     assert tel.calls == []
 
 
+def test_game_log_records_never_trip_crisis_unmodeled():
+    # Oracle records carry template/values/resolved/turn — no unit snapshot —
+    # so the wizard-subject scan structurally never sees them. Pinned so a
+    # future payload change that adds a unit snap re-raises the question.
+    prod = _CrisisProducer()
+    tel = _FakeTelemetry()
+    prod._maybe_emit_unmodeled(
+        tel,
+        [{"event_type": "game_log",
+          "payload": {"template": "{unit} pays {cost} HP to cast {spell}",
+                      "values": {"unit": "Wizard"}, "resolved": "…", "turn": 3}}],
+        [],
+    )
+    assert tel.calls == []
+
+
 def test_non_staged_wizard_record_still_trips_crisis_unmodeled():
     # The diagnostic itself is preserved for kinds crisis is expected to render.
     prod = _CrisisProducer()

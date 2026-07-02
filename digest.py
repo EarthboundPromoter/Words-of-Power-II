@@ -2032,6 +2032,13 @@ _COMPOSER_KNOWN_EVENT_TYPES = frozenset({
     # sleep-end at parity with EventOnUnfrozen (was tripping unmodeled via the
     # generic payload fallback even before Unit 4 — this also closes that).
     'hp_loss', 'xp_change', 'EventOnAwakened',
+    # Combat-log oracle records (validation-only, never rendered by ANY
+    # producer). One lands in the chain for every game log line a chain
+    # effect writes — without this entry every damaging cast would flood
+    # digest_unmodeled. Crisis needs no twin entry: game_log payloads carry
+    # no unit snapshot, so the wizard-subject scan never sees them
+    # (structural, pinned in test_crisis).
+    'game_log',
 })
 
 
