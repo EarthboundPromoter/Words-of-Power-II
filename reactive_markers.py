@@ -150,6 +150,30 @@ def _make_wrapper(handler, buff):
     return _reactive_dispatch
 
 
+def _install_write_taps(Level):
+    """Taps 2-3: the engine's write chokepoints for the SILENT container
+    classes (a pure charge refund or bonus adjust raises nothing and stays
+    invisible until a sweep — the census-proven gap the record gate alone
+    cannot see). Materialize BEFORE calling the original, so the write lands
+    inside the marker window and the pop sweep attributes it. Empty-stack
+    no-ops on the non-reactive 99% of calls."""
+    def _tap(cls, name, via):
+        orig = vars(cls).get(name)
+
+        def tapped(self, *args, **kwargs):
+            if _crumbs and not _materializing:
+                _materialize_crumbs(via)
+            return orig(self, *args, **kwargs)
+        tapped.__name__ = 'tapped_' + name
+        setattr(cls, name, tapped)
+
+    _tap(Level.Spell, 'refund_charges', 'charges')
+    _tap(Level.Spell, 'drain_charges', 'charges')
+    _tap(Level.Unit, 'adjust_spell_bonus', 'adjust')
+    _tap(Level.Unit, 'adjust_global_bonus', 'adjust')
+    _tap(Level.Unit, 'adjust_tag_bonus', 'adjust')
+
+
 def _install_record_gate():
     """Tap 1: wrap the journal's single record-creation gate. A record
     created during a live breadcrumb materializes the chain FIRST, so the
@@ -295,6 +319,12 @@ def install(log_fn=None):
         # The subscription funnel this design leans on.
         and 'subscribe' in vars(buff_cls)
         and 'unsubscribe' in vars(buff_cls)
+        # The write-tap chokepoints (taps 2-3).
+        and 'refund_charges' in vars(Level.Spell)
+        and 'drain_charges' in vars(Level.Spell)
+        and 'adjust_spell_bonus' in vars(Level.Unit)
+        and 'adjust_global_bonus' in vars(Level.Unit)
+        and 'adjust_tag_bonus' in vars(Level.Unit)
     )
     if not seams_ok:
         if _log_fn:
@@ -307,6 +337,7 @@ def install(log_fn=None):
 
     _install_register_wraps(Level)
     _install_record_gate()
+    _install_write_taps(Level)
 
     _installed = True
     if _log_fn:

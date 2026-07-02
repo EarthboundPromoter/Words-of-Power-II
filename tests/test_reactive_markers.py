@@ -374,6 +374,218 @@ def test_marker_never_clears_suspended_cast_window():
     container_diff._pending_ctx = None
 
 
+# ---- Step 3: write-taps (charges / adjust) ----
+
+class _TestSpell(Level.Spell):
+    """Minimal shelf spell: refund_charges needs cur_charges +
+    get_stat('max_charges') only."""
+    def __init__(self, name, charges):
+        Level.Spell.__init__(self)
+        self.name = name
+        self.cur_charges = charges
+
+    def get_stat(self, attr, *a, **k):
+        return 99
+
+
+class _RefundOnDeathTB(Level.Buff):
+    """The MARQUEE Soul-Harvester shape (Equipment.py:116-136): an
+    EventOnDeath reaction whose only data effect is a silent charge refund."""
+    def on_init(self):
+        self.name = "Refund On Death Test Buff"
+        self.buff_type = Level.BUFF_TYPE_BLESS
+        self.global_triggers[Level.EventOnDeath] = self.on_death
+        self.spell = None
+
+    def on_death(self, evt):
+        self.spell.refund_charges(1)
+
+
+class _AssimShapeTB(Level.Buff):
+    """The AssimilationBuff residual shape (Spells.py:15738-41): a PRE-tap
+    dict write (cool_downs.pop), then a tapped refund."""
+    def on_init(self):
+        self.name = "Assim Shape Test Buff"
+        self.buff_type = Level.BUFF_TYPE_BLESS
+        self.owner_triggers[Level.EventOnPass] = self.on_pass
+        self.cd_spell = None
+        self.spell = None
+
+    def on_pass(self, evt):
+        self.owner.cool_downs.pop(self.cd_spell, None)   # pre-tap, silent
+        self.spell.refund_charges(1)                     # the tap
+
+
+class _DamageGrowthTB(Level.Buff):
+    """The damage-growth quartet shape (Equipment.py:1113): a reactive
+    spell.damage += with no tap, no flash, no record — accepted residual."""
+    def on_init(self):
+        self.name = "Damage Growth Test Buff"
+        self.buff_type = Level.BUFF_TYPE_BLESS
+        self.owner_triggers[Level.EventOnPass] = self.on_pass
+        self.spell = None
+
+    def on_pass(self, evt):
+        self.spell.damage = getattr(self.spell, 'damage', 0) + 1
+
+
+def _wizard(lvl, x=2, y=2, spells=()):
+    wiz = _place(lvl, _unit("Wizard", player=True), x, y)
+    for s in spells:
+        wiz.spells.append(s)
+    lvl.player_unit = wiz
+    return wiz
+
+
+def test_marquee_refund_in_death_reaction_attributes_to_marker():
+    lvl = _fresh_level()
+    fireball = _TestSpell('Fireball', 1)
+    wiz = _wizard(lvl, spells=[fireball])
+    gob = _place(lvl, _unit("Goblin"), 6, 5)
+    tb = _RefundOnDeathTB()
+    wiz.apply_buff(tb)
+    tb.spell = fireball
+    container_diff.sweep(lvl, site='test:baseline')
+
+    lvl.event_manager.raise_event(Level.EventOnDeath(gob, None), gob)
+
+    ms = _markers()
+    assert len(ms) == 1
+    m = ms[0]
+    assert m['payload']['via'] == 'charges'
+    death = _events_of('EventOnDeath')[-1]
+    assert m['parent'] == death['sequence']
+
+    charges = [r for r in journal.records
+               if r['event_type'] == 'charges_change']
+    assert len(charges) == 1
+    c = charges[0]
+    assert (c['payload']['before'], c['payload']['after']) == (1, 2)
+    assert c['parent'] == m['sequence']
+    assert c['payload']['bracket'] == 'reactive_proc'
+    assert not c['payload']['unattributed']
+
+
+def test_adjust_tag_bonus_reaction_attributes_to_marker():
+    # The Crimson-Brooch shape (Equipment.py:7197): adjust_tag_bonus is a
+    # tapped Unit method; the stat_bonus_change lands under the marker.
+    lvl = _fresh_level()
+    wiz = _wizard(lvl)
+
+    class _BroochTB(Level.Buff):
+        def on_init(self):
+            self.name = "Brooch Shape Test Buff"
+            self.buff_type = Level.BUFF_TYPE_BLESS
+            self.owner_triggers[Level.EventOnPass] = self.on_pass
+
+        def on_pass(self, evt):
+            self.owner.adjust_tag_bonus(Level.Tags.Fire, 'damage', 4, pct=True)
+
+    b = _BroochTB()
+    wiz.apply_buff(b)
+    container_diff.sweep(lvl, site='test:baseline')
+
+    lvl.event_manager.raise_event(Level.EventOnPass(wiz), wiz)
+
+    ms = _markers()
+    assert len(ms) == 1
+    assert ms[0]['payload']['via'] == 'adjust'
+    bonuses = [r for r in journal.records
+               if r['event_type'] == 'stat_bonus_change']
+    assert bonuses
+    assert bonuses[-1]['parent'] == ms[0]['sequence']
+    assert bonuses[-1]['payload']['bracket'] == 'reactive_proc'
+
+
+def test_assim_shape_pre_tap_write_parents_to_event_post_tap_to_marker():
+    # ⟨GATE⟩ residual pinned AS DESIGNED: the pre-tap cool_downs.pop flushes
+    # to the triggering EVENT at materialization (the graceful direction);
+    # the tapped refund lands under the marker.
+    lvl = _fresh_level()
+    fireball = _TestSpell('Fireball', 1)
+    cd_spell = _TestSpell('Bolt', 0)
+    wiz = _wizard(lvl, spells=[fireball])
+    wiz.cool_downs[cd_spell] = 3
+    tb = _AssimShapeTB()
+    wiz.apply_buff(tb)
+    tb.cd_spell = cd_spell
+    tb.spell = fireball
+    container_diff.sweep(lvl, site='test:baseline')
+
+    lvl.event_manager.raise_event(Level.EventOnPass(wiz), wiz)
+
+    ms = _markers()
+    assert len(ms) == 1
+    m = ms[0]
+    evt_rec = _events_of('EventOnPass')[-1]
+
+    cooldowns = [r for r in journal.records
+                 if r['event_type'] == 'cooldown_change']
+    assert cooldowns
+    assert cooldowns[-1]['parent'] == evt_rec['sequence']
+
+    charges = [r for r in journal.records
+               if r['event_type'] == 'charges_change']
+    assert charges
+    assert charges[-1]['parent'] == m['sequence']
+
+
+def test_damage_growth_reaction_stays_recordless():
+    # ⟨GATE⟩ residual pinned AS DESIGNED: a reactive spell.damage += is in
+    # no watched domain and fires no tap — no marker, no records beyond the
+    # event itself. Drift in either direction surfaces here.
+    lvl = _fresh_level()
+    fireball = _TestSpell('Fireball', 1)
+    wiz = _wizard(lvl, spells=[fireball])
+    tb = _DamageGrowthTB()
+    wiz.apply_buff(tb)
+    tb.spell = fireball
+    container_diff.sweep(lvl, site='test:baseline')
+    count_before = len(journal.records)
+
+    lvl.event_manager.raise_event(Level.EventOnPass(wiz), wiz)
+
+    assert _markers() == []
+    new = journal.records[count_before:]
+    assert [r['event_type'] for r in new] == ['EventOnPass']
+    assert fireball.damage == 1
+
+
+def test_drain_charges_write_then_flash_still_attributes():
+    # drain_charges internally flashes AFTER its write (Level.py:935-937);
+    # the charge tap fires BEFORE the original, so ordering is safe.
+    lvl = _fresh_level()
+    fireball = _TestSpell('Fireball', 3)
+    wiz = _wizard(lvl, spells=[fireball])
+
+    class _DrainTB(Level.Buff):
+        def on_init(self):
+            self.name = "Drain Shape Test Buff"
+            self.buff_type = Level.BUFF_TYPE_BLESS
+            self.owner_triggers[Level.EventOnPass] = self.on_pass
+            self.spell = None
+
+        def on_pass(self, evt):
+            self.spell.drain_charges(1)
+
+    b = _DrainTB()
+    wiz.apply_buff(b)
+    b.spell = fireball
+    container_diff.sweep(lvl, site='test:baseline')
+
+    lvl.event_manager.raise_event(Level.EventOnPass(wiz), wiz)
+
+    ms = _markers()
+    assert len(ms) == 1
+    assert ms[0]['payload']['via'] == 'charges'
+    charges = [r for r in journal.records
+               if r['event_type'] == 'charges_change']
+    assert charges
+    assert (charges[-1]['payload']['before'],
+            charges[-1]['payload']['after']) == (3, 2)
+    assert charges[-1]['parent'] == ms[0]['sequence']
+
+
 # ---- Install shape ----
 
 def test_register_functions_are_patched():
