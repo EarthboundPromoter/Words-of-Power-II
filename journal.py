@@ -1161,18 +1161,32 @@ def _serialize(value):
     return repr(value)[:200]
 
 
+# Span hooks (Unit 1 container-diff). The wrapped-generator proxy below is
+# the ONLY cause carrier for direct-queue_spell cast windows (channels, the
+# ~150 content sites, reaction-queued gens — none populate cast_contexts),
+# so the container sweep hooks its per-step push/pop: enter fires BEFORE the
+# push (closing the outer span under the old stack top), exit fires BEFORE
+# the pop (the cause is still live for parenting). No-ops when unset.
+span_enter_hook = None
+span_exit_hook = None
+
+
 def _wrap_with_cause(inner_gen, cause_record):
     """Wrap a spell-cast generator so the given cause is on the cause stack
     during each iteration step. Spell effects (damage, heals, summons) that
     fire from inside next(inner_gen) inherit cause_record as their parent."""
     try:
         while True:
+            if span_enter_hook is not None:
+                span_enter_hook(cause_record)
             journal.push(cause_record)
             try:
                 value = next(inner_gen)
             except StopIteration:
                 return
             finally:
+                if span_exit_hook is not None:
+                    span_exit_hook(cause_record)
                 journal.pop()
             yield value
     except GeneratorExit:
@@ -1592,6 +1606,13 @@ def install_hooks():
         # cost is bounded (per-level reset; ~30KB per dense turn at peak).
         if isinstance(self, Level.ChannelBuff):
             return original_buff_advance(self)
+        # Keep the active-level handle current at tick roots too (execute_cast
+        # and queue_spell already maintain it) — the container sweep triggered
+        # by this push/pop needs a level to walk, and on a fresh floor the
+        # first tick can precede the first cast.
+        _tick_level = getattr(getattr(self, 'owner', None), 'level', None)
+        if _tick_level is not None:
+            journal._level = _tick_level
         is_equipment = (
             getattr(self, 'buff_type', None) == Level.BUFF_TYPE_ITEM
         )
@@ -1629,6 +1650,9 @@ def install_hooks():
                 pre_duration - 1 if pre_duration is not None else None
             ),
         })
+        _tick_level = getattr(self, 'level', None)
+        if _tick_level is not None:
+            journal._level = _tick_level
         journal.push(cause_record)
         try:
             return original_cloud_advance(self)

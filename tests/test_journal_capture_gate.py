@@ -1244,3 +1244,178 @@ def test_container_diff_double_install_noops():
     before = Level.Buff.apply
     assert container_diff.install() is True
     assert Level.Buff.apply is before
+
+
+# ---- Unit 1 step 3: tick / cast / queued-gen span sweeps + turn boundary ----
+
+class _IceAuraBuff(Level.Buff):
+    # A tick that writes its owner's containers directly in on_advance.
+    def on_init(self):
+        self.name = "Ice Aura"
+
+    def on_advance(self):
+        self.owner.resists[Level.Tags.Ice] += 25
+
+
+def test_tick_container_write_parented_to_buff_tick():
+    lvl = _fresh_level()
+    ogre = _place(lvl, _unit("Ogre"), 5, 5)
+    ogre.apply_buff(_IceAuraBuff())
+    seq = journal.sequence
+    ogre.advance_buffs()
+    ticks = [r for r in journal.records
+             if r["event_type"] == "buff_tick" and r["sequence"] > seq]
+    assert len(ticks) == 1
+    recs = [r for r in _container_records('resists_change', id(ogre))
+            if r["sequence"] > seq]
+    assert len(recs) == 1
+    p = recs[0]["payload"]
+    assert p["changes"] == {'Ice': (0, 25)}
+    assert p["bracket"] == 'buff_tick'
+    assert p["unattributed"] is False
+    assert recs[0]["parent"] == ticks[0]["sequence"]
+
+
+class _AssimBuff(Level.Buff):
+    # The DamageAssimilation shape (Spells.py:15744): the VICTIM's resists
+    # written from inside a damage-event handler.
+    def on_init(self):
+        self.name = "Assimilation"
+        self.owner_triggers[Level.EventOnDamaged] = self.on_damaged
+
+    def on_damaged(self, evt):
+        self.owner.resists[Level.Tags.Fire] += evt.damage
+
+
+class _StingAuraBuff(Level.Buff):
+    def __init__(self, victim):
+        self._victim = victim
+        Level.Buff.__init__(self)
+
+    def on_init(self):
+        self.name = "Sting Aura"
+
+    def on_advance(self):
+        self.owner.level.deal_damage(self._victim.x, self._victim.y, 5,
+                                     Level.Tags.Fire, _src("Sting"))
+
+
+def test_cross_unit_reactive_write_during_tick_attributed_to_tick():
+    # Full-sweep proof at a real boundary: the changed unit is NOT the
+    # bracket owner. Granularity per D2: the write attributes to the
+    # enclosing ACTION (the tick), not the event raise.
+    lvl = _fresh_level()
+    ghost = _place(lvl, _unit("Ghost", hp=30), 4, 4)
+    ogre = _place(lvl, _unit("Ogre"), 5, 5)
+    ghost.apply_buff(_AssimBuff())
+    ogre.apply_buff(_StingAuraBuff(ghost))
+    seq = journal.sequence
+    ogre.advance_buffs()
+    ticks = [r for r in journal.records
+             if r["event_type"] == "buff_tick" and r["sequence"] > seq]
+    assert len(ticks) == 1
+    recs = [r for r in _container_records('resists_change', id(ghost))
+            if r["sequence"] > seq]
+    assert len(recs) == 1
+    assert recs[0]["payload"]["changes"] == {'Fire': (0, 5)}
+    assert recs[0]["parent"] == ticks[0]["sequence"]
+
+
+class _BareSpell(Level.Spell):
+    def on_init(self):
+        self.name = "Bare"
+        self.range = 20
+
+    def cast(self, x, y):
+        yield
+
+
+def test_reaction_write_during_execute_cast_attributed_to_cast_begin():
+    # A container write during the synchronous EventOnSpellCast raise
+    # (Level.py:3140, inside execute_cast) lands in the cast_begin span.
+    lvl = _fresh_level()
+    wiz = _place(lvl, _unit("Wizard", player=True), 2, 2)
+
+    def on_cast(evt):
+        evt.caster.resists[Level.Tags.Arcane] += 10
+
+    lvl.event_manager.register_global_trigger(Level.EventOnSpellCast, on_cast)
+    spell = _BareSpell()
+    spell.caster = wiz
+    spell.owner = wiz
+    seq = journal.sequence
+    lvl.execute_cast(wiz, spell, wiz.x, wiz.y, pay_costs=False, queue=True)
+    casts = [r for r in journal.records
+             if r["event_type"] == "cast_begin" and r["sequence"] > seq]
+    assert len(casts) == 1
+    recs = [r for r in _container_records('resists_change', id(wiz))
+            if r["sequence"] > seq]
+    assert len(recs) == 1
+    assert recs[0]["payload"]["changes"] == {'Arcane': (0, 10)}
+    assert recs[0]["payload"]["bracket"] == 'cast_begin'
+    assert recs[0]["parent"] == casts[0]["sequence"]
+    while lvl.can_advance_spells():   # drain the queued no-op gen
+        lvl.advance_spells()
+
+
+def test_direct_queue_gen_write_swept_per_step_with_carried_cause():
+    # The ⟨GATE⟩ 4b carrier: a generator queued directly (never through
+    # execute_cast) steps with current_cast_context None; its cause rides
+    # the mod's _wrap_with_cause proxy, whose span hooks sweep per step.
+    lvl = _fresh_level()
+    ghost = _place(lvl, _unit("Ghost"), 4, 4)
+    cause = journal.record('EventOnSpellCast', {'note': 'reaction root'})
+    journal.push(cause)
+
+    def effect():
+        ghost.resists[Level.Tags.Dark] += 100
+        yield
+
+    lvl.queue_spell(effect())
+    journal.pop()
+    seq = journal.sequence
+    while lvl.can_advance_spells():
+        lvl.advance_spells()
+    recs = [r for r in _container_records('resists_change', id(ghost))
+            if r["sequence"] > seq]
+    assert len(recs) == 1
+    assert recs[0]["payload"]["changes"] == {'Dark': (0, 100)}
+    assert recs[0]["payload"]["bracket"] == 'EventOnSpellCast'
+    assert recs[0]["payload"]["unattributed"] is False
+    assert recs[0]["parent"] == cause["sequence"]
+
+
+class _CdKey:
+    # Hashable stand-in for a Spell as a cool_downs dict key.
+    def __init__(self, name):
+        self.name = name
+
+
+def test_turn_boundary_absorbs_routine_cooldown_tick():
+    lvl = _fresh_level()
+    ogre = _place(lvl, _unit("Ogre"), 5, 5)
+    gaze = _CdKey("Gaze")
+    ogre.cool_downs[gaze] = 3
+    container_diff.turn_boundary(lvl)          # baseline
+    ogre.cool_downs = {gaze: 2}                # the engine's per-turn rebind
+    seq = journal.sequence
+    container_diff.turn_boundary(lvl)
+    assert [r for r in _container_records('cooldown_change', id(ogre))
+            if r["sequence"] > seq] == []      # absorbed
+
+
+def test_turn_boundary_records_cooldown_deviation_unattributed():
+    lvl = _fresh_level()
+    ogre = _place(lvl, _unit("Ogre"), 5, 5)
+    gaze = _CdKey("Gaze")
+    ogre.cool_downs[gaze] = 4
+    container_diff.turn_boundary(lvl)          # baseline
+    ogre.cool_downs = {gaze: 2}                # a halving, not a tick
+    seq = journal.sequence
+    container_diff.turn_boundary(lvl)
+    recs = [r for r in _container_records('cooldown_change', id(ogre))
+            if r["sequence"] > seq]
+    assert len(recs) == 1
+    assert recs[0]["payload"]["changes"] == {'Gaze': (4, 2)}
+    assert recs[0]["payload"]["bracket"] is None
+    assert recs[0]["payload"]["unattributed"] is True

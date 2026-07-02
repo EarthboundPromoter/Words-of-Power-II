@@ -429,6 +429,15 @@ def reseed():
     store.reseed()
 
 
+def turn_boundary(level):
+    """The mod turn boundary (plan D2 boundary 7, the fire_pipeline block):
+    closes the turn's final span. This is where the routine engine ticks
+    (cool_downs sweep, turns_to_death decrement — both outside every
+    bracket) get absorbed by their signatures, and where any unbracketed
+    drift surfaces as honest unattributed records."""
+    sweep(level, site='turn_boundary')
+
+
 # ----------------------------------------------------------------------
 # Boundary wraps (plan D2, boundaries 1 / 5 / 6) — the synchronous set.
 # Entry sweep closes the outer span; the original runs untouched; exit
@@ -528,6 +537,8 @@ def install(log_fn=None):
     unit_cls.unequip = patched_unit_unequip
     level_cls.remove_obj = patched_remove_obj
 
+    _install_span_sweeps()
+
     _installed = True
     if _log_fn:
         try:
@@ -535,6 +546,83 @@ def install(log_fn=None):
         except Exception:
             pass
     return True
+
+
+# Cause kinds whose push/pop marks an ACTION span (plan D2 boundaries
+# 2/3/4). Event raises (EventOn*) push/pop too but are NOT boundaries —
+# a reactive write during a raise attributes to the enclosing action
+# (the ledger's granularity; event-grade sweeping would triple the
+# sweep count for no ratified gain).
+_ACTION_KINDS = frozenset((
+    'buff_tick', 'equipment_tick', 'cloud_tick', 'cast_begin',
+))
+
+
+def _install_span_sweeps():
+    """Boundaries 2/3/4 in one seam: the journal's own cause machinery.
+
+    - journal.push/pop wraps (kind-filtered to action causes): the tick
+      roots (buff/equipment/cloud) and execute_cast's cast_begin span.
+    - the _wrap_with_cause span hooks: per-step windows of every
+      direct-queue_spell generator (channels, the ~150 content sites,
+      reaction-queued casts — the ⟨GATE⟩ 4b carrier). The hooks skip
+      action-kind causes (the push/pop wrap already sweeps those) so no
+      span sweeps twice.
+
+    Sweeps read the level from journal._level, which the mod's hooks
+    maintain at every action root (execute_cast, queue_spell, and the
+    tick wraps). Entry sweeps close the OUTER span (before the push, old
+    stack top parents); exit sweeps close the action's own span (before
+    the pop, the action still parents).
+    """
+    import journal as journal_module
+    from journal import journal
+
+    original_push = journal.push
+    original_pop = journal.pop
+
+    def patched_push(record):
+        try:
+            if (record is not None
+                    and record.get('event_type') in _ACTION_KINDS):
+                sweep(journal._level, site='span:push')
+        except Exception as e:
+            _note_failure('span:push', e)
+        return original_push(record)
+
+    def patched_pop():
+        try:
+            stack = journal.cause_stack
+            if stack:
+                kind = stack[-1].get('event_type')
+                if kind in _ACTION_KINDS:
+                    sweep(journal._level, bracket=kind, site='span:pop')
+        except Exception as e:
+            _note_failure('span:pop', e)
+        return original_pop()
+
+    journal.push = patched_push
+    journal.pop = patched_pop
+
+    def _span_enter(cause):
+        try:
+            if cause is None or cause.get('event_type') in _ACTION_KINDS:
+                return
+            sweep(journal._level, site='span:enter')
+        except Exception as e:
+            _note_failure('span:enter', e)
+
+    def _span_exit(cause):
+        try:
+            if cause is None or cause.get('event_type') in _ACTION_KINDS:
+                return
+            sweep(journal._level, bracket=cause.get('event_type'),
+                  site='span:exit')
+        except Exception as e:
+            _note_failure('span:exit', e)
+
+    journal_module.span_enter_hook = _span_enter
+    journal_module.span_exit_hook = _span_exit
 
 
 def _buff_detail(buff):
