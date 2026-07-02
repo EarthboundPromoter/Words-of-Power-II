@@ -676,6 +676,44 @@ def _resist_blocked_amount(resists, damage_type, orig_amount):
 
 _BLOCK_CLAIMED_MARK = 'shield_blocked_claimed'
 _BLOCK_SUPERSEDED_MARK = 'superseded_by_block'
+_SPEND_SUPERSEDED_MARK = 'superseded_by_spend'
+
+# Record kinds that may legitimately interleave between a spend's raw write and
+# its EventOnSpendHP raise without breaking their adjacency (three spend sites
+# call level.log between the two — Level.py:918, Equipment.py:6136, 7336 — so
+# once the log-capture oracle lands, its records are adjacency-transparent).
+_ADJACENCY_TRANSPARENT_KINDS = frozenset({'game_log'})
+
+
+def _supersede_spend_loss(records, spend_rec, unit_id, amount):
+    """Mark the hp_loss produced by an HP-spend's own raw write as superseded
+    by its EventOnSpendHP record (D2, Unit 4) — both records exist (capture
+    uniform, the block/strip precedent); the mark is composition-facing so the
+    spend is voiced once, never as a duplicate raw loss.
+
+    Bracket-grade matching, no recency correlation: at all six spend sites the
+    write and the raise are adjacent in one synchronous body (write, raise 1-3
+    lines later; nothing hooked fires between — gate-verified), so the spend's
+    own hp_loss is the IMMEDIATELY-preceding record and shares the spend
+    record's parent (same live cause window). The matcher therefore examines
+    only the first non-transparent record before spend_rec and requires
+    parent-equality + unit id + exact amount + unmarked. A coincident silent
+    loss (boss steal on the wizard + a same-amount spend, the overlap case) is
+    never claimed: the spend's own loss always exists (spend writes escape
+    every suppression bracket) and sits between any older loss and the event.
+    Claim-once keeps two identical spends each marking their own loss."""
+    for rec in reversed(records):
+        if rec is spend_rec:
+            continue
+        if rec.get('event_type') in _ADJACENCY_TRANSPARENT_KINDS:
+            continue
+        if (rec.get('event_type') == 'hp_loss'
+                and rec.get('parent') == spend_rec.get('parent')
+                and (rec.get('payload', {}).get('target') or {}).get('id') == unit_id
+                and rec.get('payload', {}).get('loss_amount') == amount
+                and _SPEND_SUPERSEDED_MARK not in rec.get('marks', ())):
+            rec.setdefault('marks', []).append(_SPEND_SUPERSEDED_MARK)
+        return  # adjacency: only the first non-transparent record can match
 
 
 def _supersede_block_strip(records, seq_before, target_id):
@@ -1321,6 +1359,16 @@ def install_hooks():
 
     def patched_raise_event(self, event, entity=None):
         rec = journal.record(type(event).__name__, _to_payload(event))
+        # D2 (Unit 4): an HP-spend's raw write just preceded this raise in the
+        # same synchronous body — retro-mark its hp_loss as spend-owned. Runs
+        # at record CREATION, before dispatch, so it is independent of what
+        # handlers do during the raise (gate-pinned placement).
+        if type(event).__name__ == 'EventOnSpendHP':
+            try:
+                _supersede_spend_loss(journal.records, rec,
+                                      id(event.unit), event.hp)
+            except Exception:
+                pass
         journal.push(rec)
         # Un-bracket cur_hp capture for the duration of the raise. deal_damage
         # suppresses cur_hp capture (its OWN write at Level.py:4073 is the evented

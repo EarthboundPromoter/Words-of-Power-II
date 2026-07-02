@@ -702,6 +702,89 @@ def test_direct_kill_writes_no_hp_loss():
     assert [r for r in _hp_losses(id(goner)) if r["sequence"] > seq] == []
 
 
+# ---- G-G step 4 (Unit 4): EventOnSpendHP supersedes its own hp_loss (D2) ----
+
+def _spend(lvl, unit, amount):
+    """A spend site's exact shape (Level.py:917->920): raw write, then the
+    raise adjacent in the same synchronous body."""
+    unit.cur_hp -= amount
+    lvl.event_manager.raise_event(Level.EventOnSpendHP(unit, amount), unit)
+
+
+def test_spend_supersedes_own_hp_loss():
+    lvl = _fresh_level()
+    wiz = _place(lvl, _unit("Wizard", hp=50, player=True), 7, 7)
+    wiz.cur_hp = 20
+    seq = journal.sequence
+    _spend(lvl, wiz, 3)
+    losses = [r for r in _hp_losses(id(wiz)) if r["sequence"] > seq]
+    assert len(losses) == 1, "capture stays uniform — the loss record EXISTS"
+    assert "superseded_by_spend" in losses[0]["marks"]
+    spends = [r for r in journal.records if r["sequence"] > seq
+              and r["event_type"] == "EventOnSpendHP"]
+    assert len(spends) == 1
+
+
+def test_two_identical_spends_each_claim_own_loss():
+    lvl = _fresh_level()
+    wiz = _place(lvl, _unit("Wizard", hp=50, player=True), 7, 7)
+    wiz.cur_hp = 20
+    seq = journal.sequence
+    _spend(lvl, wiz, 1)
+    _spend(lvl, wiz, 1)
+    losses = [r for r in _hp_losses(id(wiz)) if r["sequence"] > seq]
+    assert len(losses) == 2
+    assert all("superseded_by_spend" in r["marks"] for r in losses)
+
+
+def test_coincident_silent_loss_not_claimed_by_spend():
+    # The D2 overlap case: a boss-steal-shaped SILENT loss (same unit, same
+    # amount) earlier in the window, then a real spend. The spend marks its
+    # OWN loss (adjacency); the silent one stays unmarked for composition.
+    lvl = _fresh_level()
+    wiz = _place(lvl, _unit("Wizard", hp=50, player=True), 7, 7)
+    wiz.cur_hp = 20
+    seq = journal.sequence
+    wiz.cur_hp -= 1                       # silent (boss-steal shape)
+    _spend(lvl, wiz, 1)                   # write + raise
+    losses = [r for r in _hp_losses(id(wiz)) if r["sequence"] > seq]
+    assert len(losses) == 2
+    silent, owned = losses[0], losses[1]  # sequence order
+    assert "superseded_by_spend" not in silent["marks"]
+    assert "superseded_by_spend" in owned["marks"]
+
+
+def test_spend_with_no_coincident_loss_no_false_mark():
+    # A spend event whose paired write was dropped (off-field unit) must not
+    # crash and must not claim a bystander's loss — pins the unit/target
+    # payload-key asymmetry too (spend carries 'unit', hp_loss carries
+    # 'target'), since the only candidate record belongs to another unit.
+    lvl = _fresh_level()
+    ghost = _unit("Ghost", hp=20)               # never placed -> off-field
+    other = _place(lvl, _unit("Other", hp=20), 3, 3)
+    other.cur_hp = 20
+    seq = journal.sequence
+    other.cur_hp -= 2                           # bystander's silent loss
+    ghost.cur_hp = 18                           # off-field write -> dropped
+    lvl.event_manager.raise_event(Level.EventOnSpendHP(ghost, 2), ghost)
+    losses = [r for r in _hp_losses(id(other)) if r["sequence"] > seq]
+    assert len(losses) == 1
+    assert "superseded_by_spend" not in losses[0]["marks"]
+    assert [r for r in _hp_losses(id(ghost)) if r["sequence"] > seq] == []
+
+
+def test_spend_amount_mismatch_not_marked():
+    lvl = _fresh_level()
+    wiz = _place(lvl, _unit("Wizard", hp=50, player=True), 7, 7)
+    wiz.cur_hp = 20
+    seq = journal.sequence
+    wiz.cur_hp -= 5
+    lvl.event_manager.raise_event(Level.EventOnSpendHP(wiz, 3), wiz)
+    losses = [r for r in _hp_losses(id(wiz)) if r["sequence"] > seq]
+    assert len(losses) == 1
+    assert "superseded_by_spend" not in losses[0]["marks"]
+
+
 # ---- Invariant tripwire: deal_damage is the SOLE evented HP-change path ----
 
 def test_deal_damage_is_sole_evented_hp_path():
