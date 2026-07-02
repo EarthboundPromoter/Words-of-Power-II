@@ -6643,6 +6643,13 @@ if _PyGameView is not None:
                             getattr(_journal.journal, 'level_id', 0))
                     except Exception as _re:
                         log(f"[Pipeline] level-start journal reset failed: {_re!r}")
+                    try:
+                        # Oracle boundary hygiene: drop carried expectations +
+                        # the per-realm unknown dedupe alongside the journal
+                        # reset (cursor stays — sequence is monotonic).
+                        _log_capture.checker.reset()
+                    except Exception as _oc_e:
+                        log(f"[LogCapture] checker reset failed: {_oc_e!r}")
                 else:
                     try:
                         _wizard_unit = getattr(self.game, 'p1', None)
@@ -6652,6 +6659,14 @@ if _PyGameView is not None:
                         )
                     except Exception as _pipe_e:
                         log(f"[Pipeline] error in fire_pipeline: {_pipe_e}")
+                    try:
+                        # Oracle parity sweep (validation-only, dev-gated by
+                        # the telemetry seam; fast no-op for players). After
+                        # the pipeline so producers' marks are settled.
+                        _log_capture.checker.sweep(
+                            _journal.journal.records, _telemetry)
+                    except Exception as _or_e:
+                        log(f"[LogCapture] parity sweep error: {_or_e!r}")
 
                 # Flush queued speech before turn signal, then HP (#39)
                 batcher.flush()

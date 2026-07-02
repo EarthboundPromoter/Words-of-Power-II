@@ -1013,6 +1013,56 @@ def test_log_capture_double_install_noops():
     assert Level.Level.log is wrapped                  # not re-wrapped
 
 
+def test_oracle_sweep_clean_on_real_spend_and_damage():
+    # Integration: the REAL row table against REAL records from real game
+    # paths. A production-shaped spend (PAY_HP line + EventOnSpendHP) and a
+    # deal_damage hit (DMG line + EventOnDamaged) must sweep clean — no
+    # parity failures, no unknown templates.
+    lvl = _fresh_level()
+    wiz = _place(lvl, _unit("Wizard", hp=50, player=True), 7, 7)
+    _place(lvl, _unit("Ogre", hp=20), 5, 5)
+    wiz.cur_hp = 30
+    _spend(lvl, wiz, 3)
+    lvl.deal_damage(5, 5, 4, Level.Tags.Fire, _src())
+
+    class _Tel:
+        def __init__(self):
+            self.calls = []
+
+        def is_enabled(self):
+            return True
+
+        def emit(self, ev, **fields):
+            self.calls.append((ev, fields))
+
+    tel = _Tel()
+    c = log_capture.ParityChecker()
+    c.sweep(journal.records, tel)
+    c.sweep(journal.records, tel)   # flush the carry-over window too
+    assert tel.calls == [], tel.calls
+
+
+def test_expect_row_kinds_are_journal_producible():
+    # Drift guard: the row table names record kinds; the journal is what
+    # produces them. Event-class kinds must exist as game event classes
+    # (recorded via type(event).__name__); synthetic kinds must appear as
+    # literals in journal.py. A renamed kind fails here, not silently in
+    # the field.
+    import CommonContent
+    with open(os.path.join(mod_dir, 'journal.py'), encoding='utf-8') as f:
+        journal_src = f.read()
+    for tpl, row in log_capture.rows().items():
+        for kind in row['kinds']:
+            if kind.startswith('EventOn'):
+                assert hasattr(Level, kind) or hasattr(CommonContent, kind), (
+                    "row %r names unknown event class %r" % (tpl, kind))
+            else:
+                assert ("'%s'" % kind) in journal_src or \
+                       ('"%s"' % kind) in journal_src, (
+                    "row %r names synthetic kind %r not found in journal.py"
+                    % (tpl, kind))
+
+
 def test_log_capture_install_declines_on_missing_sink():
     # Simulate the RW2 backport / a future sink restructure. Level.Level.log
     # is shared process state — save/restore in try/finally, and restore the
