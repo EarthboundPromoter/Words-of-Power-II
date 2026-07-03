@@ -324,6 +324,57 @@ def test_flavor_reseed_baselines_silently():
     assert _flavor_records() == []
 
 
+# ---- Step 3: the Unit-3 handoff pin — reaction markers arrive free ----
+
+def test_golem_reversion_shape_materializes_reaction_marker():
+    # GolemReversionBuff (Spells.py:17676): Stonewake's "Return from Dust"
+    # calls make_wall inside a buff-owned EventOnDeath handler. Unit 3's
+    # record gate promotes the dispatch breadcrumb on ANY record — the new
+    # terrain_change must land parented under a materialized reactive_proc
+    # marker, itself parented under the death event. Zero Unit-5 coupling;
+    # this pins the handoff working end-to-end.
+    import reactive_markers
+    lvl = _fresh_level()
+    reactive_markers.install()
+
+    class _ReversionTB(Level.Buff):
+        def on_init(self):
+            self.name = "Return from Dust"
+            self.buff_type = Level.BUFF_TYPE_BLESS
+            self.owner_triggers[Level.EventOnDeath] = self.on_death
+
+        def on_death(self, evt):
+            owner = self.owner
+            u = owner.level.get_unit_at(owner.x, owner.y)
+            if u and u is not owner:
+                return
+            owner.level.make_wall(owner.x, owner.y)
+
+    golem = Level.Unit()
+    golem.name = "Golem"
+    golem.max_hp = 10
+    lvl.add_obj(golem, 5, 5)
+    golem.apply_buff(_ReversionTB())
+    seq0 = journal.sequence
+
+    golem.kill()
+
+    terr = [r for r in _records('terrain_change') if r['sequence'] > seq0]
+    assert len(terr) == 1
+    assert terr[0]['payload']['after']['kind'] == 'wall'
+    assert terr[0]['payload']['method'] == 'make_wall'
+
+    markers = [r for r in _records('reactive_proc') if r['sequence'] > seq0]
+    assert len(markers) == 1
+    assert markers[0]['payload']['buff'] == "Return from Dust"
+    assert terr[0]['parent'] == markers[0]['sequence']
+
+    deaths = [r for r in journal.records
+              if r['event_type'] == 'EventOnDeath' and r['sequence'] > seq0]
+    assert deaths
+    assert markers[0]['parent'] == deaths[0]['sequence']
+
+
 def test_menu_time_mutation_flag_survives_for_boundary_floor():
     # A mutation outside any bracket (menu-time portal_mercy shape): no pop
     # runs, so the flag stays armed for the turn-boundary floor consumer.
