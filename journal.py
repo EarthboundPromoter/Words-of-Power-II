@@ -1460,7 +1460,7 @@ def install_hooks():
             journal.pop()
 
     def patched_add_obj(self, obj, x, y):
-        # Game's add_obj at Level.py:4023-4030 calls buff.apply(obj) directly
+        # Game's add_obj at Level.py:3892-3899 calls buff.apply(obj) directly
         # (not via unit.apply_buff) for buffs that arrive on a unit at add
         # time — pre-existing buffs on summoned units. That direct path
         # bypasses the EventOnBuffApply raise. Without synthesis, "Wolf
@@ -1489,7 +1489,7 @@ def install_hooks():
         return result
 
     def patched_remove_obj(self, obj):
-        # Game's remove_obj at Level.py:4058-4060 calls buff.unapply()
+        # Game's remove_obj at Level.py:3930-3932 calls buff.unapply()
         # directly on every buff of a unit being removed (typically on
         # death), bypassing EventOnBuffRemove. Without synthesis, buff
         # fades on death are invisible — relevant when the buff was
