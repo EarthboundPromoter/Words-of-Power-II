@@ -6,6 +6,14 @@ an early work-in-progress RW3 port — expect frequent changes.
 ## Unreleased
 
 ### Fixed
+- One unit is never spoken as several units. Grouped speech used to render repetition as
+  multiplicity — "3 Ally Dancing Blades at (3,8), (3,8), (3,8)" for one blade hit three
+  times, "2 Ally Sword of Lights" for one blade that blocked twice, "Wizard's Necrosis
+  faded" three times for one expiring stack. Repeated hits now read as repetition in the
+  existing grammar ("Ally Sword of Light (5,10) blocked 2 hits, 5 Physical each from
+  Pinch"), and one-time facts (fades, buff applies, team flips, deaths) speak once. The
+  fix covers every grouped speech path: enemy/ally action lines, shield blocks and
+  gains, buff onsets and fades, kill and status sections, and equipment effect lines.
 - Casts fully absorbed by an enemy's shield no longer read "No damage" — they read the
   blocked clause the game shows as the pips drop: "Cast Blood Bullet. 1 surviving:
   Boggart Assassin (12,9): Blood Bullet 10 Physical blocked by 1 shield." Also fixes AoE
