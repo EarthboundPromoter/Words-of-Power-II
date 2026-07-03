@@ -528,6 +528,105 @@ def test_cloud_on_non_live_level_gated():
     assert _records('cloud_spawn') == []
 
 
+# ---- Step 6: props and portals ----
+
+class _FakeGenParams:
+    difficulty = 1
+
+    def get_description(self):
+        return ""
+
+    def materialize_reward(self, player):
+        pass
+
+
+def test_add_and_remove_prop_recorded():
+    lvl = _fresh_level()
+    prop = Level.Prop()
+    lvl.add_prop(prop, 4, 4)
+
+    added = _records('prop_added')
+    assert len(added) == 1
+    p = added[0]['payload']
+    assert p['prop_class'] == 'Prop'
+    assert (p['x'], p['y']) == (4, 4)
+    assert p['is_portal'] is False
+    assert p['locked'] is None
+
+    lvl.remove_prop(prop)
+    removed = _records('prop_removed')
+    assert len(removed) == 1
+    assert removed[0]['payload']['prop_class'] == 'Prop'
+
+
+def test_add_portal_unlocked_records_pair():
+    # The portal_mercy / gear shape: add_portal(locked=False) -> prop_added
+    # (portal, still locked at placement) + portal_unlocked, siblings.
+    lvl = _fresh_level()
+    portal = Level.Portal(_FakeGenParams())
+    lvl.add_portal(portal, 5, 5, locked=False, flash=False)
+
+    added = _records('prop_added')
+    assert len(added) == 1
+    assert added[0]['payload']['is_portal'] is True
+    assert added[0]['payload']['prop_name'] == 'Rift'
+
+    unlocked = _records('portal_unlocked')
+    assert len(unlocked) == 1
+    assert (unlocked[0]['payload']['x'], unlocked[0]['payload']['y']) == (5, 5)
+    assert unlocked[0]['sequence'] > added[0]['sequence']
+
+
+def test_portal_unlock_records_flip_only():
+    # Board-clear unlock funnels through the same method; a second unlock()
+    # hits the game's own early-return -> no record.
+    lvl = _fresh_level()
+    portal = Level.Portal(_FakeGenParams())
+    lvl.add_portal(portal, 5, 5, locked=True, flash=False)
+    seq0 = journal.sequence
+
+    portal.unlock()
+    unlocked = [r for r in _records('portal_unlocked')
+                if r['sequence'] > seq0]
+    assert len(unlocked) == 1
+
+    portal.unlock()   # already unlocked: early return, no record
+    unlocked = [r for r in _records('portal_unlocked')
+                if r['sequence'] > seq0]
+    assert len(unlocked) == 1
+
+
+def test_reroll_churn_shape_paired_records():
+    # Reroll (Game.py:588-607) removes every portal and adds new ones —
+    # emulated at the chokepoints it actually uses.
+    lvl = _fresh_level()
+    old = Level.Portal(_FakeGenParams())
+    lvl.add_portal(old, 5, 5, locked=True, flash=False)
+    seq0 = journal.sequence
+
+    lvl.remove_prop(old)
+    new = Level.Portal(_FakeGenParams())
+    lvl.add_portal(new, 9, 9, locked=False, flash=False)
+
+    removed = [r for r in _records('prop_removed') if r['sequence'] > seq0]
+    added = [r for r in _records('prop_added') if r['sequence'] > seq0]
+    assert len(removed) == 1 and removed[0]['payload']['is_portal'] is True
+    assert len(added) == 1 and (added[0]['payload']['x'],
+                                added[0]['payload']['y']) == (9, 9)
+
+
+def test_prop_on_non_live_level_gated():
+    # Gen-time prop placement (vaults, rewards materializing into the NEXT
+    # level via unlock's materialize_reward) stays out of the journal.
+    lvl = _fresh_level()
+    other = Level.Level(15, 15)
+    other.add_prop(Level.Prop(), 3, 3)
+    p = Level.Portal(_FakeGenParams())
+    other.add_portal(p, 4, 4, locked=False, flash=False)
+    assert _records('prop_added') == []
+    assert _records('portal_unlocked') == []
+
+
 def test_menu_time_mutation_flag_survives_for_boundary_floor():
     # A mutation outside any bracket (menu-time portal_mercy shape): no pop
     # runs, so the flag stays armed for the turn-boundary floor consumer.

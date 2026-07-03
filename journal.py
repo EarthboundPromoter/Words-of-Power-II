@@ -1679,6 +1679,54 @@ def install_hooks():
                 pass
         return patched_terrain
 
+    def patched_add_prop(self, prop, x, y):
+        # Unit 5 (G-L): add_prop (Level.py:3959) is silent — the method is
+        # the chokepoint. add_portal routes through here (its locked=False
+        # creation then fires the unlock hook, a sibling record). Original
+        # first: it stamps prop.x/y/level.
+        result = original_add_prop(self, prop, x, y)
+        try:
+            if self is journal._level:
+                journal.record('prop_added',
+                               _snapshot_prop(prop, _portal_cls))
+        except Exception:
+            pass
+        return result
+
+    def patched_remove_prop(self, prop):
+        # Silent removals: reroll churn (Game.py:591), LAST_LEVEL portal
+        # self-removal (Level.py:2720), shop close, pickup consumption.
+        # prop.x/y survive the original (it clears the tile slot only).
+        result = original_remove_prop(self, prop)
+        try:
+            if self is journal._level:
+                journal.record('prop_removed',
+                               _snapshot_prop(prop, _portal_cls))
+        except Exception:
+            pass
+        return result
+
+    def patched_portal_unlock(self):
+        # Portal.unlock (Level.py:2724): asset swap + locked=False +
+        # materialize_reward, no event, no log — a sighted player sees the
+        # rift light up. Record only an actual flip (the game's own
+        # early-return guard, mirrored); reward materialization mutates the
+        # NEXT level inside the original and stays gated by D1.
+        was_locked = bool(getattr(self, 'locked', False))
+        result = original_portal_unlock(self)
+        try:
+            if (was_locked and not getattr(self, 'locked', True)
+                    and getattr(self, 'level', None) is journal._level):
+                journal.record('portal_unlocked', {
+                    'x': getattr(self, 'x', None),
+                    'y': getattr(self, 'y', None),
+                    'prop_name': (getattr(self, 'name', None)
+                                  or type(self).__name__),
+                })
+        except Exception:
+            pass
+        return result
+
     def patched_unit_kill(self, damage_event=None, trigger_death_event=True):
         # Game's Unit.kill at Level.py:2310-2325 only raises EventOnDeath
         # when trigger_death_event is True. Silent kills come from
@@ -2018,5 +2066,11 @@ def install_hooks():
     if original_make_chasm is not None:
         Level.Level.make_chasm = _make_terrain_patch('make_chasm',
                                                      original_make_chasm)
+    if original_add_prop is not None:
+        Level.Level.add_prop = patched_add_prop
+    if original_remove_prop is not None:
+        Level.Level.remove_prop = patched_remove_prop
+    if original_portal_unlock is not None:
+        _portal_cls.unlock = patched_portal_unlock
 
     journal._hooks_installed = True
