@@ -2413,6 +2413,25 @@ class LoSTracker:
 
 los_tracker = LoSTracker(async_tts)
 
+def _terrain_los_rediff():
+    """Unit 5 (G-J, owner-ratified LIVE): terrain changed sightlines while
+    units stood still — the tracker's move/add/death triggers never fire, so
+    a wall opening left enters-LoS silent until the next unit move. Re-run
+    the existing full diff (existing phrasing, existing collapse rule, exits
+    silent). Fired by journal.consume_terrain_dirty: once per closed root
+    window + the turn-boundary floor — never per tile."""
+    try:
+        game = _game_ref[0]
+        if not game or not game.p1:
+            return
+        if _level_complete[0] or not los_tracker._seeded:
+            return
+        los_tracker._on_player_moved(game.cur_level, game.p1)
+    except Exception as e:
+        log(f"[LoS] terrain re-diff error: {e}")
+
+_journal.journal._terrain_dirty_consumer = _terrain_los_rediff
+
 def _on_moved_los(evt):
     los_tracker.on_unit_moved(evt)
 
@@ -6962,6 +6981,12 @@ if _PyGameView is not None:
                             _journal.journal.records, _telemetry)
                     except Exception as _or_e:
                         log(f"[LogCapture] parity sweep error: {_or_e!r}")
+
+                # Terrain-LoS floor (Unit 5 D5): a melt whose cast gen ran
+                # unwrapped, or a menu-time carve, leaves the flag armed —
+                # consume it here, same player-perceived beat as the turn's
+                # speech. No-op when nothing changed sightlines.
+                _journal.journal.consume_terrain_dirty()
 
                 # Flush queued speech before turn signal, then HP (#39)
                 batcher.flush()

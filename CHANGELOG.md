@@ -3,6 +3,16 @@
 All notable changes to **Words of Power II** are listed here, newest first. This is
 an early work-in-progress RW3 port — expect frequent changes.
 
+## Unreleased
+
+### Fixed
+- Terrain changes now update who is in view. When a wall melts (or appears) while
+  everyone stands still, enemies revealed or hidden by the change are re-checked
+  immediately — "Fire Lizard appears, 3 north" through the same announcement that
+  already speaks when something walks into sight. Before, the check only ran when a
+  unit moved, so a standing enemy behind a melted wall stayed silent until something
+  else stirred.
+
 ## 2026-07-03 — 0.3.0
 
 ### Fixed
