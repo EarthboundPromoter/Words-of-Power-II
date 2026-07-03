@@ -3,7 +3,13 @@
 All notable changes to **Words of Power II** are listed here, newest first. This is
 an early work-in-progress RW3 port — expect frequent changes.
 
-## Unreleased
+## 2026-07-03 — 0.3.1
+
+### Added
+- The world-state capture layer is complete: terrain changes, tile flavor (lava, swamp,
+  water chasms and wall skins), cloud lifecycles, props and rifts, and the Chronomancer
+  trial clock are now all recorded internally with their causes. This is groundwork — the
+  speech that reads from it comes in later releases; the fixes below are its first fruit.
 
 ### Fixed
 - "X appears" announcements are back — they had been silent on every normally-entered
