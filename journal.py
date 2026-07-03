@@ -87,8 +87,14 @@ class _Journal:
         self._skip_next_queue_wrap = False
         self._pending_queue = False
         self._level = None
+        # Unit 5 (D5): set by the terrain hooks when a can_see-affecting
+        # change lands on the live level; consumed (once per closed root
+        # window, plus a turn-boundary floor) by the screen_reader-side
+        # LoS re-diff consumer. The consumer slot survives reset().
+        self.terrain_los_dirty = False
+        self._terrain_dirty_consumer = None
 
-    def reset(self, level_id):
+    def reset(self, level_id, level=None):
         self.records = []
         self.cause_stack = []
         self._pending_cause.clear()
@@ -97,10 +103,15 @@ class _Journal:
         self._pending_queue = False
         self._suppress_watched_capture = False
         self._suppress_cur_hp_capture = False
-        # Drop the level ref on transition: a new floor's records must not read a
-        # departed level's current_cast_context. Not live-reachable today (no
-        # cross-level records fire during a live cast), but cheap insurance.
-        self._level = None
+        # The level ref on transition: a new floor's records must not read a
+        # departed level's current_cast_context. Callers that know the incoming
+        # level pass it (Unit 5, gate Finding 1: level ENTRY is the live-level
+        # set-point — menu-time world mutations like a reroll-fallback
+        # portal_mercy need no cast/tick to have run, so waiting for the first
+        # action left a real gated-out window). A bare reset() drops to None,
+        # preserving the old behavior for callers with no level in hand.
+        self._level = level
+        self.terrain_los_dirty = False
         self.level_id = level_id
         if self._fp:
             self._emit({"__meta__": "level_reset", "level_id": level_id, "seq": self.sequence})
@@ -126,6 +137,26 @@ class _Journal:
     def pop(self):
         if self.cause_stack:
             self.cause_stack.pop()
+        # Unit 5 (D5): the terrain-LoS re-diff batches to window exit — at
+        # most one re-diff per closed root window, never one per tile. NB a
+        # cast's OWN gen runs unwrapped (R3: parenting rides
+        # current_cast_context, no push/pop), so a melt that ends the cast
+        # leaves the flag armed for the turn-boundary floor — which lands in
+        # the same player-perceived beat as the cast's speech.
+        if not self.cause_stack and self.terrain_los_dirty:
+            self.consume_terrain_dirty()
+
+    def consume_terrain_dirty(self):
+        """Fire the LoS re-diff consumer if terrain changed sightlines.
+        Single consumption point (pop-to-empty + the turn-boundary floor).
+        Clear-before-call so a consumer bug can't loop; consumer errors
+        never propagate into engine finally blocks."""
+        if self.terrain_los_dirty and self._terrain_dirty_consumer is not None:
+            self.terrain_los_dirty = False
+            try:
+                self._terrain_dirty_consumer()
+            except Exception:
+                pass
 
     def _current_parent_seq(self):
         # Parent for a new record = the innermost live cause. cause_stack wins when
@@ -1218,6 +1249,68 @@ def _active_cause(level):
     return None
 
 
+def _terrain_tile_state(tile):
+    """Capture-relevant terrain state of one tile (Unit 5 D2). kind derives
+    from the game's own flag triple (make_wall/make_floor/make_chasm write
+    exactly these, Level.py:4250-4299); flavor fields ride along so a
+    terrain_change record is self-contained for the composer. name/description
+    are derivable from kind and deliberately omitted (game-sanctioned words
+    are resolved at speech time, not stored per record)."""
+    if getattr(tile, 'is_chasm', False):
+        kind = 'chasm'
+    elif getattr(tile, 'can_walk', False):
+        kind = 'floor'
+    else:
+        kind = 'wall'
+    return {
+        'kind': kind,
+        'can_walk': bool(getattr(tile, 'can_walk', False)),
+        'can_see': bool(getattr(tile, 'can_see', False)),
+        'can_fly': bool(getattr(tile, 'can_fly', False)),
+        'chasm_type': getattr(tile, 'chasm_type', None),
+        'tileset': getattr(tile, 'tileset', None),
+    }
+
+
+def _snapshot_cloud(cloud):
+    """Snapshot the fields the cloud lifecycle records need (Unit 5 D2).
+    Primitives only — a cloud may be dead/replaced by consumer-read time."""
+    owner = getattr(cloud, 'owner', None)
+    snap = {
+        'cloud_name': getattr(cloud, 'name', None) or type(cloud).__name__,
+        'cloud_class': type(cloud).__name__,
+        'x': getattr(cloud, 'x', None),
+        'y': getattr(cloud, 'y', None),
+        'owner_name': (getattr(owner, 'name', None)
+                       if owner is not None else None),
+        'owner_is_player_controlled': bool(
+            getattr(owner, 'is_player_controlled', False)),
+        'duration_remaining': getattr(cloud, 'duration', None),
+    }
+    dmg = getattr(cloud, 'damage', None)
+    if dmg is not None:
+        snap['damage'] = dmg
+    sc = getattr(cloud, 'strikechance', None)
+    if sc is not None:
+        snap['strikechance'] = sc
+    return snap
+
+
+def _snapshot_prop(prop, portal_cls):
+    """Snapshot for prop lifecycle records (Unit 5 D2). locked is meaningful
+    for portals only (None otherwise) — walkability is terrain-only (ledger
+    G-L), so no walk flag is stored."""
+    is_portal = bool(portal_cls is not None and isinstance(prop, portal_cls))
+    return {
+        'prop_name': getattr(prop, 'name', None) or type(prop).__name__,
+        'prop_class': type(prop).__name__,
+        'x': getattr(prop, 'x', None),
+        'y': getattr(prop, 'y', None),
+        'is_portal': is_portal,
+        'locked': getattr(prop, 'locked', None) if is_portal else None,
+    }
+
+
 def install_hooks():
     """Monkeypatch Level.act_cast, Level.queue_spell, EventHandler.raise_event,
     and ChannelBuff.on_advance to populate the journal. Idempotent — safe to
@@ -1253,6 +1346,15 @@ def install_hooks():
     original_add_shields = Level.Unit.add_shields
     original_remove_shields = Level.Unit.remove_shields
     original_deal_damage = Level.Level.deal_damage
+    # Unit 5 world chokepoints — getattr-gated so the RW2 backport declines
+    # per-hook instead of failing install (D7).
+    original_make_wall = getattr(Level.Level, 'make_wall', None)
+    original_make_floor = getattr(Level.Level, 'make_floor', None)
+    original_make_chasm = getattr(Level.Level, 'make_chasm', None)
+    original_add_prop = getattr(Level.Level, 'add_prop', None)
+    original_remove_prop = getattr(Level.Level, 'remove_prop', None)
+    _portal_cls = getattr(Level, 'Portal', None)
+    original_portal_unlock = getattr(_portal_cls, 'unlock', None)
 
     class _TrackedCastContext(original_cast_context):
         # A mutable subclass of the engine's immutable CastContext namedtuple.
@@ -1508,6 +1610,45 @@ def install_hooks():
                     'is_unit_removed': True,
                 })
         return original_remove_obj(self, obj)
+
+    def _make_terrain_patch(method_name, original):
+        # Unit 5 (G-J): the three terrain primitives raise no event and write
+        # no log (sole exception: Crumble's bespoke string) — the method IS
+        # the chokepoint. Live-level gate (D1): gen-time carving mutates a
+        # level that is not journal._level (next-level gen runs off-current,
+        # Game.py:800/:426), so it self-excludes; live state arrives via
+        # level-entry seeding, not records. Only-changed filter (D2): the
+        # requires_los-reveal idiom re-floors existing floors — no delta, no
+        # record. In-path discipline (D7): the original always runs;
+        # observation is guarded on both sides.
+        def patched_terrain(self, x, y):
+            before = None
+            if self is journal._level:
+                try:
+                    before = _terrain_tile_state(self.tiles[x][y])
+                except Exception:
+                    before = None
+            original(self, x, y)
+            if before is None:
+                return
+            try:
+                after = _terrain_tile_state(self.tiles[x][y])
+                if after == before:
+                    return
+                journal.record('terrain_change', {
+                    'x': x,
+                    'y': y,
+                    'before': before,
+                    'after': after,
+                    'method': method_name,
+                })
+                # D5: chasm<->floor keeps can_see True — only a sightline
+                # transition arms the LoS re-diff.
+                if before['can_see'] != after['can_see']:
+                    journal.terrain_los_dirty = True
+            except Exception:
+                pass
+        return patched_terrain
 
     def patched_unit_kill(self, damage_event=None, trigger_death_event=True):
         # Game's Unit.kill at Level.py:2310-2325 only raises EventOnDeath
@@ -1838,5 +1979,15 @@ def install_hooks():
     Level.Unit.add_shields = patched_add_shields
     Level.Unit.remove_shields = patched_remove_shields
     Level.Level.deal_damage = patched_deal_damage
+    # Unit 5 world chokepoints (per-hook self-gating, D7).
+    if original_make_wall is not None:
+        Level.Level.make_wall = _make_terrain_patch('make_wall',
+                                                    original_make_wall)
+    if original_make_floor is not None:
+        Level.Level.make_floor = _make_terrain_patch('make_floor',
+                                                     original_make_floor)
+    if original_make_chasm is not None:
+        Level.Level.make_chasm = _make_terrain_patch('make_chasm',
+                                                     original_make_chasm)
 
     journal._hooks_installed = True

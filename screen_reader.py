@@ -2579,7 +2579,10 @@ def patched_setup_level(self, level_num):
     pos = f" @({player.x},{player.y})" if player else ""
     log(f"[Screen Reader] Level {level_num} loaded{pos} - EventManager {id(self.event_manager)}")
     register_triggers(self.event_manager)
-    _journal.journal.reset(level_num)
+    # Pass the level: entry is the live-level set-point (Unit 5, gate
+    # Finding 1) — menu-time world mutations (reroll-fallback portal_mercy)
+    # fire before any cast/tick would have set journal._level.
+    _journal.journal.reset(level_num, level=self)
     # Safety net: a staged level-complete announcement should have been
     # spoken at the first post-clear turn boundary. If we reach the next
     # level with it still pending (boundary never fired), speak it now
@@ -6911,8 +6914,12 @@ if _PyGameView is not None:
                 # skip the compose; turn 2 onward composes real play.
                 if _turn_count[0] <= 1:
                     try:
+                        # Keep the live level across the hygiene reset (Unit 5,
+                        # gate Finding 1's second instance): a bare reset here
+                        # re-opened the _level=None window mid-level.
                         _journal.journal.reset(
-                            getattr(_journal.journal, 'level_id', 0))
+                            getattr(_journal.journal, 'level_id', 0),
+                            level=getattr(self.game, 'cur_level', None))
                     except Exception as _re:
                         log(f"[Pipeline] level-start journal reset failed: {_re!r}")
                     try:

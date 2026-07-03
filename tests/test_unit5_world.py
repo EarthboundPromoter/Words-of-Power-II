@@ -1,0 +1,243 @@
+# Unit 5 (world chokepoints) — live-Level tests for terrain / flavor / cloud /
+# prop capture and the LoS dirty-flag contract. Real Level.Level harness (the
+# test_journal_causegraph pattern — gate Finding 2: the SimpleNamespace style
+# cannot run the real primitives). Run from the game root.
+#
+# Plan: docs/UNIT5_WORLD_CHOKEPOINTS_BUILD_PLAN.md (gated 2026-07-03).
+
+import sys
+import os
+
+import pytest
+
+mod_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if mod_dir not in sys.path:
+    sys.path.insert(0, mod_dir)
+
+import Level
+from Level import Point
+from journal import journal, install_hooks
+
+
+# ---- Harness ----
+
+def _fresh_level(w=15, h=15):
+    """Install hooks, build a real level, and make it the journal's LIVE level
+    via the reset(level=...) set-point (the gate-Finding-1 fix) — NOT via a
+    manual journal._level assignment, which papers over the None-window."""
+    install_hooks()
+    lvl = Level.Level(w, h)
+    journal.reset(id(lvl), level=lvl)
+    return lvl
+
+
+def _wizard():
+    wiz = Level.Unit()
+    wiz.name = "Wizard"
+    wiz.is_player_controlled = True
+    wiz.max_hp = 50
+    return wiz
+
+
+def _offline(lvl, fn):
+    """Run setup mutations with the journal pointed elsewhere (records off),
+    then restore the live level."""
+    prev = journal._level
+    journal._level = None
+    try:
+        fn()
+    finally:
+        journal._level = prev
+
+
+def _records(kind):
+    return [r for r in journal.records if r["event_type"] == kind]
+
+
+def _drain(lvl):
+    while lvl.can_advance_spells():
+        lvl.advance_spells()
+
+
+def _make_spell(name, cast_body=None):
+    class _S(Level.Spell):
+        def on_init(self):
+            self.name = name
+            self.max_charges = 9
+            self.range = 9
+        def get_description(self):
+            return ""
+        def cast(self, x, y, **kw):
+            if cast_body is not None:
+                yield from cast_body(self, x, y, **kw)
+            else:
+                return
+                yield
+    return _S()
+
+
+# ---- Step 1: terrain primitives + live-level gate ----
+
+def test_make_floor_on_wall_records_terrain_change():
+    lvl = _fresh_level()
+    _offline(lvl, lambda: lvl.make_wall(3, 3))
+    lvl.make_floor(3, 3)
+    recs = _records('terrain_change')
+    assert len(recs) == 1
+    p = recs[0]['payload']
+    assert (p['x'], p['y']) == (3, 3)
+    assert p['method'] == 'make_floor'
+    assert p['before']['kind'] == 'wall'
+    assert p['after']['kind'] == 'floor'
+    assert p['before']['can_see'] is False
+    assert p['after']['can_see'] is True
+
+
+def test_make_chasm_records_and_flags():
+    lvl = _fresh_level()
+    _offline(lvl, lambda: lvl.make_floor(4, 4))
+    lvl.make_chasm(4, 4)
+    recs = _records('terrain_change')
+    assert len(recs) == 1
+    p = recs[0]['payload']
+    assert p['before']['kind'] == 'floor'
+    assert p['after']['kind'] == 'chasm'
+    assert p['after']['can_walk'] is False
+    assert p['after']['can_fly'] is True
+
+
+def test_noop_make_floor_no_record():
+    # The requires_los-reveal idiom re-floors existing floors — no delta.
+    lvl = _fresh_level()
+    _offline(lvl, lambda: lvl.make_floor(5, 5))
+    lvl.make_floor(5, 5)
+    assert _records('terrain_change') == []
+
+
+def test_non_live_level_gated_out():
+    # Gen-time carving mutates a level that is not journal._level.
+    lvl = _fresh_level()
+    other = Level.Level(15, 15)
+    other.make_wall(2, 2)
+    other.make_floor(2, 2)
+    assert _records('terrain_change') == []
+
+
+def test_none_window_regression():
+    # Gate Finding 1: a bare reset leaves _level None (documented old
+    # behavior); reset(level=...) — the level-entry set-point — captures a
+    # mutation that fires before ANY cast/tick has run (the menu-time
+    # portal_mercy shape). No manual journal._level assignment anywhere.
+    install_hooks()
+    lvl = Level.Level(15, 15)
+    lvl.make_wall(6, 6)
+
+    journal.reset(id(lvl))            # bare: the old None-window
+    lvl.make_floor(6, 6)
+    assert _records('terrain_change') == []
+
+    lvl.make_wall(6, 6)               # still offline (bare reset)
+    journal.reset(id(lvl), level=lvl)  # the fix: entry sets the live level
+    lvl.make_floor(6, 6)
+    recs = _records('terrain_change')
+    assert len(recs) == 1
+    assert recs[0]['payload']['method'] == 'make_floor'
+
+
+def test_mass_melt_records_share_cast_parent():
+    lvl = _fresh_level()
+    wiz = _wizard()
+
+    def melt_gen(spell, x, y, **kw):
+        spell.caster.level.make_floor(9, 7)
+        spell.caster.level.make_floor(10, 7)
+        yield
+
+    _offline(lvl, lambda: (lvl.make_wall(9, 7), lvl.make_wall(10, 7)))
+    s = _make_spell("Melt", melt_gen)
+    wiz.add_spell(s)
+    lvl.add_obj(wiz, 7, 7)
+    lvl.act_cast(wiz, s, 8, 7, pay_costs=True)  # open tile; body melts 9/10
+    _drain(lvl)
+
+    recs = _records('terrain_change')
+    assert len(recs) == 2
+    begins = [r for r in journal.records if r["event_type"] == "cast_begin"
+              and r["payload"]["spell"]["name"] == "Melt"]
+    assert len(begins) == 1
+    root_seq = begins[0]["sequence"]
+    for r in recs:
+        assert r["parent"] == root_seq
+
+
+def test_terrain_dirty_flag_and_consumer_contract():
+    # D5 contract: a can_see transition arms the flag; the consumer fires
+    # ONCE at the closed root window (pop-to-empty), not per tile; a
+    # chasm->floor change (can_see True->True) never arms it.
+    lvl = _fresh_level()
+    wiz = _wizard()
+    calls = []
+    journal._terrain_dirty_consumer = lambda: calls.append(1)
+    try:
+        def melt_gen(spell, x, y, **kw):
+            spell.caster.level.make_floor(9, 7)
+            spell.caster.level.make_floor(10, 7)
+            yield
+
+        _offline(lvl, lambda: (lvl.make_wall(9, 7), lvl.make_wall(10, 7)))
+        s = _make_spell("Melt", melt_gen)
+        wiz.add_spell(s)
+        lvl.add_obj(wiz, 7, 7)
+        lvl.act_cast(wiz, s, 8, 7, pay_costs=True)  # open tile
+        _drain(lvl)
+
+        # The cast's OWN gen runs unwrapped (R3) — no pop follows it, so the
+        # flag stays ARMED for the turn-boundary floor; the boundary then
+        # fires the consumer exactly once for the whole two-tile melt.
+        assert journal.terrain_los_dirty is True
+        assert calls == []
+        journal.consume_terrain_dirty()
+        assert calls == [1]
+        assert journal.terrain_los_dirty is False
+        journal.consume_terrain_dirty()   # idempotent once consumed
+        assert calls == [1]
+
+        # A terrain change inside a CLOSED window (event/buff bracket) fires
+        # the consumer at pop-to-empty — the mid-turn immediacy path.
+        calls.clear()
+        _offline(lvl, lambda: lvl.make_wall(12, 7))
+        marker = journal.record('cast_begin', {'note': 'window'})
+        journal.push(marker)
+        lvl.make_floor(12, 7)
+        assert calls == []            # window still open
+        journal.pop()
+        assert calls == [1]
+        assert journal.terrain_los_dirty is False
+
+        # chasm->floor keeps can_see True: record yes, flag no.
+        calls.clear()
+        _offline(lvl, lambda: lvl.make_chasm(11, 7))
+        lvl.make_floor(11, 7)
+        assert len([r for r in _records('terrain_change')
+                    if r['payload']['x'] == 11]) == 1
+        assert journal.terrain_los_dirty is False
+        assert calls == []
+    finally:
+        journal._terrain_dirty_consumer = None
+        journal.terrain_los_dirty = False
+
+
+def test_menu_time_mutation_flag_survives_for_boundary_floor():
+    # A mutation outside any bracket (menu-time portal_mercy shape): no pop
+    # runs, so the flag stays armed for the turn-boundary floor consumer.
+    lvl = _fresh_level()
+    calls = []
+    journal._terrain_dirty_consumer = lambda: calls.append(1)
+    try:
+        _offline(lvl, lambda: lvl.make_wall(8, 8))
+        lvl.make_floor(8, 8)          # no cause window live
+        assert journal.terrain_los_dirty is True
+        assert calls == []            # nothing popped -> consumer not fired
+    finally:
+        journal._terrain_dirty_consumer = None
+        journal.terrain_los_dirty = False
