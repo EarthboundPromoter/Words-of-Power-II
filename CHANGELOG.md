@@ -3,6 +3,37 @@
 All notable changes to **Words of Power II** are listed here, newest first. This is
 an early work-in-progress RW3 port — expect frequent changes.
 
+## Unreleased
+
+### Fixed
+- Spell upgrades whose whole effect is stat changes (e.g. Lightning Bolt's Blood Horizon)
+  no longer go silent after their level line — every upgrade now reads exactly what the
+  game draws: stat gain lines, description, added tags, stack type.
+- Upgrades that introduce new stats to their spell (e.g. Life Funnel's targets and radius)
+  now read those gain lines; they were silently dropped before.
+- Summon tooltips no longer read bare placeholder words where numbers belong ("damage
+  Lightning damage") — ability descriptions now speak their live numbers everywhere
+  (the Living Lightning Scroll bug), and the same fix covers passives, on-death effects,
+  clouds, and ground items.
+- Locked rifts no longer reveal their contents: like the game, they now read only the
+  rift's name, the unlock hint, and (for vaults) the vault's description. Contents read
+  after the level is cleared — previously the mod spoke concealed contents all level.
+- Summon previews no longer read "0 of 48 HP" — they read max HP, as drawn.
+
+### Added
+- Rift previews now read each component's tags (shown in-game as colored letters) and
+  distinguish the boss tiers the game shows by color: "Boss:" for encounter bosses,
+  "Elite:" for named threats.
+- Components now read their tags when cycled to or examined on the ground.
+- Equipment now reads its tags and its Attributes stat block (live values), matching the
+  drawn panel.
+- Spell pages now mark already-purchased upgrades with "owned" (shown in-game in green),
+  and read "Attributes: None" where the game draws it.
+- Vault portals read their real names ("Spiders Lair") instead of a generic "Rift" —
+  before and after unlocking.
+- Enemy ability lists now include Quick Cast where present, use the game's "Spells:"
+  header, and match the game's resist wording.
+
 ## 2026-06-30 — 0.2.6
 
 ### Added
