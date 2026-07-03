@@ -3,7 +3,7 @@
 All notable changes to **Words of Power II** are listed here, newest first. This is
 an early work-in-progress RW3 port — expect frequent changes.
 
-## Unreleased
+## 2026-07-03 — 0.3.0
 
 ### Fixed
 - One unit is never spoken as several units. Grouped speech used to render repetition as
@@ -50,8 +50,26 @@ an early work-in-progress RW3 port — expect frequent changes.
   rift's name, the unlock hint, and (for vaults) the vault's description. Contents read
   after the level is cleared — previously the mod spoke concealed contents all level.
 - Summon previews no longer read "0 of 48 HP" — they read max HP, as drawn.
+- Shields granted to a unit at the moment it is summoned (e.g. Magic Minion Shield's
+  "allies gain shields when summoned") are now announced — these on-summon grants used
+  to be silently dropped as part of the unit arriving.
+- A unit returning to the battlefield via Reincarnation no longer produces a phantom
+  "shields gained" announcement.
+- A shield grant that pushes a unit past the 20-shield cap now announces the true net
+  gain once, instead of an inflated amount followed by a correction.
+- Channeling, rituals, and other manual-only cast behavior work again with the mod loaded.
 
 ### Added
+- Shields are now narrated throughout combat, for you, your allies, and enemies alike:
+  gaining shields, having them stripped, and blocking hits — "Wizard blocked 12 Fire
+  from Fire Bolt, 2 shields left." Blocked hits report the damage that would have
+  landed. Two new settings control whether non-wizard shield lines end with the unit's
+  resulting shield count: `enemy_shield_totals` (on by default) and
+  `ally_shield_totals` (off by default).
+- Allegiance changes are now announced: units that turn friendly (Dominate, conversions) or hostile (betrayals, Treachery).
+- Cheating death is now announced: when a hit would have killed you but you survive
+  (Crisis Charm restoring you to full, Soulbound / Soul Jar clamping you to 1 HP), you
+  hear "You would have died —" and your resulting health (previously silent).
 - Auto pickup (the game's A key) now reports one summary when the collection walk ends,
   instead of announcing every item in stride: Memory Orbs with SP gained and the new
   total, Ruby Hearts with the max-HP gain and current HP, components by name. Canceling
@@ -72,23 +90,9 @@ an early work-in-progress RW3 port — expect frequent changes.
 - Enemy ability lists now include Quick Cast where present, use the game's "Spells:"
   header, and match the game's resist wording.
 
-## 2026-06-30 — 0.2.6
-
-### Added
-- Allegiance changes are now announced: units that turn friendly (Dominate, conversions) or hostile (betrayals, Treachery).
-- Cheating death is now announced: when a hit would have killed you but you survive
-  (Crisis Charm restoring you to full, Soulbound / Soul Jar clamping you to 1 HP), you
-  hear "You would have died —" and your resulting health (previously silent).
+## 2026-06-29 — 0.2.6
 
 ### Fixed
-- Shields granted to a unit at the moment it is summoned (e.g. Magic Minion Shield's
-  "allies gain shields when summoned") are now announced — these on-summon grants used
-  to be silently dropped as part of the unit arriving.
-- A unit returning to the battlefield via Reincarnation no longer produces a phantom
-  "shields gained" announcement.
-- A shield grant that pushes a unit past the 20-shield cap now announces the true net
-  gain once, instead of an inflated amount followed by a correction.
-- Channeling, rituals, and other manual-only cast behavior work again with the mod loaded.
 - How to Play now always opens at the first page instead of resuming the last page
   viewed — a native open could otherwise land on the appended Words of Power section.
 
