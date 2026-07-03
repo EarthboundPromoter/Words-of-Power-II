@@ -314,8 +314,11 @@ def rows():
             "[Wizard:wizard] stunned for 1 turn due to mutator.":
                 _status(PENDING),
             "Object removed from level due to mutator.": _status(PENDING),
-            "Chasm created due to mutator.": _status(PENDING,
-                note="navigation-relevant; terrain capture is Unit 5"),
+            # Crumble (Mutators.py:183-184): the game's ONE terrain log line;
+            # make_chasm runs the line before the log write, so the record
+            # precedes the line. Flipped PENDING -> EXPECT by Unit 5 step 8.
+            "Chasm created due to mutator.": _expect('terrain_change',
+                note="navigation-relevant; Unit 5 terrain capture"),
             "[Wizard:wizard] is {buff}": _status(PENDING,
                 note="Level.py:2122, per-turn while stun-class-disabled — "
                      "distinct from the apply-time buff line"),

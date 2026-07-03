@@ -2141,6 +2141,15 @@ _COMPOSER_KNOWN_EVENT_TYPES = frozenset({
     # (x/y, no unit snapshot) — crisis structurally never sees it, but its
     # ALL_KINDS membership keeps the two known-set tests uniform.
     'tile_flavor_change',
+    # Unit 5 world-chokepoint kinds (capture-only, composer-staged): a
+    # wall-melting cast lands terrain_change records in its own chain; a
+    # storm cast lands cloud_spawn; a pickup-spawning shop buy lands
+    # prop_added; portal_unlocked/chrono_threshold are ambient. None carry
+    # a 'unit'/'target' snapshot (tile/global-keyed, cloud owner is a bare
+    # name string), so crisis structurally never sees them — game_log
+    # precedent, no crisis twin entries.
+    'terrain_change', 'cloud_spawn', 'cloud_removed',
+    'prop_added', 'prop_removed', 'portal_unlocked', 'chrono_threshold',
     # Root-2 cause-marker kinds (Unit 2, capture-only), staged for the
     # composer phase: the marker is the CAUSE NODE its window's effects
     # parent to (pickup / equipment-triggered replay / craft), never a

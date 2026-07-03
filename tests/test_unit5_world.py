@@ -689,6 +689,49 @@ def test_chrono_poll_inactive_and_increase():
     assert _chrono_records(seq0) == []                  # never a record
 
 
+# ---- Step 8: known-sets + the oracle row ----
+
+UNIT5_KINDS = ('terrain_change', 'tile_flavor_change', 'cloud_spawn',
+               'cloud_removed', 'prop_added', 'prop_removed',
+               'portal_unlocked', 'chrono_threshold')
+
+
+def test_unit5_kinds_known_to_digest_telemetry():
+    import digest as digest_mod
+    for kind in UNIT5_KINDS:
+        assert kind in digest_mod._COMPOSER_KNOWN_EVENT_TYPES, kind
+
+
+def test_unit5_payloads_structurally_invisible_to_crisis():
+    # game_log precedent: no 'unit'/'target' snapshot key -> the crisis
+    # wizard-subject scan never sees these kinds, so (except the ALL_KINDS
+    # member tile_flavor_change) they need no crisis twin entries. Pin the
+    # structural premise on real captured payloads.
+    lvl = _fresh_level()
+    _offline(lvl, lambda: lvl.make_wall(3, 3))
+    lvl.make_floor(3, 3)
+    lvl.add_obj(_TCloud(duration=2), 4, 4)
+    lvl.add_prop(Level.Prop(), 5, 5)
+    portal = Level.Portal(_FakeGenParams())
+    lvl.add_portal(portal, 6, 6, locked=False, flash=False)
+
+    checked = 0
+    for r in journal.records:
+        if r['event_type'] in UNIT5_KINDS:
+            assert 'unit' not in r['payload'], r['event_type']
+            assert 'target' not in r['payload'], r['event_type']
+            checked += 1
+    assert checked >= 4   # terrain, cloud, prop, portal all sampled
+
+
+def test_oracle_crumble_row_flipped_to_expect():
+    import log_capture
+    row = log_capture.rows().get("Chasm created due to mutator.")
+    assert row is not None
+    assert row['status'] == log_capture.EXPECT
+    assert row['kinds'] == ('terrain_change',)
+
+
 def test_menu_time_mutation_flag_survives_for_boundary_floor():
     # A mutation outside any bracket (menu-time portal_mercy shape): no pop
     # runs, so the flag stays armed for the turn-boundary floor consumer.
