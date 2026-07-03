@@ -6,6 +6,22 @@ an early work-in-progress RW3 port — expect frequent changes.
 ## Unreleased
 
 ### Fixed
+- Casts fully absorbed by an enemy's shield no longer read "No damage" — they read the
+  blocked clause the game shows as the pips drop: "Cast Blood Bullet. 1 surviving:
+  Boggart Assassin (12,9): Blood Bullet 10 Physical blocked by 1 shield." Also fixes AoE
+  casts where one target blocked: the blocked target was dropped from speech entirely.
+- Enemy channels are no longer voiced as "attack". Channel continuations carry the real
+  spell name and the game's own verb ("Scuttler channeled Pinch, hit Wizard, 5
+  Physical"), channel starts read "began channeling Pinch" instead of a bare "attacked.",
+  and the redundant same-breath "gained Channeling" line is folded away. Player channel
+  continuations get their real spell names back too.
+- Self-target buff casts no longer append "No damage" ("Cast Ride Drake. Drake Rider
+  applied, 10 turns."), and neither does starting a channel. A targeted spell that
+  genuinely whiffs still reports it.
+- A melee attack fully absorbed by a shield no longer speaks as a bare "X attacked."
+  disconnected from its outcome — the blocked line ("Sword of Light blocked 5 Physical
+  from Pinch, 1 shield left") is the single voice for the hit, matching the game's
+  combat log.
 - Clearing a realm no longer swallows the final action's narration. The winning cast's
   results now speak first, then "Level complete" — followed, for the first time, by the
   realm summary the game shows on its stats panel: turns taken, spell casts, top damage
