@@ -1300,6 +1300,18 @@ _turn_count = [0]
 _turn_announced = [False]
 _last_turn_time = [0]  # time.time() of last spoken turn announcement (debounce)
 _level_complete = [False]  # Suppress post-level noise (minion heals, etc.) (#46)
+# Level-complete announcement (header + stats sections), staged by
+# on_level_complete and spoken at the first post-clear turn boundary —
+# AFTER the winning window composes and flushes, so the final combat
+# event speaks before the summary. None when nothing is pending.
+_pending_level_announcement = [None]
+# Auto-pickup summary (the game's Autopickup key, default A). While the
+# autopickup walk runs, on_item_pickup accumulates items here instead of
+# speaking each one; when the walk's path empties, _finish_autopickup
+# composes ONE summary. start_xp snapshots the player's SP at walk start
+# so the orb line reports the true diff (correct even if something else,
+# e.g. a Relocator Beacon tick, adds an orb mid-walk).
+_autopickup = {'active': False, 'items': [], 'start_xp': 0}
 _game_ref = [None]  # Stored reference to Game instance (set in process_level_input)
 
 def _log_ctx():
@@ -1927,9 +1939,21 @@ def on_buff_remove(event):
         log(f"[Buff-] Error: {e}")
 
 def on_item_pickup(event):
-    """Announce item pickups. For Memory Orbs, also announce new SP total."""
+    """Announce item pickups. For Memory Orbs, also announce new SP total.
+    During an autopickup walk, accumulate for the end-of-walk summary
+    instead of speaking each item."""
     try:
         item_name = _name(event.item)
+        if _autopickup['active']:
+            if isinstance(event.item, Level.MemoryOrb):
+                kind = 'orb'
+            elif isinstance(event.item, Level.HeartDot):
+                kind = 'heart'
+            else:
+                kind = 'other'  # components and anything future: name-only in summary
+            _autopickup['items'].append((item_name, kind))
+            log(f"[Item] {_log_ctx()} autopickup gathered: {item_name}")
+            return
         desc = ((event.item.get_description() or '') if hasattr(event.item, 'get_description')
                 else getattr(event.item, 'description', ''))
         text = f"Picked up {item_name}"
@@ -1945,39 +1969,104 @@ def on_item_pickup(event):
     except Exception as e:
         log(f"[Item] Error: {e}")
 
+def _group_counted_names(names):
+    """['Frost Core', 'Ember', 'Frost Core'] -> ['2 Frost Core', 'Ember'].
+    First-appearance order, duplicates counted. Names come from the game;
+    no pluralization guessing on them."""
+    counts = {}
+    order = []
+    for n in names:
+        if n not in counts:
+            order.append(n)
+        counts[n] = counts.get(n, 0) + 1
+    return [f"{counts[n]} {n}" if counts[n] > 1 else n for n in order]
+
+def _finish_autopickup(view):
+    """Compose the auto-pickup summary when the walk's path empties
+    (finished or canceled — partial gains still summarize).
+
+    Orbs and hearts report cumulative effects; components report names
+    only (owner ruling 2026-07-03). Component on_pickup effects DO fire
+    on cleared levels — Level.py:2823 calls component.on_pickup
+    unconditionally — but narrating each would be noise; their
+    descriptions remain available via examine/D-detail."""
+    _autopickup['active'] = False
+    items = _autopickup['items']
+    _autopickup['items'] = []
+    if not items:
+        log("[AutoPickup] walk ended: nothing gathered")
+        return
+    try:
+        p = view.game.p1 if getattr(view, 'game', None) else None
+        orbs = [n for (n, k) in items if k == 'orb']
+        hearts = [n for (n, k) in items if k == 'heart']
+        others = [n for (n, k) in items if k == 'other']
+        total = len(items)
+        chunks = [f"Picked up {total} item{'s' if total != 1 else ''}."]
+        if orbs:
+            line = f"{len(orbs)} Memory Orb{'s' if len(orbs) != 1 else ''}"
+            if p is not None:
+                gained = p.xp - _autopickup['start_xp']
+                line += f", {gained} SP gained, {p.xp} SP total"
+            chunks.append(line + ".")
+        if hearts:
+            line = f"{len(hearts)} Ruby Heart{'s' if len(hearts) != 1 else ''}"
+            if p is not None:
+                # Hearts are a fixed +25 max HP each (Level.py:2807). Not
+                # computed from the max-HP diff: components in the same walk
+                # can also raise max HP (e.g. Bloodstone), and their effects
+                # stay out of the summary — attributing them here would leak.
+                line += f", max HP up {25 * len(hearts)}, HP {p.cur_hp} of {p.max_hp}"
+            chunks.append(line + ".")
+        if others:
+            chunks.append("Components: " + ", ".join(_group_counted_names(others)) + ".")
+        log(f"[AutoPickup] {_log_ctx()} summary: {' '.join(chunks)}")
+        async_tts.speak_chunks(chunks)
+    except Exception as e:
+        log(f"[AutoPickup] summary error: {e}")
+
 def on_level_complete(event):
-    """Announce level completion with reroll grant and stats summary."""
-    import re as _re_lc
+    """Stage the level-complete announcement (header + stats summary).
+
+    Does NOT speak: this event fires synchronously mid-resolution of the
+    winning action, before the turn boundary composes that action's
+    digest. Speaking here put the summary ahead of the final combat
+    event (and the old boundary guard then swallowed that event
+    entirely). The staged chunks are spoken at the first post-clear
+    turn boundary, after the winning window's compose + flush.
+
+    Stats come from game.pending_level_stats (in memory): finalize_level
+    stages the lines there and runs just before this event (Game.py:776).
+    The stats FILE is written later by write_pending_level_stats, so the
+    old file read always missed and every clear spoke header-only."""
     try:
         _level_complete[0] = True
         game = _game_ref[0]
         rerolls = getattr(game, 'rift_rerolls', 0) if game else 0
         header = f"Level complete. {rerolls} reroll" if rerolls else "Level complete"
 
-        # Read stats file for level summary (written by finalize_level before this event)
         chunks = [header]
         try:
             if game:
-                stats_path = os.path.join('saves', str(game.run_number),
-                                          'stats.level_%d.txt' % game.level_num)
-                if os.path.exists(stats_path):
-                    with open(stats_path, 'r') as f:
-                        content = f.read().strip()
-                    if content:
-                        sections = _re_lc.split(r'\n\s*\n', content)
-                        # Skip first section (Realm/Outcome — already in header)
-                        for section in sections[1:]:
-                            collapsed = ' '.join(l.strip() for l in section.split('\n') if l.strip())
-                            if collapsed:
-                                chunks.append(collapsed)
+                lines = game.pending_level_stats.get(game.level_num) or []
+                # Lines are resolve_text'd strings; blank lines separate sections.
+                sections = []
+                section = []
+                for ln in lines:
+                    if ln.strip():
+                        section.append(ln.strip())
+                    elif section:
+                        sections.append(' '.join(section))
+                        section = []
+                if section:
+                    sections.append(' '.join(section))
+                # Skip first section (Realm/Outcome — already in header)
+                chunks.extend(sections[1:])
         except Exception:
-            pass  # Stats file missing or unreadable — header alone is fine
+            pass  # Stats unavailable — header alone is fine
 
-        if len(chunks) > 1:
-            async_tts.speak_batched(chunks)
-        else:
-            batcher.speak_immediate(header)
-        log(f"[Level] {_log_ctx()} {header} ({len(chunks)} chunks)")
+        _pending_level_announcement[0] = chunks
+        log(f"[Level] {_log_ctx()} staged: {header} ({len(chunks)} chunks)")
         try:
             if game:
                 _telemetry.emit('realm_complete',
@@ -2491,6 +2580,22 @@ def patched_setup_level(self, level_num):
     log(f"[Screen Reader] Level {level_num} loaded{pos} - EventManager {id(self.event_manager)}")
     register_triggers(self.event_manager)
     _journal.journal.reset(level_num)
+    # Safety net: a staged level-complete announcement should have been
+    # spoken at the first post-clear turn boundary. If we reach the next
+    # level with it still pending (boundary never fired), speak it now
+    # rather than swallow it.
+    if _pending_level_announcement[0] is not None:
+        try:
+            _chunks = _pending_level_announcement[0]
+            _pending_level_announcement[0] = None
+            log(f"[Level] pending announcement spoken at level transition "
+                f"(post-clear boundary never fired; {len(_chunks)} chunks)")
+            if len(_chunks) > 1:
+                async_tts.speak_batched(_chunks)
+            else:
+                async_tts.speak(_chunks[0])
+        except Exception as _pl_e:
+            log(f"[Level] pending announcement fallback error: {_pl_e!r}")
     # Reset per-level state for new floor
     _charge_announced.clear()
     _cancel_hp_announcement()
@@ -2498,6 +2603,8 @@ def patched_setup_level(self, level_num):
     _turn_count[0] = 0
     _turn_announced[0] = False
     _level_complete[0] = False
+    _autopickup['active'] = False
+    _autopickup['items'] = []
     adjacency_tracker.reset()
     los_tracker.reset()
     if getattr(self, 'player_unit', None):
@@ -6886,6 +6993,54 @@ if _PyGameView is not None:
                 if not _mark_tier_immediate[0] and _marked_target[0] is not None and _turn_count[0] > 1:
                     _speak_mark_turn_update(self)
 
+        elif not deploying:
+            # Post-clear turn boundaries. The old guard skipped this path
+            # entirely after level complete, which (a) swallowed the winning
+            # action's digest — the pipeline never composed its window — and
+            # (b) left the batcher active with flush never running again, so
+            # post-clear queued speech (item pickups) silently accumulated
+            # until the next level's clear(). Now: compose the winning window
+            # once, flush, speak the staged level summary AFTER it (owner
+            # ruling: final event first, stats second), and keep flushing on
+            # every later post-clear boundary. Turn signal, telemetry
+            # snapshots, and mark updates stay suppressed — the level is over.
+            # The pipeline also stays off after the first boundary: the orphan
+            # composer has no level-complete awareness and would re-narrate
+            # the post-level noise #46 suppressed.
+            awaiting = getattr(self.game.cur_level, 'is_awaiting_input', False)
+            if awaiting and not _turn_announced[0]:
+                _turn_announced[0] = True
+                if _pending_level_announcement[0] is not None:
+                    try:
+                        # Close the winning turn's final span before composing
+                        _container_diff.turn_boundary(
+                            getattr(self.game, 'cur_level', None),
+                            telemetry_mod=_telemetry)
+                    except Exception as _cd_e:
+                        log(f"[ContainerDiff] post-clear boundary failed: {_cd_e!r}")
+                    try:
+                        _pipeline.fire_pipeline(
+                            async_tts, log, cfg, getattr(self.game, 'p1', None),
+                            telemetry=_telemetry,
+                        )
+                    except Exception as _pipe_e:
+                        log(f"[Pipeline] error in post-clear fire_pipeline: {_pipe_e}")
+                batcher.flush()
+                _flush_hp()
+                if _pending_level_announcement[0] is not None:
+                    chunks = _pending_level_announcement[0]
+                    _pending_level_announcement[0] = None
+                    log(f"[Level] {_log_ctx()} {chunks[0]} ({len(chunks)} chunks)")
+                    if len(chunks) > 1:
+                        async_tts.speak_batched(chunks)
+                    else:
+                        batcher.speak_immediate(chunks[0])
+                # Keep scan-cycle behavior identical to normal turns
+                _enemy_scanner.turn_reset()
+                _spawner_scanner.turn_reset()
+                _landmark_scanner.turn_reset()
+                _ally_scanner.turn_reset()
+
         # Deploy start detection
         if deploying and not _was_deploying[0]:
             _was_deploying[0] = True
@@ -7113,6 +7268,15 @@ if _PyGameView is not None:
                 batcher.start_batching()
             _turn_announced[0] = False
 
+        # Autopickup walk finished (or was canceled): compose the summary.
+        # Known quirk (owner-accepted 2026-07-03): the path empties BEFORE
+        # the final tile's pickup event fires, so the last item misses the
+        # summary and speaks its normal per-item announcement (full effect
+        # text) right after it. Fixing this would mean second-guessing the
+        # game's path/step ordering — left as-is.
+        if _autopickup['active'] and not getattr(self, 'path', None):
+            _finish_autopickup(self)
+
         # Post-processing: deploy abort detection
         # (Confirm is handled by patched_deploy, which sets _was_deploying = False first)
         if not getattr(self.game, 'deploying', False) and _was_deploying[0]:
@@ -7122,6 +7286,39 @@ if _PyGameView is not None:
             log("[Deploy] Aborted")
 
     _PyGameView.process_level_input = patched_process_level_input
+
+    # ---- Autopickup summary hook (game key: Autopickup, default A) ----
+    # The game's autopickup() builds one walk path visiting every reachable
+    # pickup and sets self.path; pickups fire as the walk crosses their
+    # tiles. Arm accumulation here; patched_process_level_input finishes
+    # the summary when the path empties. Wrapping the method (not the key)
+    # keeps this correct under rebinds.
+    _original_autopickup = _PyGameView.autopickup
+    def patched_autopickup(self):
+        _original_autopickup(self)
+        try:
+            if getattr(self, 'path', None):
+                if _autopickup['active']:
+                    # Re-pressed mid-walk: the game rebuilt the path from the
+                    # remaining pickups. Keep accumulating into the same
+                    # summary — don't drop what's already gathered.
+                    log(f"[AutoPickup] {_log_ctx()} walk re-pathed: {len(self.path)} steps")
+                else:
+                    p = self.game.p1 if getattr(self, 'game', None) else None
+                    _autopickup['active'] = True
+                    _autopickup['items'] = []
+                    _autopickup['start_xp'] = getattr(p, 'xp', 0) if p else 0
+                    log(f"[AutoPickup] {_log_ctx()} walk started: {len(self.path)} steps")
+            else:
+                # The game gives no feedback when there is nothing reachable
+                # to collect — the walk just doesn't start. Sighted players
+                # see nothing happen; say why.
+                log("[AutoPickup] no reachable pickups")
+                async_tts.speak("Nothing to pick up")
+        except Exception as e:
+            log(f"[AutoPickup] arm error: {e}")
+    _PyGameView.autopickup = patched_autopickup
+
     log("  Custom hotkeys installed (F=Vitals, E=Enemies, Q=Landmarks, G=Charges, "
         "D=Detail, T=Threat, B=Space, LCtrl=Cancel, Z=Repeat, [/]=History, Deploy:1-5)")
 
