@@ -1021,6 +1021,18 @@ def read_text(value, fmt=None):
     except Exception:
         return value if isinstance(value, str) else str(value)
 
+def _fmt_of(obj):
+    """Best-effort fmt_dict() for pairing description templates with live values.
+    A template spoken WITHOUT its fmt leaks bare placeholders — '[{damage}:damage]'
+    strips to '{damage}' and NVDA swallows the braces, speaking 'damage Lightning
+    damage' (the Electric Ink scroll bug)."""
+    if hasattr(obj, 'fmt_dict'):
+        try:
+            return obj.fmt_dict()
+        except Exception:
+            return None
+    return None
+
 def _desc_text(obj):
     """Read an object's description fully formatted for speech, substituting LIVE
     get_stat values (damage/radius/duration/etc. with the player's passives,
@@ -2940,21 +2952,41 @@ if _PyGameView is not None:
                 if val:
                     lines.append(f"{tag_n} spells gain {val} {_fmt_attr(attr)}")
         for spell_class, bonuses in getattr(obj, 'spell_bonuses_pct', {}).items():
+            spell_ex = None
             try:
-                spell_n = spell_class().name
+                spell_ex = spell_class()
+                spell_n = spell_ex.name
             except Exception:
                 spell_n = str(spell_class)
             for attr, val in bonuses.items():
+                # Game visibility filter (RiftWizard3.py:7127): only bonuses to
+                # stats the spell displays are drawn — gate as the game gates
+                if spell_ex is not None and attr not in getattr(spell_ex, 'stats', []):
+                    continue
                 if val:
                     lines.append(f"{spell_n} gains {int(val)}% {_fmt_attr(attr)}")
         for spell_class, bonuses in getattr(obj, 'spell_bonuses', {}).items():
+            spell_ex = None
             try:
-                spell_n = spell_class().name
+                spell_ex = spell_class()
+                spell_n = spell_ex.name
             except Exception:
                 spell_n = str(spell_class)
             for attr, val in bonuses.items():
+                if spell_ex is not None and attr not in getattr(spell_ex, 'stats', []):
+                    continue
                 if val:
                     lines.append(f"{spell_n} gains {val} {_fmt_attr(attr)}")
+        # Stats a spell upgrade introduces to its spell — drawn as gain lines,
+        # filtered to displayed attrs plus hp_cost (RiftWizard3.py:7147-7153).
+        # Upgrades whose whole body is such lines (e.g. Blood Horizon) were
+        # previously silent past their level line.
+        prereq = getattr(obj, 'prereq', None)
+        if prereq is not None:
+            shown = getattr(_main, 'tt_attrs', None) or _tt_attrs
+            for attr, val in getattr(obj, 'new_attributes', {}).items():
+                if attr in shown or attr == 'hp_cost':
+                    lines.append(f"{_name(prereq)} gains {val} {_fmt_attr(attr)}")
         for attr, val in getattr(obj, 'global_bonuses_pct', {}).items():
             if val:
                 if val >= 0:
@@ -2978,23 +3010,87 @@ if _PyGameView is not None:
     def _clean_desc(desc):
         return _clean_desc_raw(read_text(desc))
 
-    def _describe_spell(spell):
-        """Build a full spoken description of a spell, matching the examine panel."""
-        parts = []
+    def _describe_upgrade_body(upgrade):
+        """Ordered (category, text) speech segments for an Upgrade/Buff tooltip
+        body, mirroring the game's draw_examine_upgrade source order
+        (RiftWizard3.py:7074): kind label, level, autogen bonus lines,
+        description (with the game's get_tooltip fallback), stack type.
+        draw_examine routes every Buff subclass through that one renderer, so
+        every describer that speaks an upgrade or buff body should build it
+        here. Segments are labeled so the future tooltip buffer/composer can
+        navigate or regroup them without re-parsing; call sites flat-join."""
+        segs = []
+        try:
+            kind = upgrade.get_buff_type_label()
+        except Exception:
+            kind = None
+        if kind:
+            segs.append(('kind', read_text(kind)))
+        # Equipment tags — game draws them before the level line (7099-7103)
+        is_equipment = isinstance(upgrade, getattr(Level, 'Equipment', ()))
+        if is_equipment and getattr(upgrade, 'tags', None):
+            segs.append(('tags', ", ".join(_name(t) for t in upgrade.tags)))
+        level = getattr(upgrade, 'level', 0)
+        if level:
+            segs.append(('level', f"Level {level}"))
+        bonus_lines = _format_bonus_lines(upgrade)
+        if bonus_lines:
+            segs.append(('bonuses', ". ".join(bonus_lines)))
+        desc = _desc_text(upgrade)
+        if not desc and hasattr(upgrade, 'get_tooltip'):
+            # Game fallback (RiftWizard3.py:7178) — some buffs override
+            # get_tooltip and leave description empty (e.g. Clarity)
+            try:
+                fmt = upgrade.fmt_dict() if hasattr(upgrade, 'fmt_dict') else None
+                desc = read_text(upgrade.get_tooltip(), fmt)
+            except Exception:
+                desc = ""
+        if desc:
+            segs.append(('description', _clean_desc(desc)))
+        # Equipment "Attributes:" stat block — game draws it after the
+        # description (7184-7196): each displayed attr the item has, live get_stat
+        if is_equipment:
+            attr_strs = []
+            shown = getattr(_main, 'tt_attrs', None) or _tt_attrs
+            for attr in shown:
+                if not hasattr(upgrade, attr):
+                    continue
+                try:
+                    val = upgrade.get_stat(attr)
+                except Exception:
+                    val = getattr(upgrade, attr, None)
+                if val:
+                    attr_strs.append(f"{val} {_fmt_attr(attr)}")
+            if attr_strs:
+                segs.append(('attributes', "Attributes: " + ", ".join(attr_strs)))
+        try:
+            stacking = upgrade.get_stacking_label()
+        except Exception:
+            stacking = None
+        if stacking:
+            segs.append(('stacking', f"Stack type: {read_text(stacking)}"))
+        return segs
+
+    def _describe_spell_segments(spell):
+        """Ordered (category, text) speech segments for a spell body, mirroring
+        draw_examine_spell (RiftWizard3.py:7291). Registered editorial: the AoE
+        shape synthesis in the targeting line (compensates the targeting
+        overlay); "owned" marks the green coloring on the upgrade list."""
+        segs = []
 
         # Name
-        parts.append(_name(spell))
+        segs.append(('name', _name(spell)))
 
         # Tags
         tags = getattr(spell, 'tags', [])
         if tags:
             tag_names = [_name(t) for t in tags]
-            parts.append(", ".join(tag_names))
+            segs.append(('tags', ", ".join(tag_names)))
 
         # Level
         level = getattr(spell, 'level', 0)
         if level:
-            parts.append(f"Level {level}")
+            segs.append(('level', f"Level {level}"))
 
         # Range and AoE shape
         melee = getattr(spell, 'melee', False)
@@ -3059,12 +3155,12 @@ if _PyGameView is not None:
             shape_parts.append("single target")
 
         if shape_parts:
-            parts.append(", ".join(shape_parts))
+            segs.append(('targeting', ", ".join(shape_parts)))
 
-        # Quick cast
+        # Quick cast (game label SPELL_QUICK_CAST)
         try:
             if hasattr(spell, 'get_stat') and spell.get_stat('quick_cast'):
-                parts.append("Quick cast")
+                segs.append(('quickcast', "Quick Cast"))
         except Exception:
             pass
 
@@ -3076,51 +3172,99 @@ if _PyGameView is not None:
                 stat_max = spell.get_stat('max_charges') if hasattr(spell, 'get_stat') else max_charges
             except Exception:
                 stat_max = max_charges
-            parts.append(f"Charges {cur} of {stat_max}")
+            segs.append(('charges', f"Charges {cur} of {stat_max}"))
 
         # HP cost
         if hasattr(spell, 'get_stat'):
             try:
                 hp_cost = spell.get_stat('hp_cost')
                 if hp_cost:
-                    parts.append(f"HP cost {hp_cost}")
+                    segs.append(('hpcost', f"HP cost {hp_cost}"))
             except Exception:
                 pass
+
+        # Cooldown — game draws value plus turns remaining (RiftWizard3.py:7342)
+        try:
+            cd = spell.get_stat('cool_down') if hasattr(spell, 'get_stat') else getattr(spell, 'cool_down', 0)
+        except Exception:
+            cd = getattr(spell, 'cool_down', 0)
+        if cd:
+            caster = getattr(spell, 'caster', None)
+            rem = getattr(caster, 'cool_downs', {}).get(spell, 0) if caster is not None else 0
+            segs.append(('cooldown', f"Cooldown {cd}, {rem} remaining" if rem else f"Cooldown {cd}"))
 
         # Equipment/buff bonus dictionaries
         bonus_lines = _format_bonus_lines(spell)
         if bonus_lines:
-            parts.append(". ".join(bonus_lines))
+            segs.append(('bonuses', ". ".join(bonus_lines)))
 
         # Description text — formatted with live get_stat values via fmt_dict
         # (damage/radius/etc. reflect the player's passives + equipment, matching
         # the game's own tooltip).
         desc = _desc_text(spell)
         if desc:
-            parts.append(_clean_desc(desc))
+            segs.append(('description', _clean_desc(desc)))
 
-        # Attributes (damage, radius, duration, etc.)
+        # Attributes block — game gates on the BASE attr being nonzero and
+        # displays the live get_stat value (7358-7362); always draws the header,
+        # "None" when empty (7355, 7365-7366)
         attrs = []
-        for attr in _tt_attrs:
-            val = getattr(spell, attr, None) if not hasattr(spell, 'get_stat') else None
-            if hasattr(spell, 'get_stat'):
-                try:
-                    val = spell.get_stat(attr)
-                except Exception:
-                    val = getattr(spell, attr, None)
+        shown = getattr(_main, 'tt_attrs', None) or _tt_attrs
+        for attr in shown:
+            if not getattr(spell, attr, None):
+                continue
+            try:
+                val = spell.get_stat(attr) if hasattr(spell, 'get_stat') else getattr(spell, attr)
+            except Exception:
+                val = getattr(spell, attr, None)
             if val:
-                attr_label = ' '.join(w.capitalize() for w in attr.replace('_', ' ').split())
-                attrs.append(f"{val} {attr_label}")
-        if attrs:
-            parts.append("Attributes: " + ", ".join(attrs))
+                attrs.append(f"{val} {_fmt_attr(attr)}")
+        segs.append(('attributes', "Attributes: " + (", ".join(attrs) if attrs else "None")))
 
-        # Upgrades
+        # Upgrades list — game draws "level - name", green when owned
+        # (7370-7378); "owned" transcodes the color. Ownership mirrors
+        # Game.has_upgrade (Game.py:615-618) via the spell's caster (p1).
         upgrades = getattr(spell, 'spell_upgrades', [])
         if upgrades:
-            upg_names = [f"{getattr(u, 'level', '?')}: {_name(u)}" for u in upgrades]
-            parts.append("Upgrades: " + ", ".join(upg_names))
+            caster = getattr(spell, 'statholder', None) or getattr(spell, 'caster', None)
 
-        return ". ".join(parts)
+            def _owned(u):
+                if caster is None:
+                    return False
+                try:
+                    if any(isinstance(b, Level.Upgrade) and b.name == u.name
+                           and getattr(b, 'prereq', None) == getattr(u, 'prereq', None)
+                           for b in getattr(caster, 'buffs', [])):
+                        return True
+                    if any(getattr(s, 'name', None) == u.name
+                           for s in getattr(caster, 'spells', [])):
+                        return True
+                except Exception:
+                    pass
+                return False
+
+            upg_names = [f"{getattr(u, 'level', '?')}: {_name(u)}{', owned' if _owned(u) else ''}"
+                         for u in upgrades]
+            segs.append(('upgrades', "Upgrades: " + ", ".join(upg_names)))
+
+        return segs
+
+    def _describe_spell(spell):
+        """Flat-joined spell description. Segments via _describe_spell_segments
+        for the future tooltip buffer/composer."""
+        return ". ".join(t for _lbl, t in _describe_spell_segments(spell))
+
+    def _describe_shop_target(target):
+        """Shop items are Spells in the learn-spell shop but Upgrades in the
+        spell-upgrade and skill shops. Route upgrades through the game-order
+        upgrade body (draw_examine_upgrade), not the spell-shaped reading,
+        which invented range/shape lines for upgrades and dropped bonus-only
+        upgrades' whole content (the Blood Horizon bug). Name alone heads the
+        item, as in the game's panel — the shop header already gives context."""
+        if isinstance(target, Level.Upgrade):
+            body = [t for _lbl, t in _describe_upgrade_body(target)]
+            return ". ".join([_name(target)] + body)
+        return _describe_spell(target)
 
     _original_shop_sel_adjust = _PyGameView.shop_selection_adjust
     _original_shop_page_adjust = _PyGameView.shop_page_adjust
@@ -3310,7 +3454,7 @@ if _PyGameView is not None:
                     text = _describe_component(self, target)
                 else:
                     cost = _shop_item_cost(self, target)
-                    desc = _describe_spell(target)
+                    desc = _describe_shop_target(target)
                     text = f"{cost}. {desc}" if cost else desc
                 async_tts.speak(text)
                 log(f"[Shop] {text}")
@@ -3335,7 +3479,7 @@ if _PyGameView is not None:
                     text = f"Page {page}. {_describe_component(self, target)}"
                 else:
                     cost = _shop_item_cost(self, target)
-                    desc = _describe_spell(target)
+                    desc = _describe_shop_target(target)
                     text = f"Page {page}. {cost}. {desc}" if cost else f"Page {page}. {desc}"
             else:
                 text = f"Page {page}, empty"
@@ -3368,7 +3512,7 @@ if _PyGameView is not None:
                 header = f"Upgrade {spell_name}, {sp_total} SP available"
                 if target is not None:
                     cost = _shop_item_cost(self, target)
-                    desc = _describe_spell(target)
+                    desc = _describe_shop_target(target)
                     text = f"{header}. {cost}. {desc}" if cost else f"{header}. {desc}"
                 else:
                     text = header
@@ -3383,7 +3527,7 @@ if _PyGameView is not None:
                     header += f". {shop_desc.strip()}"
                 if target is not None:
                     cost = _shop_item_cost(self, target)
-                    desc = _describe_spell(target)
+                    desc = _describe_shop_target(target)
                     text = f"{header}. {cost}. {desc}" if cost else f"{header}. {desc}"
                 else:
                     text = header
@@ -3415,7 +3559,7 @@ if _PyGameView is not None:
                 header = f"Learn Spell, {sp_total} SP available"
                 if target is not None:
                     cost = _shop_item_cost(self, target)
-                    desc = _describe_spell(target)
+                    desc = _describe_shop_target(target)
                     text = f"{header}. {cost}. {desc}" if cost else f"{header}. {desc}"
                 else:
                     text = f"{header}, empty"
@@ -3747,65 +3891,28 @@ if _PyGameView is not None:
         if isinstance(target, Level.Spell) and target in view.game.p1.spells:
             return _describe_spell(target)
 
-        # Equipment — full description with bonuses
+        # Equipment — game draws it through draw_examine_upgrade; share the body
         if isinstance(target, Level.Equipment):
-            name = _name(target)
             slot = _SLOT_NAMES.get(getattr(target, 'slot', -1), "Equipment")
-            parts = [f"{slot}: {name}"]
-            bonus_lines = _format_bonus_lines(target)
-            if bonus_lines:
-                parts.append(". ".join(bonus_lines))
-            desc = _desc_text(target)
-            if desc:
-                parts.append(_clean_desc(desc))
-            return ". ".join(parts)
+            body = [t for _lbl, t in _describe_upgrade_body(target)]
+            return ". ".join([f"{slot}: {_name(target)}"] + body)
 
-        # Skill (passive buff without prereq) or spell upgrade (has prereq)
+        # Skill (passive buff without prereq) or spell upgrade (has prereq).
+        # Body segments mirror the game's draw_examine_upgrade order.
         if isinstance(target, Level.Upgrade):
             name = _name(target)
             prereq = getattr(target, 'prereq', None)
-            if prereq:
-                # Spell upgrade — include description and level
-                parts = [f"Upgrade: {name} for {_name(prereq)}"]
-                level = getattr(target, 'level', 0)
-                if level:
-                    parts.append(f"Level {level}")
-                bonus_lines = _format_bonus_lines(target)
-                if bonus_lines:
-                    parts.append(". ".join(bonus_lines))
-                desc = ''
-                try:
-                    desc = target.get_description() or ''
-                except Exception:
-                    desc = getattr(target, 'description', '') or ''
-                if desc:
-                    parts.append(_clean_desc(desc))
-                return ". ".join(parts)
-            else:
-                # Skill — full description
-                parts = [f"Skill: {name}"]
-                level = getattr(target, 'level', 0)
-                if level:
-                    parts.append(f"Level {level}")
-                bonus_lines = _format_bonus_lines(target)
-                if bonus_lines:
-                    parts.append(". ".join(bonus_lines))
-                desc = ''
-                try:
-                    desc = target.get_description() or ''
-                except Exception:
-                    desc = getattr(target, 'description', '') or ''
-                if desc:
-                    parts.append(_clean_desc(desc))
-                return ". ".join(parts)
+            head = f"Upgrade: {name} for {_name(prereq)}" if prereq else f"Skill: {name}"
+            body = [t for _lbl, t in _describe_upgrade_body(target)]
+            return ". ".join([head] + body)
 
         # Buff (generic — shouldn't normally appear but handle gracefully)
         if isinstance(target, Level.Buff):
-            name = _name(target)
-            return f"Buff: {name}"
+            body = [t for _lbl, t in _describe_upgrade_body(target)]
+            return ". ".join([_name(target)] + body)
 
         # Fallback for any TooltipExamineTarget or unknown
-        desc = getattr(target, 'description', '')
+        desc = _desc_text(target)
         if desc:
             return _clean_desc(desc)
         # Last resort: don't str() an unknown object into speech (it would leak a
@@ -3927,34 +4034,20 @@ if _PyGameView is not None:
         # Spell (full spell description)
         if isinstance(target, Level.Spell):
             return f"{counter}. {_describe_spell(target)}"
-        # Upgrade (spell upgrade with prereq)
+        # Upgrade (spell upgrade with prereq) or skill. Body segments mirror
+        # the game's draw_examine_upgrade order — desc-less bonus-only
+        # upgrades (e.g. Blood Horizon) live entirely in the bonus lines.
         if isinstance(target, Level.Upgrade):
             name = _name(target)
             prereq = getattr(target, 'prereq', None)
-            parts = []
-            if prereq:
-                parts.append(f"Upgrade: {name} for {_name(prereq)}")
-            else:
-                parts.append(f"Skill: {name}")
-            lvl = getattr(target, 'level', 0)
-            if lvl:
-                parts.append(f"Level {lvl}")
-            desc = _desc_text(target)
-            if desc:
-                parts.append(_clean_desc(desc))
-            return f"{counter}. " + ". ".join(parts)
-        # Equipment
+            head = f"Upgrade: {name} for {_name(prereq)}" if prereq else f"Skill: {name}"
+            body = [t for _lbl, t in _describe_upgrade_body(target)]
+            return f"{counter}. " + ". ".join([head] + body)
+        # Equipment — game draws it through draw_examine_upgrade; share the body
         if isinstance(target, Level.Equipment):
-            name = _name(target)
             slot = _SLOT_NAMES.get(getattr(target, 'slot', -1), "Equipment")
-            parts = [f"{slot}: {name}"]
-            bonus_lines = _format_bonus_lines(target)
-            if bonus_lines:
-                parts.append(". ".join(bonus_lines))
-            desc = _desc_text(target)
-            if desc:
-                parts.append(_clean_desc(desc))
-            return f"{counter}. " + ". ".join(parts)
+            body = [t for _lbl, t in _describe_upgrade_body(target)]
+            return f"{counter}. " + ". ".join([f"{slot}: {_name(target)}"] + body)
         # Component (RW3: former consumable Items are now Components). Rift-reward
         # shrines and map drops wrap the component in a ComponentPickup prop
         # (RiftWizard3.py:7477), which is NOT a Component — without unwrapping it
@@ -3965,6 +4058,11 @@ if _PyGameView is not None:
             target = target.component
         if isinstance(target, getattr(Level, 'Component', ())):
             parts = [_name(target)]
+            # Tags — the component examine panel draws them between name and
+            # description (draw_examine_component, RiftWizard3.py:7239-7243)
+            tags = getattr(target, 'tags', [])
+            if tags:
+                parts.append(", ".join(_name(t) for t in tags))
             desc = _desc_text(target)
             if desc and desc not in ("Undescribed Item", "Undescribed Component"):
                 parts.append(_clean_desc(desc))
@@ -3972,10 +4070,13 @@ if _PyGameView is not None:
         # Prospective-equipment list (RW3 crafting preview: the gear this rift's
         # components could craft). EquipmentList has no .name → would read "something".
         if isinstance(target, getattr(Level, 'EquipmentList', ())):
+            # Game label (draw_examine_equipment_list, RiftWizard3.py:7275-7282):
+            # "Prospective Equipment" header, count, names — or "None"
             eq_names = [_name(e) for e in getattr(target, 'equipments', [])]
             if eq_names:
-                return f"{counter}. Craftable from these components: " + ", ".join(eq_names)
-            return f"{counter}. Craftable equipment: none"
+                return (f"{counter}. Prospective Equipment, {len(eq_names)}: "
+                        + ", ".join(eq_names))
+            return f"{counter}. Prospective Equipment: None"
 
         # Rift portal — contents live in level_gen_params, not a .name; without this
         # it falls to the _name fallback and reads "something". Mirrors the main
@@ -3989,28 +4090,14 @@ if _PyGameView is not None:
         # Without this, the buff hits the name-only fallback and its effect text
         # ("Heals 5 HP each turn") is never spoken.
         if isinstance(target, Level.Buff):
-            parts = [_name(target)]
-            # Mirror the game's examine renderer (RiftWizard3.py:7169-7181): first
-            # the resistances/bonuses drawn from the buff's resists dict, then the
-            # description text. A resist buff like Lightning Immunity stores its
-            # whole meaning in resists ({Lightning: 100}) and has NO description or
-            # tooltip — without this it would read only its name.
-            bonus_lines = _format_bonus_lines(target)
-            if bonus_lines:
-                parts.append(". ".join(bonus_lines))
-            # Description: prefer get_description(), but fall back to get_tooltip()
-            # when it's empty — some buffs (e.g. Clarity/StunImmune) override
-            # get_tooltip() and leave description None.
-            desc = _desc_text(target)  # get_description() paired with live fmt_dict
-            if not desc and hasattr(target, 'get_tooltip'):
-                try:
-                    fmt = target.fmt_dict() if hasattr(target, 'fmt_dict') else None
-                    desc = read_text(target.get_tooltip(), fmt)
-                except Exception:
-                    desc = ""
-            if desc:
-                parts.append(_clean_desc(desc))
-            return f"{counter}. " + ". ".join(parts)
+            # The game draws every cycled Buff through draw_examine_upgrade
+            # (draw_examine dispatch, RiftWizard3.py:6954) — share its body.
+            # A resist buff like Lightning Immunity stores its whole meaning
+            # in resists and has NO description; Clarity-style buffs override
+            # get_tooltip() and leave description None. Both live in the body
+            # helper's bonus/fallback handling.
+            body = [t for _lbl, t in _describe_upgrade_body(target)]
+            return f"{counter}. " + ". ".join([_name(target)] + body)
         # Fallback
         return f"{counter}. {_name(target)}"
 
@@ -4163,38 +4250,58 @@ if _PyGameView is not None:
             return "Unknown"
 
     def _describe_portal_chunks(portal, view):
-        """Build a list of speech chunks for a rift portal's contents.
-        Each categorical segment (header, enemies, items, shrine) is a separate
-        chunk so callers can use speak_batched for [/] navigation."""
+        """Speech chunks for a rift portal, mirroring draw_examine_portal
+        (RiftWizard3.py:7391-7514). Chunks stay separate so callers can use
+        speak_batched navigation. Registered transcodes: boss color-coding to
+        words (red is_boss -> "Boss:", orange bosses-list variant -> "Elite:"),
+        component tag letters to full tag names."""
         gen_params = getattr(portal, 'level_gen_params', None)
+        name = _name(portal, "Rift")
         if gen_params is None:
-            return ["Rift"]
+            return [name]
 
-        # Header: "Rift" or "Rift. Locked"
-        header_parts = ["Rift"]
-        # Check if contents are hidden (level not cleared yet)
-        game = getattr(view, 'game', None)
-        if game and (game.next_level or not getattr(game, 'has_granted_xp', True)):
-            header_parts.append("Contents unknown")
-            return [". ".join(header_parts)]
+        # LEGACY (RW2): ported "Contents unknown" gate. In RW3 every Portal is
+        # born locked (Level.py:2704) and unlocks on level clear — the locked
+        # branch below mirrors the game's own hiding, and this gate (firing on
+        # the same pre-clear state) SHADOWED it, suppressing the unlock hint
+        # and vault descriptions the game does show. Kept for backport.
+        # game = getattr(view, 'game', None)
+        # if game and (game.next_level or not getattr(game, 'has_granted_xp', True)):
+        #     return [f"{name}. Contents unknown"]
 
+        is_vault = type(portal).__name__ == 'VaultPortal'
+
+        # Locked: the game shows the unlock hint (plus the vault's description)
+        # and draws NO contents (7408-7419) — mirror the gate exactly.
         if getattr(portal, 'locked', False):
-            header_parts.append("Locked")
+            chunks = [f"{name}. Locked. Defeat all enemies and destroy all spawners to unlock"]
+            if is_vault:
+                desc = _desc_text(portal)
+                if desc:
+                    chunks.append(_clean_desc(desc))
+            return chunks
 
-        chunks = [". ".join(header_parts)]
+        # Vault portals generate their level lazily at draw time (7381-7387);
+        # without this an unentered vault's spawn list reads empty.
+        if is_vault and getattr(gen_params, 'level', None) is None:
+            try:
+                gen_params.make_level()
+            except Exception:
+                pass
 
-        # Enemies
+        chunks = [name]
+
+        # Enemies: population spawns plain; bosses list deduped by name, with
+        # the game's color-coding spoken (7437-7441: is_boss red, variant orange)
         enemies = []
         if getattr(gen_params, 'primary_spawn', None):
             try:
-                unit = gen_params.primary_spawn()
-                enemies.append(unit.name)
+                enemies.append(_name(gen_params.primary_spawn()))
             except Exception:
                 pass
         if getattr(gen_params, 'secondary_spawn', None) and gen_params.secondary_spawn != gen_params.primary_spawn:
             try:
-                unit = gen_params.secondary_spawn()
-                enemies.append(unit.name)
+                enemies.append(_name(gen_params.secondary_spawn()))
             except Exception:
                 pass
 
@@ -4203,35 +4310,52 @@ if _PyGameView is not None:
             if b.name not in drawn_bosses:
                 drawn_bosses.add(b.name)
                 if getattr(b, 'is_boss', False):
-                    enemies.append(f"Boss: {b.name}")
+                    enemies.append(f"Boss: {_name(b)}")
                 else:
-                    enemies.append(b.name)
+                    enemies.append(f"Elite: {_name(b)}")
 
         if enemies:
             chunks.append("Contents: " + ", ".join(enemies))
 
-        # Components (RW3 crafting ingredients — the rift's real reward; the game's
-        # Portal reads gen_params.components, not .items)
-        comp_names = [_name(c) for c in getattr(gen_params, 'components', [])]
-        if comp_names:
-            chunks.append("Components: " + ", ".join(comp_names))
+        # Components with their tags — the game draws each component's tags as
+        # colored filter-key letters (7462-7474); speak the full tag names
+        comp_strs = []
+        for c in getattr(gen_params, 'components', []):
+            cname = _name(c)
+            tag_names = [_name(t) for t in getattr(c, 'tags', [])]
+            comp_strs.append(f"{cname} ({', '.join(tag_names)})" if tag_names else cname)
+        if comp_strs:
+            chunks.append("Components: " + ", ".join(comp_strs))
 
-        # Items and Memory Orbs
-        item_names = [_name(item) for item in getattr(gen_params, 'items', [])]
-        num_xp = getattr(gen_params, 'num_xp', 0)
-        if num_xp:
-            item_names.append(f"{num_xp} Memory Orb{'s' if num_xp > 1 else ''}")
-        if item_names:
-            chunks.append("Items: " + ", ".join(item_names))
+        # LEGACY (RW2): gen_params.items no longer exists in RW3, and the RW3
+        # panel does not draw the memory-orb count (num_xp) — speaking it was
+        # over-speak vs the render. Kept for backport.
+        # item_names = [_name(item) for item in getattr(gen_params, 'items', [])]
+        # num_xp = getattr(gen_params, 'num_xp', 0)
+        # if num_xp:
+        #     item_names.append(f"{num_xp} Memory Orb{'s' if num_xp > 1 else ''}")
+        # if item_names:
+        #     chunks.append("Items: " + ", ".join(item_names))
 
-        # Shrine
-        shrine = getattr(gen_params, 'shrine', None)
-        if shrine:
-            shrine_text = _name(shrine)
-            if hasattr(shrine, 'items') and shrine.items:
-                shrine_items = [_name(item) for item in shrine.items]
-                shrine_text += ": " + ", ".join(shrine_items)
-            chunks.append(shrine_text)
+        # Shrine rewards — may be a single value or a collection (7479-7482);
+        # a ComponentPickup reward shows its component's tags (7496-7503);
+        # a Shop reward lists its items (7507-7514)
+        shrine_val = getattr(gen_params, 'shrine', None)
+        if shrine_val:
+            shrines = shrine_val if isinstance(shrine_val, (list, tuple, set)) else [shrine_val]
+            for shrine in shrines:
+                if not shrine:
+                    continue
+                s_text = _name(shrine)
+                comp = getattr(shrine, 'component', None)  # ComponentPickup reward
+                if comp is not None:
+                    tag_names = [_name(t) for t in getattr(comp, 'tags', [])]
+                    if tag_names:
+                        s_text += " (" + ", ".join(tag_names) + ")"
+                items = getattr(shrine, 'items', None)
+                if items:
+                    s_text += ": " + ", ".join(_name(i) for i in items)
+                chunks.append(s_text)
 
         return chunks
 
@@ -4239,54 +4363,71 @@ if _PyGameView is not None:
         """Build a spoken description of a rift portal's contents (flat string)."""
         return ". ".join(_describe_portal_chunks(portal, view))
 
-    def _describe_unit(unit):
-        """Build a comprehensive spoken description of a unit, matching the visual examine panel."""
-        parts = []
+    def _describe_unit_segments(unit):
+        """Ordered (category, text) speech segments for a unit body, mirroring
+        draw_examine_unit (RiftWizard3.py:7548). Registered editorial departures
+        (DESCRIBE_UNIFORMITY_BUILD_PLAN.md): Soulbound hoisted to the top;
+        permanent blesses spoken with passives (game shows them as hoverable
+        status chips); '(N turns)' duration wording."""
+        segs = []
 
-        # Name + Friendly status
+        # Name + Friendly status (game draws Friendly as its own line)
         name = _name(unit)
         if getattr(unit, 'team', None) == Level.TEAM_PLAYER and not _is_player(unit):
-            parts.append(f"{name}, Friendly")
+            segs.append(('name', f"{name}, Friendly"))
         else:
-            parts.append(name)
+            segs.append(('name', name))
 
         # Turns to death (summoned creatures)
         ttd = getattr(unit, 'turns_to_death', None)
         if ttd:
-            parts.append(f"{ttd} turns left")
+            segs.append(('lifespan', f"{ttd} turns left"))
 
-        # Soulbound (lich soul jar mechanic — cannot die while jar exists)
+        # Soulbound (lich soul jar mechanic — cannot die while jar exists).
+        # Registered editorial: hoisted from the buff list.
         if _has_soulbound(unit):
-            parts.append("Soulbound")
+            segs.append(('soulbound', "Soulbound"))
 
-        # HP
+        # HP — game splits: live units cur/max, summon previews (cur_hp <= 0)
+        # just max (RiftWizard3.py:7610-7614)
         hp = getattr(unit, 'cur_hp', None)
         max_hp = getattr(unit, 'max_hp', None)
-        if hp is not None and max_hp is not None:
-            parts.append(f"{hp} of {max_hp} HP")
+        if max_hp is not None:
+            if hp is not None and hp > 0:
+                segs.append(('hp', f"{hp} of {max_hp} HP"))
+            else:
+                segs.append(('hp', f"{max_hp} HP"))
 
         # Shields
         shields = getattr(unit, 'shields', 0)
         if shields:
-            parts.append(f"{shields} shield{'s' if shields != 1 else ''}")
+            segs.append(('shields', f"{shields} shield{'s' if shields != 1 else ''}"))
 
-        # Clarity (debuff immunity)
-        clarity = getattr(unit, 'clarity', 0)
-        if clarity:
-            parts.append(f"{clarity} clarity")
+        # LEGACY (RW2): integer clarity attr; RW3 refactored to boolean
+        # gets_clarity and draws no clarity line in this panel. Kept for backport.
+        # clarity = getattr(unit, 'clarity', 0)
+        # if clarity:
+        #     segs.append(('clarity', f"{clarity} clarity"))
 
         # Tags (Fire, Ice, Undead, Demon, etc.)
         tags = getattr(unit, 'tags', [])
         if tags:
             tag_names = [getattr(t, 'name', str(t)) for t in tags]
-            parts.append(", ".join(tag_names))
+            segs.append(('tags', ", ".join(tag_names)))
 
-        # Spells/Abilities
+        # Spells (game header label; per-spell statline order mirrors 7631-7696)
         spells = getattr(unit, 'spells', [])
         if spells:
             spell_descs = []
             for spell in spells:
                 s_parts = [_name(spell)]
+
+                # Quick cast (game 7639)
+                try:
+                    if hasattr(spell, 'get_stat') and spell.get_stat('quick_cast'):
+                        s_parts.append("Quick Cast")
+                except Exception:
+                    pass
 
                 # Damage amount and type
                 if hasattr(spell, 'damage'):
@@ -4343,18 +4484,30 @@ if _PyGameView is not None:
                     else:
                         s_parts.append(f"{cd} turn cooldown")
 
-                # Description (strip markup tags)
-                desc = getattr(spell, 'description', None) or ""
+                # Description — game precedence: the description ATTR overrides
+                # get_description() for unit spells (RiftWizard3.py:7685-7692,
+                # "so it can be overridden"). Paired with fmt_dict so template
+                # placeholders substitute ('Deal [{damage}:damage]...' must not
+                # leak '{damage}' — the Electric Ink scroll bug). NOTE: for
+                # granted spells the game draws "Granted by {name}" INSTEAD of
+                # the description; we speak the description — owner ruling
+                # pending (plan doc, C1).
+                desc = getattr(spell, 'description', None)
                 if not desc and hasattr(spell, 'get_description'):
-                    desc = spell.get_description()
+                    try:
+                        desc = spell.get_description()
+                    except Exception:
+                        desc = None
                 if desc:
-                    s_parts.append(_clean_desc(desc))
+                    desc = read_text(desc, _fmt_of(spell))
+                    if desc:
+                        s_parts.append(_clean_desc(desc))
 
                 spell_descs.append(", ".join(s_parts))
 
-            parts.append("Abilities: " + "; ".join(spell_descs))
+            segs.append(('abilities', "Spells: " + "; ".join(spell_descs)))
 
-        # Movement traits
+        # Movement traits (game labels: Flying / Immobile / Burrowing, 7698-7708)
         traits = []
         if getattr(unit, 'flying', False):
             traits.append("Flying")
@@ -4363,16 +4516,17 @@ if _PyGameView is not None:
         if getattr(unit, 'burrowing', False):
             traits.append("Burrowing")
         if traits:
-            parts.append(", ".join(traits))
+            segs.append(('movement', ", ".join(traits)))
 
-        # Damage resistances (sorted high to low, matching game display)
+        # Damage resistances — game wording "{val}% Resist {tag}" (text.RESIST_VAL),
+        # sorted high to low so positives group before negatives (7712-7724)
         resists = getattr(unit, 'resists', {})
         if resists:
             resist_entries = [(t, resists[t]) for t in resists if resists[t] != 0]
             resist_entries.sort(key=lambda x: -x[1])
             if resist_entries:
-                resist_strs = [f"{val}% {getattr(t, 'name', str(t))}" for t, val in resist_entries]
-                parts.append("Resists: " + ", ".join(resist_strs))
+                resist_strs = [f"{val}% Resist {getattr(t, 'name', str(t))}" for t, val in resist_entries]
+                segs.append(('resists', ", ".join(resist_strs)))
 
         # Passive buffs (permanent abilities with tooltips)
         # Include BUFF_TYPE_PASSIVE (0) and permanent BLESS buffs (type 1, turns_left 0)
@@ -4389,15 +4543,21 @@ if _PyGameView is not None:
         for buff in passives:
             tooltip = buff.get_tooltip() if hasattr(buff, 'get_tooltip') else None
             if tooltip:
-                # RW3 buff tooltips are often (template, fmt) tuples; _clean_desc
-                # routes through read_text (resolving the tuple) + strips markup.
-                # Appending the raw tuple here throws "sequence item 0: expected str
-                # instance, tuple found" on the join below — silencing the readout.
-                cleaned = _clean_desc(tooltip)
+                # RW3 buff tooltips are often (template, fmt) tuples; read_text
+                # resolves the tuple, paired with fmt_dict so str templates'
+                # {placeholders} substitute too. Appending the raw tuple here
+                # throws on the join below — silencing the readout.
+                cleaned = _clean_desc(read_text(tooltip, _fmt_of(buff)))
                 if cleaned:
                     passive_descs.append(cleaned)
+            else:
+                # Game fallback (7732): a passive with no tooltip still shows
+                # its name
+                bname = _name(buff, "")
+                if bname:
+                    passive_descs.append(bname)
         if passive_descs:
-            parts.append("Passives: " + "; ".join(passive_descs))
+            segs.append(('passives', "Passives: " + "; ".join(passive_descs)))
 
         # Status effects (temporary bless/curse with stacks and duration)
         # Exclude permanent BLESS buffs (type 1, turns_left 0) — those are in passives above
@@ -4429,9 +4589,16 @@ if _PyGameView is not None:
                 status_strs.append(s)
 
             if status_strs:
-                parts.append("Status: " + ", ".join(status_strs))
+                # Game header label "Status Effects" (7754); "(N turns)" wording
+                # is registered editorial (game draws bare "(N)")
+                segs.append(('status', "Status Effects: " + ", ".join(status_strs)))
 
-        return ". ".join(parts)
+        return segs
+
+    def _describe_unit(unit):
+        """Flat-joined unit description (the Tier 2 / D-key body). Segments via
+        _describe_unit_segments for the future tooltip buffer/composer."""
+        return ". ".join(t for _lbl, t in _describe_unit_segments(unit))
 
     def _get_on_death_text(unit):
         """Extract on-death effect descriptions from a unit's buffs.
@@ -4446,7 +4613,7 @@ if _PyGameView is not None:
                 tooltip = getattr(buff, 'description', None)
             if not tooltip:
                 continue
-            tooltip = read_text(tooltip)  # RW3 tooltips may be (template, fmt) tuples; .lower() below would throw on a tuple
+            tooltip = read_text(tooltip, _fmt_of(buff))  # resolve tuples AND substitute str-template placeholders; .lower() below would throw on a tuple
             # Strip leading "On death, " if present — we add our own prefix
             stripped = tooltip
             if stripped.lower().startswith("on death, "):
@@ -5410,11 +5577,7 @@ if _PyGameView is not None:
     def _describe_cloud_detail(cloud):
         """Full detail description of a cloud object."""
         parts = [_name(cloud, "Cloud")]
-        desc = ''
-        try:
-            desc = cloud.get_description() or ''
-        except Exception:
-            desc = getattr(cloud, 'description', '') or ''
+        desc = _desc_text(cloud)
         if desc:
             parts.append(_clean_desc(desc))
         else:
@@ -5428,32 +5591,46 @@ if _PyGameView is not None:
         # Portal — use existing portal describer
         if hasattr(prop, 'level_gen_params'):
             return _describe_portal(prop, view)
+        # Component pickups — the game examines these through
+        # draw_examine_component (name, tags, description; RiftWizard3.py:7227-7248)
+        comp = None
+        if isinstance(prop, getattr(Level, 'ComponentPickup', ())):
+            comp = prop.component
+        elif isinstance(prop, getattr(Level, 'Component', ())):
+            comp = prop
+        if comp is not None:
+            parts = [_name(comp)]
+            tags = getattr(comp, 'tags', [])
+            if tags:
+                parts.append(", ".join(_name(t) for t in tags))
+            desc = _desc_text(comp)
+            if desc:
+                parts.append(_clean_desc(desc))
+            return ". ".join(parts)
         # Shop/Shrine — name, description, item list
         if hasattr(prop, 'items') and hasattr(prop, 'name'):
             parts = [_name(prop)]
-            desc = getattr(prop, 'description', '') or ''
-            if desc:
-                parts.append(_clean_desc(desc))
             items = getattr(prop, 'items', [])
-            if items:
+            # Game shows a shop's description ONLY when it has no items — the
+            # shrine case (draw_examine_shop, RiftWizard3.py:7535-7538)
+            if not items:
+                desc = _desc_text(prop)
+                if desc:
+                    parts.append(_clean_desc(desc))
+            else:
                 item_names = [_name(item) for item in items]
                 parts.append("Items: " + ", ".join(item_names))
             return ". ".join(parts)
         # Any prop carrying a single .item — describe it (defensive; not a stock RW3 prop)
         if hasattr(prop, 'item') and isinstance(prop, Level.Prop):
             item = prop.item
-            parts = [_name(item)]
             if isinstance(item, Level.Equipment):
+                # Game draws Equipment through draw_examine_upgrade; share the body
                 slot = _SLOT_NAMES.get(getattr(item, 'slot', -1), "Equipment")
-                parts[0] = f"{slot}: {_name(item)}"
-                bonus_lines = _format_bonus_lines(item)
-                if bonus_lines:
-                    parts.append(". ".join(bonus_lines))
-            desc = ''
-            try:
-                desc = item.get_description() or ''
-            except Exception:
-                desc = getattr(item, 'description', '') or ''
+                body = [t for _lbl, t in _describe_upgrade_body(item)]
+                return ". ".join([f"{slot}: {_name(item)}"] + body)
+            parts = [_name(item)]
+            desc = _desc_text(item)
             if desc:
                 parts.append(_clean_desc(desc))
             return ". ".join(parts)
@@ -5463,11 +5640,7 @@ if _PyGameView is not None:
         # Generic prop: name + description. Covers MemoryOrb, HeartDot,
         # ComponentPickup, and standalone trigger-shrines.
         parts = [_name(prop)]
-        desc = ''
-        try:
-            desc = prop.get_description() or ''
-        except Exception:
-            desc = getattr(prop, 'description', '') or ''
+        desc = _desc_text(prop)
         if desc:
             parts.append(_clean_desc(desc))
         return ". ".join(parts)
