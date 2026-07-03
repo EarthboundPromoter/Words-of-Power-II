@@ -375,6 +375,159 @@ def test_golem_reversion_shape_materializes_reaction_marker():
     assert markers[0]['parent'] == deaths[0]['sequence']
 
 
+# ---- Step 5: cloud lifecycle (spawn / removal / replacement / rejection) ----
+
+class _TCloud(Level.Cloud):
+    """Minimal Cloud — the engine chokepoint proof (GAP_2: add_obj/remove_obj
+    are the SOLE lifecycle paths) makes subclass tests representative."""
+    def __init__(self, owner=None, duration=3, name="Test Cloud"):
+        Level.Cloud.__init__(self)
+        self.name = name
+        self.owner = owner
+        self.duration = duration
+
+    def on_advance(self):
+        pass
+
+    def on_expire(self):
+        pass
+
+
+class _StubbornCloud(_TCloud):
+    def can_be_replaced_by(self, new_cloud):
+        return False
+
+
+def test_cloud_spawn_recorded_under_cast():
+    lvl = _fresh_level()
+    wiz = _wizard()
+
+    def storm(spell, x, y, **kw):
+        c = _TCloud(owner=spell.caster, name="Storm Cloud")
+        spell.caster.level.add_obj(c, 9, 7)
+        yield
+
+    s = _make_spell("Storm", storm)
+    wiz.add_spell(s)
+    lvl.add_obj(wiz, 7, 7)
+    lvl.act_cast(wiz, s, 8, 7, pay_costs=True)
+    _drain(lvl)
+
+    recs = _records('cloud_spawn')
+    assert len(recs) == 1
+    p = recs[0]['payload']
+    assert p['cloud_name'] == "Storm Cloud"
+    assert (p['x'], p['y']) == (9, 7)
+    assert p['owner_name'] == "Wizard"
+    assert p['owner_is_player_controlled'] is True
+    assert p['duration_remaining'] == 3
+    begins = [r for r in journal.records if r['event_type'] == 'cast_begin'
+              and r['payload'].get('spell', {}).get('name') == 'Storm']
+    assert recs[0]['parent'] == begins[0]['sequence']
+
+
+def test_cloud_expiry_nests_under_tick():
+    lvl = _fresh_level()
+    wiz = _wizard()
+    lvl.add_obj(wiz, 7, 7)
+    c = _TCloud(owner=wiz, duration=1)
+    lvl.add_obj(c, 5, 5)
+    seq0 = journal.sequence
+
+    c.advance()   # 1 -> 0 -> kill() -> remove_obj
+
+    removed = [r for r in _records('cloud_removed') if r['sequence'] > seq0]
+    assert len(removed) == 1
+    assert removed[0]['payload']['duration_remaining'] <= 0
+    ticks = [r for r in _records('cloud_tick') if r['sequence'] > seq0]
+    assert len(ticks) == 1
+    assert removed[0]['parent'] == ticks[0]['sequence']
+
+
+def test_cloud_kill_outside_advance_recorded():
+    # The fire-dissipation / web-self-kill family: kill() from anywhere
+    # funnels through remove_obj — the previously silent removal class.
+    lvl = _fresh_level()
+    c = _TCloud(duration=5)
+    lvl.add_obj(c, 4, 4)
+    seq0 = journal.sequence
+
+    c.kill()
+
+    removed = [r for r in _records('cloud_removed') if r['sequence'] > seq0]
+    assert len(removed) == 1
+    assert removed[0]['payload']['duration_remaining'] == 5   # unspent turns
+
+
+def test_cloud_replacement_records_removal_then_spawn():
+    lvl = _fresh_level()
+    incumbent = _TCloud(duration=4, name="Old Cloud")
+    lvl.add_obj(incumbent, 6, 6)
+    seq0 = journal.sequence
+
+    newcomer = _TCloud(duration=2, name="New Cloud")
+    lvl.add_obj(newcomer, 6, 6)
+
+    removed = [r for r in _records('cloud_removed') if r['sequence'] > seq0]
+    spawned = [r for r in _records('cloud_spawn') if r['sequence'] > seq0]
+    assert len(removed) == 1 and removed[0]['payload']['cloud_name'] == "Old Cloud"
+    assert len(spawned) == 1 and spawned[0]['payload']['cloud_name'] == "New Cloud"
+    assert removed[0]['sequence'] < spawned[0]['sequence']
+    assert lvl.tiles[6][6].cloud is newcomer
+
+
+def test_cloud_rejected_replacement_records_nothing():
+    # D4: the incumbent refuses; add_obj discards the newcomer silently —
+    # zero records (nothing rendered, nothing changed). The screen_reader
+    # arrival stopgap carries the same tile-slot check (smoke-verified).
+    lvl = _fresh_level()
+    incumbent = _StubbornCloud(duration=4, name="Stubborn Cloud")
+    lvl.add_obj(incumbent, 6, 6)
+    seq0 = journal.sequence
+
+    newcomer = _TCloud(duration=2, name="Doomed Cloud")
+    lvl.add_obj(newcomer, 6, 6)
+
+    assert [r for r in _records('cloud_removed') if r['sequence'] > seq0] == []
+    assert [r for r in _records('cloud_spawn') if r['sequence'] > seq0] == []
+    assert lvl.tiles[6][6].cloud is incumbent
+
+
+def test_cloud_drip_spawn_parents_to_buff_tick():
+    # The CloudGeneratorBuff shape: a buff's on_advance places clouds — the
+    # spawn record must land inside the wrapped buff-tick window.
+    lvl = _fresh_level()
+    wiz = _wizard()
+    lvl.add_obj(wiz, 7, 7)
+
+    class _DripTB(Level.Buff):
+        def on_init(self):
+            self.name = "Drip Buff"
+            self.buff_type = Level.BUFF_TYPE_BLESS
+
+        def on_advance(self):
+            self.owner.level.add_obj(
+                _TCloud(owner=self.owner, name="Drip Cloud"), 8, 8)
+
+    wiz.apply_buff(_DripTB())
+    seq0 = journal.sequence
+    wiz.advance_buffs()
+
+    spawned = [r for r in _records('cloud_spawn') if r['sequence'] > seq0]
+    assert len(spawned) == 1
+    by_seq = {r['sequence']: r for r in journal.records}
+    parent = by_seq.get(spawned[0]['parent'])
+    assert parent is not None and parent['event_type'] in (
+        'buff_tick', 'buff_advance')
+
+
+def test_cloud_on_non_live_level_gated():
+    lvl = _fresh_level()
+    other = Level.Level(15, 15)
+    other.add_obj(_TCloud(duration=2), 3, 3)
+    assert _records('cloud_spawn') == []
+
+
 def test_menu_time_mutation_flag_survives_for_boundary_floor():
     # A mutation outside any bracket (menu-time portal_mercy shape): no pop
     # runs, so the flag stays armed for the turn-boundary floor consumer.

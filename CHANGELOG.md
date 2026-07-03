@@ -6,6 +6,9 @@ an early work-in-progress RW3 port — expect frequent changes.
 ## Unreleased
 
 ### Fixed
+- Cloud arrivals no longer announce a cloud that never landed. When a new cloud tries
+  to claim a tile whose current cloud refuses to be replaced, the game silently discards
+  the newcomer — the arrival summary used to announce it anyway.
 - Terrain changes now update who is in view. When a wall melts (or appears) while
   everyone stands still, enemies revealed or hidden by the change are re-checked
   immediately — "Fire Lizard appears, 3 north" through the same announcement that

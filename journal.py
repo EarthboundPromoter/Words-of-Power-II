@@ -1588,6 +1588,22 @@ def install_hooks():
                     'stack_count_after': _stack_count_for(obj, buff),
                     'is_silent_activate': True,
                 })
+        elif isinstance(obj, Level.Cloud):
+            # Unit 5 (G-K): the entire cloud lifecycle is event-free in the
+            # engine — add_obj's cloud branch (Level.py:3912-3921) is the
+            # SOLE spawn path. Placement check (D4): a replacement the
+            # incumbent refuses (`can_be_replaced_by` False) silently
+            # discards the new cloud — the tile slot is the truth of whether
+            # it landed; a rejected spawn records nothing (nothing rendered,
+            # nothing changed). The displaced incumbent's kill() ran inside
+            # the original and already produced its cloud_removed via the
+            # remove_obj branch below — removal-then-spawn, same parent.
+            try:
+                if (self is journal._level
+                        and self.tiles[x][y].cloud is obj):
+                    journal.record('cloud_spawn', _snapshot_cloud(obj))
+            except Exception:
+                pass
         return result
 
     def patched_remove_obj(self, obj):
@@ -1609,6 +1625,19 @@ def install_hooks():
                     'stack_count_after': 0,
                     'is_unit_removed': True,
                 })
+        elif isinstance(obj, Level.Cloud):
+            # Unit 5 (G-K): remove_obj's cloud branch (Level.py:3949-3952)
+            # is the SOLE removal path — duration expiry (nests under the
+            # wrapped cloud_tick), fire-dissipation (nests under the damage
+            # cause), web self-kill, replacement displacement, and every
+            # content kill() all funnel here. Snapshot BEFORE the original
+            # so duration_remaining reflects pre-removal truth (expiry reads
+            # <= 0; a killed cloud reads its unspent turns).
+            try:
+                if self is journal._level:
+                    journal.record('cloud_removed', _snapshot_cloud(obj))
+            except Exception:
+                pass
         return original_remove_obj(self, obj)
 
     def _make_terrain_patch(method_name, original):

@@ -2683,7 +2683,11 @@ _original_add_obj = Level.Level.add_obj
 def patched_add_obj(self, obj, x, y):
     _original_add_obj(self, obj, x, y)
     try:
-        if isinstance(obj, Level.Cloud):
+        # Placement check (Unit 5 D4): a replacement the incumbent cloud
+        # refuses is silently discarded by add_obj — announcing it was a
+        # false arrival. The tile slot is the truth of whether it landed.
+        if (isinstance(obj, Level.Cloud)
+                and self.tiles[x][y].cloud is obj):
             owner = getattr(obj, 'owner', None)
             cname = getattr(obj, 'name', type(obj).__name__)
             _cloud_arrivals.append((cname, owner, x, y))
