@@ -2136,6 +2136,11 @@ _COMPOSER_KNOWN_EVENT_TYPES = frozenset({
     # payloads DO carry unit snapshots, unlike game_log).
     'resists_change', 'tags_change', 'stat_bonus_change',
     'charges_change', 'cooldown_change', 'lifespan_change',
+    # Unit 5 D3: tile-flavor rides the same container-diff sweep (a lava
+    # spell's spread lands several in its chain). Payload is tile-keyed
+    # (x/y, no unit snapshot) — crisis structurally never sees it, but its
+    # ALL_KINDS membership keeps the two known-set tests uniform.
+    'tile_flavor_change',
     # Root-2 cause-marker kinds (Unit 2, capture-only), staged for the
     # composer phase: the marker is the CAUSE NODE its window's effects
     # parent to (pickup / equipment-triggered replay / craft), never a

@@ -49,9 +49,16 @@ KIND_STAT_BONUS = 'stat_bonus_change'  # G-C (payload names the bonus domain)
 KIND_CHARGES = 'charges_change'        # G-D (spell shelf)
 KIND_COOLDOWN = 'cooldown_change'      # G-E
 KIND_LIFESPAN = 'lifespan_change'      # turns_to_death
+# Unit 5 D3: per-tile flavor (chasm_type + tileset) — rendered (sprites,
+# chasm skins) AND rule-read (lava/swamp chasm mechanics, Spells.py:3347/
+# 10324/16663), yet written both via set_tileset/set_group_tileset AND by
+# direct tile-attr writes with no chokepoint. The method hooks catch the
+# former; the snapshot sweep below (riding the same boundaries as the unit
+# diff) catches the latter with bracketed attribution intact.
+KIND_TILE_FLAVOR = 'tile_flavor_change'
 
 ALL_KINDS = (KIND_RESISTS, KIND_TAGS, KIND_STAT_BONUS, KIND_CHARGES,
-             KIND_COOLDOWN, KIND_LIFESPAN)
+             KIND_COOLDOWN, KIND_LIFESPAN, KIND_TILE_FLAVOR)
 
 
 # ----------------------------------------------------------------------
@@ -346,6 +353,65 @@ class ContainerStore:
 store = ContainerStore()
 
 
+# ----------------------------------------------------------------------
+# The tile-flavor snapshot (Unit 5 D3). {(x, y): (chasm_type, tileset)}
+# for the LIVE level only — sweeps can be handed a GEN level mid-play
+# (buff_apply during next-level generation), which must neither diff nor
+# disturb the snapshot. First observation of the live level = baseline.
+# 324 tuple compares per sweep at 18x18 — proportionally small next to
+# the all-units container compare.
+# ----------------------------------------------------------------------
+
+_flavor_snapshot = {}
+_flavor_level = None
+
+
+def _tile_flavor(tile):
+    return (getattr(tile, 'chasm_type', None), getattr(tile, 'tileset', None))
+
+
+def _diff_flavor(level):
+    """-> list of (x, y, before_pair, after_pair) for changed tiles on the
+    live level; [] on baseline, non-live level, or no change. Snapshot
+    advances to current truth for every reported tile."""
+    global _flavor_level
+    from journal import journal
+    if level is None or level is not journal._level:
+        return []
+    tiles = getattr(level, 'tiles', None)
+    if not tiles:
+        return []
+    if _flavor_level is not level:
+        _flavor_snapshot.clear()
+        for col in tiles:
+            for t in col:
+                _flavor_snapshot[(t.x, t.y)] = _tile_flavor(t)
+        _flavor_level = level
+        return []
+    out = []
+    for col in tiles:
+        for t in col:
+            cur = _tile_flavor(t)
+            key = (t.x, t.y)
+            prev = _flavor_snapshot.get(key)
+            if prev == cur:
+                continue
+            _flavor_snapshot[key] = cur
+            if prev is None:
+                continue      # unseen tile: baseline, not change
+            out.append((key[0], key[1], prev, cur))
+    return out
+
+
+def _flavor_note_hooked_change(level, x, y, cur):
+    """Method hooks (set_tileset/set_group_tileset) advance the snapshot
+    inline as they record, so the boundary sweep never double-reports a
+    hooked change. A not-yet-seeded level stays untouched — the first sweep
+    baselines with post-change truth."""
+    if _flavor_level is level:
+        _flavor_snapshot[(x, y)] = cur
+
+
 def domain_kind(domain):
     return _DOMAIN_KINDS[domain]
 
@@ -460,6 +526,26 @@ def _emit_deltas(level, bracket, detail, parent_fn):
             }, parent)
             if orphaned:
                 _note_drift('charges', spell_name)
+    # Unit 5 D3: tile-flavor deltas — catches the DIRECT chasm_type/tileset
+    # writes (water->swamp conversions, corruption skins) under the cause
+    # live for the just-closed span, same as every other domain.
+    for (x, y, before, after) in _diff_flavor(level):
+        parent = parent_fn()
+        orphaned = parent is None and bracket is None
+        journal.record(KIND_TILE_FLAVOR, {
+            'x': x,
+            'y': y,
+            'chasm_type_before': before[0],
+            'chasm_type_after': after[0],
+            'tileset_before': before[1],
+            'tileset_after': after[1],
+            'via': 'sweep',
+            'bracket': bracket,
+            'detail': detail,
+            'unattributed': orphaned,
+        }, parent)
+        if orphaned:
+            _note_drift('tile_flavor', "%s,%s" % (x, y))
 
 
 def sweep(level, bracket=None, detail=None, site='?', parent_fn=None):
@@ -490,10 +576,12 @@ def _note_drift(domain, name):
 def reseed():
     """Level entry / post-load boundary: drop all snapshots. The first
     sweep after a reseed baselines everything silently (no flood)."""
-    global _pending_ctx
+    global _pending_ctx, _flavor_level
     _pending_ctx = None
     _drift_seen.clear()
     _drift_pending.clear()
+    _flavor_snapshot.clear()
+    _flavor_level = None
     store.reseed()
 
 
@@ -564,6 +652,9 @@ def install(log_fn=None):
     original_unit_equip = unit_cls.equip
     original_unit_unequip = unit_cls.unequip
     original_remove_obj = level_cls.remove_obj
+    # Unit 5 D3: getattr-gated (RW2 backport declines per-hook).
+    original_set_tileset = getattr(level_cls, 'set_tileset', None)
+    original_set_group_tileset = getattr(level_cls, 'set_group_tileset', None)
 
     def patched_buff_apply(self, owner):
         lvl = getattr(owner, 'level', None)
@@ -613,11 +704,89 @@ def install(log_fn=None):
             except Exception:
                 pass
 
+    def _record_flavor_method_changes(level, pre, via):
+        # pre = [(x, y, chasm_type_before, tileset_before)]. Emit only for
+        # tiles the method actually changed; advance the snapshot inline so
+        # the boundary sweep never double-reports (D3 dedup, gate-confirmed
+        # airtight for the make_* primitives, pinned here for these hooks).
+        try:
+            from journal import journal
+            for (x, y, ct_b, ts_b) in pre:
+                t = level.tiles[x][y]
+                cur = _tile_flavor(t)
+                if cur == (ct_b, ts_b):
+                    continue
+                parent = _span_parent_seq()
+                journal.record(KIND_TILE_FLAVOR, {
+                    'x': x,
+                    'y': y,
+                    'chasm_type_before': ct_b,
+                    'chasm_type_after': cur[0],
+                    'tileset_before': ts_b,
+                    'tileset_after': cur[1],
+                    'via': via,
+                    'bracket': None,
+                    'detail': None,
+                    'unattributed': parent is None,
+                }, parent)
+                _flavor_note_hooked_change(level, x, y, cur)
+        except Exception as e:
+            _note_failure(via, e)
+
+    def patched_set_tileset(self, tileset, chasm_type):
+        # Whole-level flavor write (Level.py:4355). Live-gated: gen-time
+        # calls (LevelGen.py:491, Vaults.py:242) pass through untouched.
+        from journal import journal
+        if self is not journal._level:
+            return original_set_tileset(self, tileset, chasm_type)
+        pre = None
+        try:
+            pre = [(t.x, t.y) + _tile_flavor(t)
+                   for col in self.tiles for t in col]
+        except Exception:
+            pre = None
+        try:
+            return original_set_tileset(self, tileset, chasm_type)
+        finally:
+            if pre is not None:
+                _record_flavor_method_changes(self, pre, 'set_tileset')
+
+    def patched_set_group_tileset(self, points, tileset, chasm_type):
+        # Point-list flavor write (Level.py:4361) — the runtime lava-spread
+        # shape. points may be a generator: the non-live path passes it
+        # through untouched; the live path materializes it once (the
+        # original iterates it exactly once — semantics preserved).
+        from journal import journal
+        if self is not journal._level:
+            return original_set_group_tileset(self, points, tileset,
+                                              chasm_type)
+        try:
+            pts = list(points)
+        except Exception:
+            return original_set_group_tileset(self, points, tileset,
+                                              chasm_type)
+        pre = None
+        try:
+            pre = [(p.x, p.y) + _tile_flavor(self.tiles[p.x][p.y])
+                   for p in pts]
+        except Exception:
+            pre = None
+        try:
+            return original_set_group_tileset(self, pts, tileset, chasm_type)
+        finally:
+            if pre is not None:
+                _record_flavor_method_changes(self, pre,
+                                              'set_group_tileset')
+
     buff_cls.apply = patched_buff_apply
     buff_cls.unapply = patched_buff_unapply
     unit_cls.equip = patched_unit_equip
     unit_cls.unequip = patched_unit_unequip
     level_cls.remove_obj = patched_remove_obj
+    if original_set_tileset is not None:
+        level_cls.set_tileset = patched_set_tileset
+    if original_set_group_tileset is not None:
+        level_cls.set_group_tileset = patched_set_group_tileset
 
     _install_span_sweeps()
     _install_ctx_property(level_cls)

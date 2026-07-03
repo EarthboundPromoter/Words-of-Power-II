@@ -227,6 +227,103 @@ def test_terrain_dirty_flag_and_consumer_contract():
         journal.terrain_los_dirty = False
 
 
+# ---- Step 2: flavor — method hooks + the snapshot sweep ----
+
+import container_diff as cd
+
+
+def _flavor_records():
+    return _records(cd.KIND_TILE_FLAVOR)
+
+
+def _fresh_flavor_level():
+    """Fresh live level with container_diff installed and the flavor
+    snapshot BASELINED (first sweep seeds silently)."""
+    lvl = _fresh_level()
+    cd.install()
+    cd.reseed()
+    cd.turn_boundary(lvl)             # baseline sweep: seeds, no records
+    assert _flavor_records() == []
+    return lvl
+
+
+def test_direct_chasm_write_swept_and_attributed_to_cast():
+    # The water->swamp direct-write shape (Spells.py:8275): no chokepoint —
+    # only the sweep sees it, attributed via the suspended cast window.
+    lvl = _fresh_flavor_level()
+    wiz = _wizard()
+
+    def swampify(spell, x, y, **kw):
+        spell.caster.level.tiles[9][7].chasm_type = 'swamp'
+        yield
+
+    s = _make_spell("Swampify", swampify)
+    wiz.add_spell(s)
+    lvl.add_obj(wiz, 7, 7)
+    lvl.act_cast(wiz, s, 8, 7, pay_costs=True)
+    _drain(lvl)
+    cd.turn_boundary(lvl)             # closes the suspended cast window
+
+    recs = _flavor_records()
+    assert len(recs) == 1
+    p = recs[0]['payload']
+    assert (p['x'], p['y']) == (9, 7)
+    assert p['chasm_type_before'] == 'water'
+    assert p['chasm_type_after'] == 'swamp'
+    assert p['via'] == 'sweep'
+    begins = [r for r in journal.records if r['event_type'] == 'cast_begin'
+              and r['payload'].get('spell', {}).get('name') == 'Swampify']
+    assert len(begins) == 1
+    assert recs[0]['parent'] == begins[0]['sequence']
+
+
+def test_set_group_tileset_hook_records_changed_tiles_only():
+    lvl = _fresh_flavor_level()
+    pts = [Point(3, 3), Point(4, 3)]
+    lvl.set_group_tileset(pts, 'volcano', 'lava')
+    recs = _flavor_records()
+    assert len(recs) == 2
+    for r in recs:
+        assert r['payload']['via'] == 'set_group_tileset'
+        assert r['payload']['chasm_type_after'] == 'lava'
+        assert r['payload']['tileset_after'] == 'volcano'
+    # Re-apply: nothing changed -> nothing recorded.
+    lvl.set_group_tileset(pts, 'volcano', 'lava')
+    assert len(_flavor_records()) == 2
+    # Dedup (D3): the hook advanced the snapshot inline — the next sweep
+    # must NOT re-report the same change.
+    cd.turn_boundary(lvl)
+    assert len(_flavor_records()) == 2
+
+
+def test_set_tileset_non_live_level_passes_through():
+    lvl = _fresh_flavor_level()
+    other = Level.Level(15, 15)
+    other.set_tileset('volcano', 'lava')
+    other.set_group_tileset([Point(2, 2)], 'volcano', 'lava')
+    assert _flavor_records() == []
+    # And the writes really landed (original ran untouched).
+    assert other.tiles[2][2].chasm_type == 'lava'
+
+
+def test_make_wall_no_phantom_flavor_record():
+    # Gate-confirmed: the make_* primitives write zero flavor fields — the
+    # sweep must stay silent across a structural change.
+    lvl = _fresh_flavor_level()
+    lvl.make_wall(5, 5)
+    cd.turn_boundary(lvl)
+    assert _flavor_records() == []
+    assert len(_records('terrain_change')) == 1
+
+
+def test_flavor_reseed_baselines_silently():
+    lvl = _fresh_flavor_level()
+    lvl.tiles[6][6].chasm_type = 'swamp'   # unswept direct write...
+    cd.reseed()                            # ...dropped by the reseed
+    cd.turn_boundary(lvl)                  # re-baseline, not a change
+    assert _flavor_records() == []
+
+
 def test_menu_time_mutation_flag_survives_for_boundary_floor():
     # A mutation outside any bracket (menu-time portal_mercy shape): no pop
     # runs, so the flag stays armed for the turn-boundary floor consumer.

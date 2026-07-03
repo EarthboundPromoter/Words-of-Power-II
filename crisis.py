@@ -73,6 +73,9 @@ _STAGED_CAPTURE_ONLY_KINDS = frozenset({
     # wizard_records_no_output into noise, exactly like hp_loss/xp_change.
     'resists_change', 'tags_change', 'stat_bonus_change',
     'charges_change', 'cooldown_change', 'lifespan_change',
+    # Unit 5 D3 (tile-keyed payload, no unit snapshot — listed for
+    # ALL_KINDS uniformity with the digest set).
+    'tile_flavor_change',
 })
 
 
