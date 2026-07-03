@@ -1872,3 +1872,106 @@ def test_buff_section_skips_channeling_rendered_on_action_line():
     items, _claimed = _render_buff_applies([unmarked], 0, True)
     assert [it['text'] for it in items] == [
         "Scuttler (6,3) gained Channeling, 2 turns."]
+
+
+# ---- Repetition is not multiplicity (2026-07-03 grouping/dedup session) ----
+
+
+def test_aoe_same_unit_multi_hit_renders_hits_not_units():
+    """One blade hit three times must not read as three blades at one
+    coordinate ("3 Ally Dancing Blades at (3,8), (3,8), (3,8)" specimen)."""
+    caster = _enemy_snap(name='Goblin Mage', x=6, y=3)
+    blade = _ally_snap(uid=300, name='Dancing Blade', x=3, y=8)
+    chain = [
+        {
+            'sequence': 10, 'parent': None,
+            'event_type': 'cast_begin',
+            'payload': {
+                'caster': caster,
+                'spell': {'name': 'Volley', 'melee': False,
+                          'cur_charges': 1, 'max_charges': 1},
+                'is_player': False, 'pay_costs': True,
+            },
+            'marks': [],
+        },
+    ]
+    for i in range(3):
+        chain.append({
+            'sequence': 11 + i, 'parent': 10,
+            'event_type': 'EventOnDamaged',
+            'payload': {
+                'target': blade, 'damage': 5, 'damage_type': 'Physical',
+                'source_name': 'Volley',
+            },
+            'marks': [],
+        })
+    line = _render_action_chain(chain, wizard_team=0, show_coords=True,
+                                movement_verbose=False)
+    assert line == ("Goblin Mage (6,3) cast Volley at Ally Dancing Blade"
+                    " (3,8), 3 hits, 5 Physical each.")
+
+
+def test_blocked_same_unit_twice_renders_hits_not_units():
+    """One blade blocking two same-signature hits must not read as two
+    blades ("2 Ally Sword of Lights at (5,10), (5,10) blocked" specimen —
+    ally lines merge because ally shields-left is config-off)."""
+    from orphan import _render_shield_blocks
+    blade = _ally_snap(uid=300, name='Sword of Light', x=5, y=10)
+    recs = []
+    for i in range(2):
+        recs.append({
+            'sequence': 10 + i, 'parent': None,
+            'event_type': 'shield_blocked',
+            'payload': {
+                'target': blade, 'blocked_amount': 5,
+                'damage_type': 'Physical', 'source_name': 'Pinch',
+                'shields_remaining': 1 - i,
+            },
+            'marks': [],
+        })
+    items, _claimed = _render_shield_blocks(recs, 0, True,
+                                            ally_shield_totals=False,
+                                            enemy_shield_totals=True)
+    assert [it['text'] for it in items] == [
+        "Ally Sword of Light (5,10) blocked 2 hits, 5 Physical each"
+        " from Pinch."]
+
+
+def test_fade_same_unit_multi_stack_speaks_once():
+    """Multi-stack fades on one unit collapse to one line (the
+    'Necrosis faded' x3 sibling — minion side)."""
+    ogre = _enemy_snap(uid=400, name='Ogre', x=3, y=3)
+    recs = []
+    for i in range(3):
+        recs.append({
+            'sequence': 10 + i, 'parent': None,
+            'event_type': 'EventOnBuffRemove',
+            'payload': {
+                'target': ogre,
+                'buff': {'id': 7, 'name': 'Necrosis', 'turns_left': 0,
+                         'stack_type': 0, 'buff_type': 2},
+            },
+            'marks': [],
+        })
+    idx = _build_index(recs)
+    lines = _tick_lines(recs, idx)
+    assert lines == ["Ogre (3,3) Necrosis faded."]
+
+
+def test_shield_gain_same_unit_twice_renders_times():
+    """One unit gaining the same shield amount twice reads as repetition,
+    not two units."""
+    ogre = _enemy_snap(uid=400, name='Ogre', x=3, y=3)
+    recs = []
+    for i in range(2):
+        recs.append({
+            'sequence': 10 + i, 'parent': None,
+            'event_type': 'shield_gained',
+            'payload': {'target': ogre, 'amount': 1, 'shields_after': None},
+            'marks': [],
+        })
+    items, _claimed = _render_shield_changes(recs, 0, True,
+                                             ally_shield_totals=False,
+                                             enemy_shield_totals=False)
+    assert [it['text'] for it in items] == [
+        "Ogre (3,3) gained 1 shield, 2 times."]

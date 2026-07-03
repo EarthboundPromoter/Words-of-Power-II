@@ -636,6 +636,12 @@ class _CrisisProducer:
                     and _positive_out_of_chain(rec)):
                 last_displaced = rec
 
+        # Multi-stack buffs fire one EventOnBuffRemove per stack when they
+        # expire together, which spoke "Wizard's Necrosis faded." once per
+        # stack (the 2026-07-02 x3 specimen). The fade fact is singular —
+        # the buff is gone — matching the apply side's single collapsed
+        # line, so each buff name fades at most once per window.
+        spoken_fades = set()
         for rec in new_records:
             if self._handle_wizard_debuff_apply(
                     rec, lines, categories_present, announced, _idx):
@@ -650,6 +656,9 @@ class _CrisisProducer:
                     # the paired re-apply is still gated by severity — a flat
                     # re-up stays silent, only a real escalation speaks.
                     continue
+                if bname in spoken_fades:
+                    continue
+                spoken_fades.add(bname)
                 # Genuine fade: the debuff is gone. Drop its high-water mark so
                 # a fresh application later re-announces from scratch, sync the
                 # resist low-water, and speak.

@@ -564,11 +564,20 @@ def compose_killed_section(chain):
     # first death's position in the death order.
     classes = []                  # list of class dicts in section order
     tier2_lookup = {}             # (name, sig) -> class dict reference
+    # A unit that dies twice in one chain (death-save, reincarnation churn)
+    # is one kill fact, not two units — dedup by id (repetition is not
+    # multiplicity). The header total counts unique units for the same
+    # reason.
+    seen_ids = set()
 
     for death in deaths:
         payload = death.get('payload') or {}
         target = payload.get('target') or {}
         target_id = target.get('id')
+        if target_id is not None:
+            if target_id in seen_ids:
+                continue
+            seen_ids.add(target_id)
         tier = target.get('tier', 'minion')
         hits = hits_by_target.get(target_id, [])
 
@@ -596,7 +605,7 @@ def compose_killed_section(chain):
                 existing['count'] += 1
                 existing['members'].append(target)
 
-    total = len(deaths)
+    total = sum(cls['count'] for cls in classes)
     lines = []
     for cls in classes:
         target_phrase = _format_target_phrase(
@@ -1174,6 +1183,11 @@ def _classify_buff_applies(chain, want_buff_type, refresh_only=False):
 
     classes = []
     tier2_lookup = {}
+    # One unit never classifies twice under one signature — N same-sig
+    # records for one unit are repetition, not N units (the 2026-07-02
+    # multiplicity class). Applies to BOTH tiers: tier 2 inflated its
+    # count/coords; tier 1 emitted a whole duplicate line.
+    seen = set()
 
     for r in chain:
         if r.get('event_type') != 'EventOnBuffApply':
@@ -1199,6 +1213,12 @@ def _classify_buff_applies(chain, want_buff_type, refresh_only=False):
         turns_left = buff.get('turns_left')
         tier = target.get('tier', 'minion')
         sig = (buff_name, turns_left)
+
+        tid = target.get('id')
+        if tid is not None:
+            if (tid, sig) in seen:
+                continue
+            seen.add((tid, sig))
 
         if tier in ('boss', 'spawner', 'wizard'):
             classes.append({
@@ -1381,6 +1401,9 @@ def _classify_shield_changes(chain, event_type, exclude_superseded=False):
 
     classes = []
     tier2_lookup = {}
+    # One unit never classifies twice per (id, amount) — repetition is not
+    # multiplicity (same class as the 2026-07-02 grouping specimens).
+    seen = set()
     for r in chain:
         if r.get('event_type') != event_type:
             continue
@@ -1394,6 +1417,11 @@ def _classify_shield_changes(chain, event_type, exclude_superseded=False):
             continue
         amount = (payload.get('amount') if event_type == 'shield_gained'
                   else payload.get('amount_removed'))
+        tid = target.get('id')
+        if tid is not None:
+            if (tid, amount) in seen:
+                continue
+            seen.add((tid, amount))
         tier = target.get('tier', 'minion')
         if tier in ('boss', 'spawner', 'wizard'):
             classes.append({'target': target, 'amount': amount,
@@ -1486,6 +1514,9 @@ def _classify_team_changes(chain, event_type):
                 dead_target_ids.add(t.get('id'))
     classes = []
     tier2_lookup = {}
+    # A flip is categorical — one unit never classifies twice (repetition
+    # is not multiplicity).
+    seen = set()
     for r in chain:
         if r.get('event_type') != event_type:
             continue
@@ -1495,6 +1526,11 @@ def _classify_team_changes(chain, event_type):
             continue
         if target.get('id') in dead_target_ids:
             continue
+        tid = target.get('id')
+        if tid is not None:
+            if tid in seen:
+                continue
+            seen.add(tid)
         tier = target.get('tier', 'minion')
         if tier in ('boss', 'spawner'):
             classes.append({'target': target, 'count': 1, 'members': [target]})

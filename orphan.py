@@ -27,7 +27,7 @@ on records it renders.
 
 from helpers import (
     _pluralize, source_attributed_line, chebyshev_distance,
-    format_spawn_locality,
+    format_spawn_locality, dedupe_unit_members,
 )
 
 
@@ -767,20 +767,33 @@ def _render_cast_line(chain, caster, spell_name, melee, caster_id,
     parts = []
     for key in order:
         target_name, _tier, dtype, damage = key
-        members = groups[key]
+        # One unit hit N times is repetition, not multiplicity — dedup by
+        # unit id so it never reads "3 Ally Dancing Blades at (3,8), (3,8),
+        # (3,8)" (the 2026-07-02 specimens). Multi-hit units get their own
+        # clause in the digest's existing "N hits, X each" grammar.
+        deduped = dedupe_unit_members(groups[key])
         dtype_str = f" {dtype}" if dtype else ""
-        killed = _killed_suffix(
-            sum(1 for m in members if m.get('id') in dead_ids))
-        if len(members) == 1:
-            target_str = _name_with_coord(members[0], wizard_team, show_coords)
+        singles = [m for m, c in deduped if c == 1]
+        repeats = [(m, c) for m, c in deduped if c > 1]
+        if len(singles) == 1:
+            target_str = _name_with_coord(singles[0], wizard_team, show_coords)
+            killed = _killed_suffix(
+                1 if singles[0].get('id') in dead_ids else 0)
             parts.append(f"{target_str}, {damage}{dtype_str}{killed}")
-        else:
+        elif singles:
             plural = _pluralize(target_name or 'enemy')
-            prefix = _team_prefix(members[0], wizard_team)
-            coords = _coord_list(members, show_coords)
+            prefix = _team_prefix(singles[0], wizard_team)
+            coords = _coord_list(singles, show_coords)
+            killed = _killed_suffix(
+                sum(1 for m in singles if m.get('id') in dead_ids))
             parts.append(
-                f"{len(members)} {prefix}{plural}{coords}, {damage}{dtype_str}{killed}"
+                f"{len(singles)} {prefix}{plural}{coords}, {damage}{dtype_str}{killed}"
             )
+        for m, c in repeats:
+            target_str = _name_with_coord(m, wizard_team, show_coords)
+            killed = _killed_suffix(1 if m.get('id') in dead_ids else 0)
+            parts.append(
+                f"{target_str}, {c} hits, {damage}{dtype_str} each{killed}")
     targets_clause = "; ".join(parts)
     if is_channel:
         if melee:
@@ -1220,7 +1233,10 @@ def _render_status_ticks(records, idx, wizard_team, show_coords):
 
     for sig in fade_order:
         bname, target_name, _tier = sig
-        members = fade_groups[sig]
+        # Multi-stack fades on one unit collapse to one line — the fact is
+        # "the buff is gone", matching the apply side's single collapsed
+        # announcement (the "Necrosis faded" x3 sibling specimen).
+        members = [m for m, _c in dedupe_unit_members(fade_groups[sig])]
         if len(members) == 1:
             target_str = _name_with_coord(members[0], wizard_team, show_coords)
             out_items.append(_make_item(RANK_STATUS, [members[0]],
@@ -1391,7 +1407,9 @@ def _render_buff_applies(records, wizard_team, show_coords):
 
     for sig in order:
         bname, btype, target_name, _tier, turns = sig
-        members = groups[sig]
+        # Categorical onset — dedup by unit id (defensive; re-stacks are
+        # already filtered upstream by stack_count_after).
+        members = [m for m, _c in dedupe_unit_members(groups[sig])]
         turns_str = f", {turns} turns" if turns and turns > 0 else ""
         gained = "gained " if btype == 1 else ""
         if len(members) == 1:
@@ -1471,7 +1489,6 @@ def _render_shield_changes(records, wizard_team, show_coords,
 
     for sig in order:
         et, amount, target_name, _tier, _team, total = sig
-        members = groups[sig]
         if et == 'shield_gained':
             amt = amount or 0
             sh = "shield" if amt == 1 else "shields"
@@ -1483,6 +1500,16 @@ def _render_shield_changes(records, wizard_team, show_coords,
             # 0 left = fully stripped; the bare verb already says that.
             total_tail = f", {total} left" if total else ""
             each_applicable = bool(total_tail)
+        # One unit changed N times is repetition, not N units (same class
+        # as the block/damage multiplicity specimens).
+        deduped = dedupe_unit_members(groups[sig])
+        for m, c in [mc for mc in deduped if mc[1] > 1]:
+            target_str = _name_with_coord(m, wizard_team, show_coords)
+            out_items.append(_make_item(RANK_STATUS, [m],
+                f"{target_str} {core}, {c} times{total_tail}."))
+        members = [m for m, c in deduped if c == 1]
+        if not members:
+            continue
         if len(members) == 1:
             target_str = _name_with_coord(members[0], wizard_team, show_coords)
             out_items.append(_make_item(RANK_STATUS, [members[0]],
@@ -1531,7 +1558,9 @@ def _render_team_changes(records, wizard_team, show_coords):
 
     for sig in order:
         et, target_name, _tier = sig
-        members = groups[sig]
+        # A flip is categorical — a unit can only end up on one team; dedup
+        # guards against double-fired records reading as two units.
+        members = [m for m, _c in dedupe_unit_members(groups[sig])]
         disposition = 'friendly' if et == 'team_joined' else 'hostile'
         if len(members) == 1:
             m = members[0]
@@ -1609,6 +1638,26 @@ def _render_shield_blocks(records, wizard_team, show_coords,
             left = f", {remaining} {sh} left"
         else:
             left = ", last shield"
+        # One unit blocking N same-signature hits is repetition, not N
+        # units ("2 Ally Sword of Lights at (5,10), (5,10) blocked..." —
+        # the 2026-07-02 specimen; ally lines merge because the ally
+        # shields-left config keeps `remaining` out of the signature).
+        # Repetition uses the digest's "N hits, X each" grammar.
+        deduped = dedupe_unit_members(members)
+        for m, c in [mc for mc in deduped if mc[1] > 1]:
+            rblock = f"blocked {c} hits"
+            if amount is not None and dtype:
+                rblock += f", {amount} {dtype} each"
+            elif dtype:
+                rblock += f", {dtype}"
+            if source:
+                rblock += f" from {source}"
+            target_str = _name_with_coord(m, wizard_team, show_coords)
+            out_items.append(_make_item(RANK_STATUS, [m],
+                f"{target_str} {rblock}{left}."))
+        members = [m for m, c in deduped if c == 1]
+        if not members:
+            continue
         if len(members) == 1:
             target_str = _name_with_coord(members[0], wizard_team, show_coords)
             out_items.append(_make_item(RANK_STATUS, [members[0]],

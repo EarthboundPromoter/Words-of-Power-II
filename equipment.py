@@ -31,7 +31,7 @@ turn content, matching the listener's mental model of "what I did,
 what my gear did, what they did."
 """
 
-from helpers import _pluralize, classify_resist_outcome
+from helpers import _pluralize, classify_resist_outcome, dedupe_unit_members
 from orphan import (
     _build_index,
     _coord_list,
@@ -397,13 +397,27 @@ def _render_equipment_direct_chain(equipment_name, chain,
 
     for key in damage_order:
         target_name, target_tier, dtype, damage, verb = key
-        members = damage_groups[key]
-        line = _format_equipment_damage_line(
-            equipment_name, sub_cast_spell, verb, target_name, target_tier,
-            dtype, damage, members, wizard_team, show_coords,
-        )
-        if line:
-            lines.append(line)
+        # One unit hit N times is repetition, not N units (the 2026-07-02
+        # multiplicity class) — multi-hit units get their own "N hits"
+        # clause; distinct units keep the collective form.
+        deduped = dedupe_unit_members(damage_groups[key])
+        singles = [m for m, c in deduped if c == 1]
+        if singles:
+            line = _format_equipment_damage_line(
+                equipment_name, sub_cast_spell, verb, target_name,
+                target_tier, dtype, damage, singles, wizard_team,
+                show_coords,
+            )
+            if line:
+                lines.append(line)
+        dtype_str = f" {dtype}" if dtype else ""
+        for m, c in deduped:
+            if c == 1:
+                continue
+            target_str = _name_with_coord(m, wizard_team, show_coords)
+            lines.append(
+                f"{equipment_name} {verb} {target_str}, {c} hits,"
+                f" {damage}{dtype_str} each.")
 
     for target, outcome in fully_resisted:
         target_str = _name_with_coord(target, wizard_team, show_coords)
@@ -411,13 +425,22 @@ def _render_equipment_direct_chain(equipment_name, chain,
 
     for key in heal_order:
         target_name, target_tier, heal_amount = key
-        members = heal_groups[key]
-        line = _format_equipment_heal_line(
-            equipment_name, sub_cast_spell, target_name, target_tier,
-            heal_amount, members, wizard_team, show_coords,
-        )
-        if line:
-            lines.append(line)
+        deduped = dedupe_unit_members(heal_groups[key])
+        singles = [m for m, c in deduped if c == 1]
+        if singles:
+            line = _format_equipment_heal_line(
+                equipment_name, sub_cast_spell, target_name, target_tier,
+                heal_amount, singles, wizard_team, show_coords,
+            )
+            if line:
+                lines.append(line)
+        for m, c in deduped:
+            if c == 1:
+                continue
+            target_str = _name_with_coord(m, wizard_team, show_coords)
+            lines.append(
+                f"{equipment_name} healed {target_str}, {c} times,"
+                f" {heal_amount} HP each.")
 
     for target, buff in buff_applies:
         bname = buff.get('name')

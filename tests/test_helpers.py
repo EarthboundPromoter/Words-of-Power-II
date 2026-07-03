@@ -1409,3 +1409,18 @@ WWW
         result = _walkable_neighbors(level, (2, 2))
         expected = [(2, 1), (3, 1), (3, 2), (3, 3), (2, 3), (1, 3), (1, 2), (1, 1)]
         assert result == expected
+
+
+def test_dedupe_unit_members_counts_and_order():
+    from helpers import dedupe_unit_members
+    a = {'id': 1, 'name': 'A'}
+    b = {'id': 2, 'name': 'B'}
+    out = dedupe_unit_members([a, b, a, a])
+    assert out == [(a, 3), (b, 1)]
+
+
+def test_dedupe_unit_members_missing_ids_never_merge():
+    from helpers import dedupe_unit_members
+    x = {'name': 'X'}
+    out = dedupe_unit_members([x, x])
+    assert out == [(x, 1), (x, 1)]

@@ -7,6 +7,36 @@ import re
 from collections import Counter
 
 
+# ---- Group-member dedup (one unit must never speak as N units) ----
+
+
+def dedupe_unit_members(members):
+    """Collapse a per-RECORD member list to per-UNIT: [(snapshot, count)]
+    in first-appearance order.
+
+    Group-render sites collect target snapshots one per record, so a unit
+    that produced N same-signature records in one window used to read as
+    N units at one coordinate ("3 Ally Dancing Blades at (3,8), (3,8),
+    (3,8)" for one blade hit three times — the 2026-07-02 run-review
+    multiplicity specimens). Renderers use the returned counts to speak
+    repetition ("2 hits, 5 Physical each") or to speak once for
+    categorical facts (fades, buff applies).
+
+    Snapshots without an id never merge (each stays its own entry with
+    count 1) — false merging would be as wrong as false multiplicity."""
+    out = []
+    index = {}
+    for m in members:
+        key = (m or {}).get('id')
+        if key is not None and key in index:
+            out[index[key]][1] += 1
+            continue
+        if key is not None:
+            index[key] = len(out)
+        out.append([m, 1])
+    return [(m, c) for m, c in out]
+
+
 # ---- Damage / resistance outcome classifier ----
 
 

@@ -1344,3 +1344,22 @@ def test_unit1_container_kinds_do_not_trip_crisis_unmodeled():
                for k in cd.ALL_KINDS]
     prod._maybe_emit_unmodeled(tel, records, [])
     assert tel.calls == []
+
+
+def test_multi_stack_fade_speaks_once():
+    """Multi-stack buffs fire one EventOnBuffRemove per stack when they
+    expire together; the fade fact is singular ("Necrosis faded" x3
+    specimen, 2026-07-02 14:15:23)."""
+    p = _CrisisProducer()
+    w = _StubWizardBuffs(buffs=[_StubBuff('Necrosis', 3)])
+    s = p.fire([_apply_record('Necrosis', 3, None, seq=10)], w, _noop)
+
+    w.buffs = []
+    fades = []
+    for i in range(3):
+        fade = _buff_record('EventOnBuffRemove', _wizard_snap(),
+                            name='Necrosis')
+        fade['sequence'] = 11 + i
+        fades.append(fade)
+    s = p.fire(fades, w, _noop)
+    assert s[1] == "Wizard's Necrosis faded."

@@ -580,3 +580,33 @@ def test_equipment_chain_heal_on_ally():
     assert lines == ["HealAura healed Ally Goatia (8,8), 2 HP."]
 
 
+
+
+def test_equipment_damage_same_unit_multi_hit_renders_hits():
+    """One unit hit twice by an equipment tick reads as repetition, not
+    two units (2026-07-03 grouping/dedup session)."""
+    chain = [
+        {
+            'sequence': 10, 'parent': None,
+            'event_type': 'equipment_tick',
+            'payload': {
+                'buff': {'name': 'DamageAura', 'turns_left': 0,
+                         'stack_type': 0},
+                'owner': _wizard_snap(),
+            },
+            'marks': [],
+        },
+    ]
+    for i in range(2):
+        chain.append({
+            'sequence': 11 + i, 'parent': 10,
+            'event_type': 'EventOnDamaged',
+            'payload': {
+                'target': _enemy_snap(uid=300, name='Goblin', x=3, y=4),
+                'damage': 2, 'damage_type': 'Fire',
+                'source_name': 'DamageAura',
+            },
+            'marks': [],
+        })
+    lines = _render_equipment_chain(chain, wizard_team=0, show_coords=True)
+    assert lines == ["DamageAura hit Goblin (3,4), 2 hits, 2 Fire each."]

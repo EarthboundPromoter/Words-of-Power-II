@@ -2945,3 +2945,32 @@ def test_offensive_whiff_still_reads_no_damage():
     nothing still reads 'No damage.' (whiff information is real)."""
     chain = [_player_cast_at(1, "Magic Missile", 5, 5)]
     assert compose_digest(chain) == "Cast Magic Missile. No damage."
+
+
+# ---- Repetition is not multiplicity (2026-07-03 grouping/dedup session) ----
+
+
+def test_killed_section_double_death_counts_once():
+    """A unit that dies twice in one chain (death-save churn) is one kill
+    fact — never '2 killed: 2 X'."""
+    target = _target_snap(1, name="Boggart", x=5, y=5)
+    records, nxt = _hit_then_die(2, 1, target)
+    chain = [_player_cast(1)] + records + [
+        _death(nxt, 1, target),
+    ]
+    out = compose_killed_section(chain)
+    assert out.startswith("1 killed:")
+    assert "2 Boggarts" not in out
+
+
+def test_buff_classify_same_unit_twice_counts_once():
+    """Two same-signature buff applies on one unit classify as one unit."""
+    target = _target_snap(1, name="Goblin", x=5, y=5, cur_hp=7)
+    chain = [
+        _player_cast(1),
+        _buff_apply(2, 1, target, buff_name="Poisoned", turns_left=5),
+        _buff_apply(3, 1, target, buff_name="Poisoned", turns_left=5),
+    ]
+    out = compose_debuffs_applied_section(chain)
+    assert "2 Goblins" not in out
+    assert "Goblin (5,5)" in out
