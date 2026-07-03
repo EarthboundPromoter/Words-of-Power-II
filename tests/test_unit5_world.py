@@ -627,6 +627,68 @@ def test_prop_on_non_live_level_gated():
     assert _records('portal_unlocked') == []
 
 
+# ---- Step 7: Chronomancer threshold poll ----
+
+from types import SimpleNamespace
+from journal import chrono_poll
+
+
+def _chrono_records(seq0):
+    return [r for r in _records('chrono_threshold') if r['sequence'] > seq0]
+
+
+def test_chrono_poll_records_crossings_only():
+    _fresh_level()   # journal reset
+    seq0 = journal.sequence
+    game = SimpleNamespace(chronomancer_time_left_ds=6000)
+
+    prev = chrono_poll(game, None)          # seed frame: no record
+    assert prev == 6000
+    assert _chrono_records(seq0) == []
+
+    game.chronomancer_time_left_ds = 601    # above yellow: nothing
+    prev = chrono_poll(game, prev)
+    assert _chrono_records(seq0) == []
+
+    game.chronomancer_time_left_ds = 600    # the yellow boundary, exact
+    prev = chrono_poll(game, prev)
+    recs = _chrono_records(seq0)
+    assert len(recs) == 1
+    assert recs[0]['payload'] == {'threshold_ds': 600, 'time_left_ds': 600}
+    assert recs[0]['parent'] is None        # ambient real-time
+
+    game.chronomancer_time_left_ds = 400    # between thresholds: nothing new
+    prev = chrono_poll(game, prev)
+    assert len(_chrono_records(seq0)) == 1
+
+    game.chronomancer_time_left_ds = 149    # red crossing
+    prev = chrono_poll(game, prev)
+    recs = _chrono_records(seq0)
+    assert len(recs) == 2
+    assert recs[1]['payload']['threshold_ds'] == 150
+
+
+def test_chrono_poll_wide_gap_records_both():
+    _fresh_level()
+    seq0 = journal.sequence
+    game = SimpleNamespace(chronomancer_time_left_ds=700)
+    prev = chrono_poll(game, None)
+    game.chronomancer_time_left_ds = 100    # long frame: both crossings
+    chrono_poll(game, prev)
+    recs = _chrono_records(seq0)
+    assert [r['payload']['threshold_ds'] for r in recs] == [600, 150]
+
+
+def test_chrono_poll_inactive_and_increase():
+    _fresh_level()
+    seq0 = journal.sequence
+    assert chrono_poll(None, 500) is None               # no game
+    assert chrono_poll(SimpleNamespace(), 500) is None  # no mutator
+    game = SimpleNamespace(chronomancer_time_left_ds=6000)
+    assert chrono_poll(game, 100) == 6000               # new run: re-seed,
+    assert _chrono_records(seq0) == []                  # never a record
+
+
 def test_menu_time_mutation_flag_survives_for_boundary_floor():
     # A mutation outside any bracket (menu-time portal_mercy shape): no pop
     # runs, so the flag stays armed for the turn-boundary floor consumer.

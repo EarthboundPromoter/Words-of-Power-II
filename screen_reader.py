@@ -7683,11 +7683,23 @@ if _PyGameView is not None:
 
     _pending_keybinds = [None]  # Deferred keybind speech — spoken on next frame
 
+    _chrono_prev_ds = [None]
+
     def _patched_draw_screen(self, color=None):
         """Centralized state transition detector. Runs every frame.
         Announces state name for non-self-announcing states, and defers
         keybind help to next frame so it speaks after all state-entry content."""
         cur = self.state
+
+        # Chronomancer threshold poll (Unit 5 D6) — the timer ticks in the
+        # frame loop across LEVEL/SHOP/CHAR_SHEET, so the all-state frame
+        # hook is its home. One attribute check per frame without the
+        # mutator; records only at the game's own yellow/red crossings.
+        try:
+            _chrono_prev_ds[0] = _journal.chrono_poll(
+                getattr(self, 'game', None), _chrono_prev_ds[0])
+        except Exception:
+            pass
 
         # Speak deferred keybinds from previous frame's transition
         if _pending_keybinds[0] is not None:

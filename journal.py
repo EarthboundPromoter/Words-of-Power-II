@@ -1311,6 +1311,35 @@ def _snapshot_prop(prop, portal_cls):
     }
 
 
+# Unit 5 (D6): the Chronomancer wall clock is an INLINE frame-loop write
+# (RiftWizard3.py:10466-10476) — no method to hook, so this is a poll
+# ("polls for truth"): the frame hook feeds it the game each frame; records
+# fire only on downward crossings of the game's own rendered thresholds
+# (red <=150ds / yellow <=600ds, RiftWizard3.py:6639-6640). Predictable-tick
+# rule: never a per-decisecond record. A run without the mutator costs one
+# attribute check per frame. Records land parentless (real-time, between
+# turns — ambient by nature). The zero-write death is already captured
+# (Unit 4's interceptor); the readout voice is composer-phase.
+CHRONO_THRESHOLDS = (600, 150)
+
+
+def chrono_poll(game, prev_ds):
+    """One frame's poll. Returns the new prev value (None when the mutator
+    is absent — self-re-arming across runs/loads)."""
+    tl = (getattr(game, 'chronomancer_time_left_ds', None)
+          if game is not None else None)
+    if tl is None:
+        return None
+    if prev_ds is not None and tl < prev_ds:
+        for th in CHRONO_THRESHOLDS:
+            if prev_ds > th >= tl:
+                journal.record('chrono_threshold', {
+                    'threshold_ds': th,
+                    'time_left_ds': tl,
+                })
+    return tl
+
+
 def install_hooks():
     """Monkeypatch Level.act_cast, Level.queue_spell, EventHandler.raise_event,
     and ChannelBuff.on_advance to populate the journal. Idempotent — safe to
