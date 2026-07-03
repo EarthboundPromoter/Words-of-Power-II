@@ -1437,9 +1437,15 @@ def install_hooks():
         # because ChannelBuff uses queue_spell directly. is_channel_continuation
         # is the verb-dispatch flag for compose_cast_section.
         target = getattr(self, 'spell_target', None)
+        # ChannelBuff.spell is the spell's bound cast METHOD, not the spell
+        # object (ChannelBuff(self.cast, ...) at every game call site), so a
+        # direct snapshot has no name/melee — downstream renders fell back to
+        # the literal 'attack'. Unwrap __self__ to the spell object, the same
+        # move the game makes for spell_name (Level.py:1527).
+        spell_obj = getattr(self.spell, '__self__', None) or self.spell
         cast_record = journal.begin_chain({
             'caster': _snapshot_unit(self.owner),
-            'spell': _snapshot_spell(self.spell),
+            'spell': _snapshot_spell(spell_obj),
             'target_x': getattr(target, 'x', None),
             'target_y': getattr(target, 'y', None),
             'is_echo': False,

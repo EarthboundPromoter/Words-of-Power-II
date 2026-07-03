@@ -323,10 +323,10 @@ def test_signature_single_target_chain_returns_tuple():
     )
     sig = _build_action_signature(chain)
     assert sig is not None
-    # (caster_name, caster_tier, spell_name, melee, kind, target_id,
-    #  target_name, dtype, damage)
-    assert sig == ('Aelf', 'minion', 'Lightning Bolt', False, 'damage',
-                   100, 'Wizard', 'Lightning', 6)
+    # (caster_name, caster_tier, spell_name, melee, is_channel, kind,
+    #  target_id, target_name, dtype, damage)
+    assert sig == ('Aelf', 'minion', 'Lightning Bolt', False, False,
+                   'damage', 100, 'Wizard', 'Lightning', 6)
 
 
 def _movement_chain(seq_start, caster, spell_name, dest_x, dest_y):
@@ -375,7 +375,7 @@ def test_signature_movement_chain():
         'Frog Hop', dest_x=22, dest_y=22,
     )
     sig = _build_action_signature(chain)
-    assert sig == ('Horned Toad', 'minion', 'Frog Hop', False,
+    assert sig == ('Horned Toad', 'minion', 'Frog Hop', False, False,
                    'movement', None, None, None)
 
 
@@ -1744,3 +1744,131 @@ def test_orphan_team_skips_wizard():
            'is_player_controlled': True, 'x': 10, 'y': 10}
     items, _ = _render_team_changes([_tj_o(wiz)], 0, True)
     assert items == []
+
+
+# ---- Channel + blocked-fragment rendering (2026-07-03 session) ----
+
+
+def _channel_start_chain(seq_start, caster, spell_name, melee=True):
+    """Chain for a channel START: the cast applies the Channeling buff to
+    the caster and deals nothing this turn (ScuttlerPinch shape)."""
+    return [
+        {
+            'sequence': seq_start, 'parent': None,
+            'event_type': 'cast_begin',
+            'payload': {
+                'caster': caster,
+                'spell': {'name': spell_name, 'melee': melee,
+                          'cur_charges': 1, 'max_charges': 1},
+                'is_player': False, 'pay_costs': True,
+            },
+            'marks': [],
+        },
+        {
+            'sequence': seq_start + 1, 'parent': seq_start,
+            'event_type': 'EventOnBuffApply',
+            'payload': {
+                'target': caster,
+                'buff': {'id': 1, 'name': 'Channeling', 'turns_left': 2,
+                         'stack_type': 0, 'buff_type': 1},
+                'stack_count_after': 1,
+            },
+            'marks': [],
+        },
+    ]
+
+
+def test_channel_continuation_melee_renders_channeled_verb():
+    """Continuation chains carry the real spell name (journal unwraps the
+    bound method) and speak the game's verb: never 'cast attack'."""
+    chain = _enemy_cast_chain(
+        10, _enemy_snap(name='Scuttler', x=6, y=3),
+        'Pinch', _ally_snap(), damage=5, dtype='Physical', melee=True,
+    )
+    chain[0]['payload']['is_channel_continuation'] = True
+    line = _render_action_chain(chain, wizard_team=0, show_coords=True,
+                                movement_verbose=False)
+    assert line == ("Scuttler (6,3) channeled Pinch, hit Ally Goatia (8,8),"
+                    " 5 Physical.")
+
+
+def test_channel_continuation_nonmelee_renders_channeled_at():
+    chain = _enemy_cast_chain(
+        10, _enemy_snap(name='Gazer', x=6, y=3),
+        'Eye Beam', _ally_snap(), damage=4, dtype='Arcane', melee=False,
+    )
+    chain[0]['payload']['is_channel_continuation'] = True
+    line = _render_action_chain(chain, wizard_team=0, show_coords=True,
+                                movement_verbose=False)
+    assert line == ("Gazer (6,3) channeled Eye Beam at Ally Goatia (8,8),"
+                    " 4 Arcane.")
+
+
+def test_channel_start_renders_began_channeling():
+    """The start cast (no damage, Channeling applied to the caster) reads
+    'began channeling {spell}', not the bare melee 'attacked.'."""
+    caster = _enemy_snap(name='Scuttler', x=6, y=3)
+    chain = _channel_start_chain(10, caster, 'Pinch', melee=True)
+    line = _render_action_chain(chain, wizard_team=0, show_coords=True,
+                                movement_verbose=False)
+    assert line == "Scuttler (6,3) began channeling Pinch."
+
+
+def test_blocked_melee_chain_suppresses_bare_attack_line():
+    """A melee whose only outcome was a shield block renders None — the
+    blocked section is the canonical voice (mirrors the game log, which
+    shows DMG_BLOCKED and no separate attack line)."""
+    caster = _enemy_snap(name='Scuttler', x=6, y=3)
+    ally = _ally_snap(uid=300, name='Sword of Light', x=5, y=10)
+    chain = [
+        {
+            'sequence': 10, 'parent': None,
+            'event_type': 'cast_begin',
+            'payload': {
+                'caster': caster,
+                'spell': {'name': 'Pinch', 'melee': True,
+                          'cur_charges': 1, 'max_charges': 1},
+                'is_player': False, 'pay_costs': True,
+            },
+            'marks': [],
+        },
+        {
+            'sequence': 11, 'parent': 10,
+            'event_type': 'shield_blocked',
+            'payload': {
+                'target': ally, 'blocked_amount': 5,
+                'damage_type': 'Physical', 'source_name': 'Pinch',
+                'shields_remaining': 1,
+            },
+            'marks': [],
+        },
+    ]
+    line = _render_action_chain(chain, wizard_team=0, show_coords=True,
+                                movement_verbose=False)
+    assert line is None
+
+
+def test_buff_section_skips_channeling_rendered_on_action_line():
+    """An orphan-marked Channeling apply (its action chain rendered
+    'began channeling X') must not double as 'gained Channeling'. An
+    unmarked one (unrendered chain) keeps its buff line."""
+    from orphan import _render_buff_applies
+    caster = _enemy_snap(name='Scuttler', x=6, y=3)
+    marked = {
+        'sequence': 11, 'parent': 10, 'event_type': 'EventOnBuffApply',
+        'payload': {
+            'target': caster,
+            'buff': {'id': 1, 'name': 'Channeling', 'turns_left': 2,
+                     'stack_type': 0, 'buff_type': 1},
+            'stack_count_after': 1,
+        },
+        'marks': [ORPHAN_MARK],
+    }
+    items, _claimed = _render_buff_applies([marked], 0, True)
+    assert items == []
+
+    unmarked = dict(marked)
+    unmarked['marks'] = []
+    items, _claimed = _render_buff_applies([unmarked], 0, True)
+    assert [it['text'] for it in items] == [
+        "Scuttler (6,3) gained Channeling, 2 turns."]

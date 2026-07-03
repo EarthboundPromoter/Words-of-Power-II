@@ -383,8 +383,12 @@ def _build_action_signature(chain):
         ((m.get('payload') or {}).get('unit') or {}).get('id') == caster_id
         for m in moved_events
     )
+    # Channel continuations render with a different verb ("channeled"),
+    # so they must not collapse with fresh casts of the same spell.
+    is_channel = bool(payload.get('is_channel_continuation'))
+
     if not damage_events and caster_moved:
-        return (caster_name, caster_tier, spell_name, melee,
+        return (caster_name, caster_tier, spell_name, melee, is_channel,
                 'movement', None, None, None)
 
     if len(damage_events) != 1:
@@ -401,7 +405,7 @@ def _build_action_signature(chain):
     # a freed unit's id() within a turn (spawn-die-spawn), and a same-name
     # discriminator keeps a reallocated id from mis-collapsing two distinct
     # targets into one line.
-    return (caster_name, caster_tier, spell_name, melee,
+    return (caster_name, caster_tier, spell_name, melee, is_channel,
             'damage', target_id, target.get('name'), dtype, damage)
 
 
@@ -561,6 +565,7 @@ def _render_action_chain(chain, wizard_team, show_coords, movement_verbose,
     spell = payload.get('spell') or {}
     spell_name = spell.get('name') or 'attack'
     melee = bool(spell.get('melee'))
+    is_channel = bool(payload.get('is_channel_continuation'))
     caster_id = caster.get('id')
     caster_name = caster.get('name')
 
@@ -630,7 +635,7 @@ def _render_action_chain(chain, wizard_team, show_coords, movement_verbose,
 
     main = _render_cast_line(chain, caster, spell_name, melee, caster_id,
                              own_damage, wizard_team, show_coords,
-                             movement_verbose, dead_ids)
+                             movement_verbose, dead_ids, is_channel)
     foreign_lines = _render_foreign_damage(
         foreign_damage, wizard_team, show_coords, dead_ids)
 
@@ -662,11 +667,13 @@ def _render_action_chain(chain, wizard_team, show_coords, movement_verbose,
 
 def _render_cast_line(chain, caster, spell_name, melee, caster_id,
                       damage_events, wizard_team, show_coords,
-                      movement_verbose, dead_ids=None):
+                      movement_verbose, dead_ids=None, is_channel=False):
     """The caster's own action line (verb + targets), over the chain's OWN
     damage events. A target that died carries the death capstone (', killed'
     single / ', N killed' for an AoE group). dead_ids is the set of unit ids
-    that died in this chain."""
+    that died in this chain. is_channel marks a channel continuation —
+    verb 'channeled' (the game's word, Level.py:2152) instead of
+    'cast'/'hit'-bare."""
     dead_ids = dead_ids or set()
     # Movement-via-cast: chain has EventOnMoved on the caster but no
     # damage (Frog Hop, Dash, Blink-style enemy spells). Verbose flag
@@ -696,8 +703,31 @@ def _render_cast_line(chain, caster, spell_name, melee, caster_id,
             if show_coords:
                 return f"{prefix}{name} cast {spell_name}, moved to ({dest_x},{dest_y})."
             return f"{prefix}{name} cast {spell_name}, moved."
-        # No caster movement found — fall through to plain cast line.
+        # No caster movement found — resolve the no-damage outcome.
+        # Blocked-outcome chains: the block line (_render_shield_blocks for
+        # allies/enemies, crisis for the wizard) is the canonical voice for
+        # the hit — mirroring the game log, which shows DMG_BLOCKED and no
+        # separate attack line. A bare "X attacked." here would just be a
+        # disconnected fragment ahead of it. Returning None leaves the
+        # chain unclaimed (claim==render), so the blocked section still
+        # surfaces the outcome.
+        if any(r.get('event_type') == 'shield_blocked' for r in chain):
+            return None
         caster_str = _name_with_coord(caster, wizard_team, show_coords)
+        if is_channel:
+            # A channel tick that produced nothing this turn.
+            return f"{caster_str} channeled {spell_name}."
+        # Channel START: the cast's whole outcome is the caster gaining
+        # the Channeling buff (damage comes on later ticks). "began
+        # channeling" derives from the buff's own description
+        # ("Channeling {spell}", Level.py:1549).
+        for r in chain:
+            if r.get('event_type') != 'EventOnBuffApply':
+                continue
+            p = r.get('payload') or {}
+            if (((p.get('buff') or {}).get('name')) == 'Channeling'
+                    and (p.get('target') or {}).get('id') == caster_id):
+                return f"{caster_str} began channeling {spell_name}."
         if melee:
             return f"{caster_str} attacked."
         return f"{caster_str} cast {spell_name}."
@@ -713,6 +743,10 @@ def _render_cast_line(chain, caster, spell_name, melee, caster_id,
         dtype = dpayload.get('damage_type')
         dtype_str = f" {dtype}" if dtype else ""
         killed = _killed_suffix(1 if target.get('id') in dead_ids else 0)
+        if is_channel:
+            if melee:
+                return f"{caster_str} channeled {spell_name}, hit {target_str}, {damage}{dtype_str}{killed}."
+            return f"{caster_str} channeled {spell_name} at {target_str}, {damage}{dtype_str}{killed}."
         if melee:
             return f"{caster_str} hit {target_str}, {damage}{dtype_str}{killed}."
         return f"{caster_str} cast {spell_name} at {target_str}, {damage}{dtype_str}{killed}."
@@ -748,6 +782,10 @@ def _render_cast_line(chain, caster, spell_name, melee, caster_id,
                 f"{len(members)} {prefix}{plural}{coords}, {damage}{dtype_str}{killed}"
             )
     targets_clause = "; ".join(parts)
+    if is_channel:
+        if melee:
+            return f"{caster_str} channeled {spell_name}, hit {targets_clause}."
+        return f"{caster_str} channeled {spell_name} at {targets_clause}."
     if melee:
         return f"{caster_str} hit {targets_clause}."
     return f"{caster_str} cast {spell_name} at {targets_clause}."
@@ -861,6 +899,9 @@ def _render_collapsed_action(items, wizard_team, show_coords, movement_verbose):
     spell = payload.get('spell') or {}
     spell_name = spell.get('name') or 'attack'
     melee = bool(spell.get('melee'))
+    # Channel flag rides the collapse signature, so a group is uniformly
+    # continuations or uniformly fresh casts.
+    is_channel = bool(payload.get('is_channel_continuation'))
     caster_name = caster.get('name') or 'Unknown'
     casters = [item[0].get('payload', {}).get('caster', {}) for item in items]
     plural = _pluralize(caster_name)
@@ -927,6 +968,14 @@ def _render_collapsed_action(items, wizard_team, show_coords, movement_verbose):
     killed = ", killed" if dead else ""
 
     target_str = _name_with_coord(target, wizard_team, show_coords)
+    if is_channel:
+        if melee:
+            return (f"{casters_str} channeled {spell_name},"
+                    f" hit {target_str}, {damage}{dtype_str} each{killed}.")
+        return (
+            f"{casters_str} channeled {spell_name} at {target_str},"
+            f" {damage}{dtype_str} each{killed}."
+        )
     if melee:
         return f"{casters_str} hit {target_str}, {damage}{dtype_str} each{killed}."
     return (
@@ -1312,6 +1361,14 @@ def _render_buff_applies(records, wizard_team, show_coords):
         b = p.get('buff') or {}
         bname = b.get('name')
         if not bname:
+            continue
+        if bname == 'Channeling' and _has_mark(r, ORPHAN_MARK):
+            # Its action chain already rendered "began channeling {spell}"
+            # (the action section runs first and claims its chains); a
+            # trailing "gained Channeling" would re-state that namelessly.
+            # Out-of-chain Channeling applies (unrendered chains) keep
+            # their buff line.
+            claimed.append(r)
             continue
         btype = b.get('buff_type')
         if btype not in (1, 2):

@@ -1719,6 +1719,38 @@ def _is_empty_autofire(chain):
     return non_cast_count == 0
 
 
+def _no_damage_expected(chain):
+    """True when 'No damage.' would be noise rather than information:
+    the root cast targeted the caster's own tile (self-buff casts like
+    Ride Drake carry no damage expectation), or the cast's outcome was
+    starting a channel (the caster gains the Channeling buff; damage
+    comes on later ticks). Owner ruling 2026-07-03."""
+    root = next(
+        (r for r in chain
+         if r.get('event_type') == 'cast_begin' and r.get('parent') is None),
+        None,
+    )
+    if root is None:
+        root = next(
+            (r for r in chain if r.get('event_type') == 'cast_begin'), None)
+    if root is None:
+        return False
+    payload = root.get('payload') or {}
+    caster = payload.get('caster') or {}
+    tx, ty = payload.get('target_x'), payload.get('target_y')
+    if tx is not None and (tx, ty) == (caster.get('x'), caster.get('y')):
+        return True
+    caster_id = caster.get('id')
+    for r in chain:
+        if r.get('event_type') != 'EventOnBuffApply':
+            continue
+        p = r.get('payload') or {}
+        if (((p.get('buff') or {}).get('name')) == 'Channeling'
+                and (p.get('target') or {}).get('id') == caster_id):
+            return True
+    return False
+
+
 def compose_digest(chain):
     """Compose the full digest output string for one keypress chain.
 
@@ -1741,6 +1773,18 @@ def compose_digest(chain):
 
     cast_count = sum(1 for r in chain if r.get('event_type') == 'cast_begin')
     damage_count = sum(1 for r in chain if r.get('event_type') == 'EventOnDamaged')
+    # Blocked hits produce NO EventOnDamaged, so a fully-blocked cast used
+    # to look "trivial", route streamlined, and read "No damage." while the
+    # target's shield pips dropped (the Boggart Assassin specimen). Any
+    # non-wizard blocked hit routes standard, whose Surviving section
+    # renders the 'blocked by N shields' clause (_build_target_hits keys
+    # blocks on the PreDamaged→ShieldRemoved pair; shield_blocked is the
+    # synthesized sibling — count either). Wizard blocks stay crisis's.
+    blocked_count = sum(
+        1 for r in chain
+        if r.get('event_type') in ('EventOnShieldRemoved', 'shield_blocked')
+        and not (((r.get('payload') or {}).get('target') or {})
+                 .get('is_player_controlled')))
     has_spawns = bool(compose_spawned_section(chain))
     has_debuffs = bool(compose_debuffs_applied_section(chain))
     has_buffs = bool(compose_buffs_applied_section(chain))
@@ -1749,7 +1793,7 @@ def compose_digest(chain):
     has_shield_strips = bool(compose_shields_stripped_section(chain))
     has_team_changes = bool(compose_team_changes_section(chain))
 
-    if (cast_count == 1 and damage_count <= 1
+    if (cast_count == 1 and damage_count <= 1 and blocked_count == 0
             and not has_spawns and not has_debuffs and not has_buffs
             and not has_move and not has_shield_grants and not has_shield_strips
             and not has_team_changes):
@@ -1781,10 +1825,13 @@ def _compose_standard(chain):
 
     # Empty-chain handling: only emit "No damage." when all
     # outcome-bearing sections are empty (shield grants/strips count as
-    # outcomes — a Siphon that lands no damage still did something).
+    # outcomes — a Siphon that lands no damage still did something) AND
+    # the cast carried a damage expectation (self-target buffs and
+    # channel starts don't — _no_damage_expected).
     if (cast and not killed and not surviving and not debuffs
             and not buffs and not spawned and not shields_stripped
-            and not shields_granted and not team_changes):
+            and not shields_granted and not team_changes
+            and not _no_damage_expected(chain)):
         parts.append("No damage.")
     else:
         if killed:
@@ -1855,8 +1902,13 @@ def _compose_streamlined(chain):
         break
 
     if target_id is None or not hits_by_target.get(target_id):
-        # No damage landed in this chain — empty form.
-        line = f"{cast_verb} {spell_name}. No damage."
+        # No damage landed in this chain — empty form. Self-target buff
+        # casts and channel starts skip the "No damage." clause (noise on
+        # a cast with no damage expectation).
+        if _no_damage_expected(chain):
+            line = f"{cast_verb} {spell_name}."
+        else:
+            line = f"{cast_verb} {spell_name}. No damage."
         if side_inline:
             return f"{line} {side_inline}"
         return line

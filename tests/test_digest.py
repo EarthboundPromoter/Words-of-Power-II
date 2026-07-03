@@ -2874,3 +2874,74 @@ def test_unit1_container_kinds_known_to_digest_telemetry():
     chain += [{"event_type": k, "payload": {}} for k in cd.ALL_KINDS]
     digest_mod._maybe_emit_unmodeled(tel, 1, chain, ["Cast Fireball."])
     assert tel.calls == []
+
+
+# ---- Digest-semantics session (2026-07-03): blocked routing + No-damage ----
+
+
+def _player_cast_at(seq, spell_name, tx, ty):
+    """A player cast_begin carrying target coordinates (journal act_cast
+    payload shape)."""
+    rec = _player_cast(seq, spell_name=spell_name)
+    rec['payload']['target_x'] = tx
+    rec['payload']['target_y'] = ty
+    return rec
+
+
+def test_blocked_only_cast_routes_standard_not_no_damage():
+    """A fully-blocked hit must never read 'No damage.' (the Boggart
+    Assassin specimen, BUG_QUEUE 2026-07-03): the block produces no
+    EventOnDamaged, so the old router saw a trivial chain and the
+    streamlined form dropped the outcome. Blocked hits route standard."""
+    target = _target_snap(1, name="Boggart Assassin", x=12, y=9,
+                          cur_hp=6, max_hp=6)
+    chain = [
+        _player_cast(1, spell_name="Blood Bullet"),
+        _pre_damage(2, 1, target, spell="Blood Bullet", dtype="Physical",
+                    dmg_pre=10, dmg_post=10),
+        _shield_removed(3, 1, target),
+    ]
+    out = compose_digest(chain)
+    assert "No damage" not in out
+    assert out == ("Cast Blood Bullet. 1 surviving: Boggart Assassin (12,9): "
+                   "Blood Bullet 10 Physical blocked by 1 shield.")
+
+
+def test_self_target_cast_skips_no_damage():
+    """'No damage.' is noise on a self-target buff cast (Ride Drake) —
+    suppressed when the cast targeted the caster's own tile."""
+    chain = [_player_cast_at(1, "Ride Drake", 10, 10)]
+    assert compose_digest(chain) == "Cast Ride Drake."
+
+
+def test_self_target_cast_with_side_keeps_side_only():
+    """Self-target cast with a wizard buff outcome: the side content
+    speaks, 'No damage.' does not."""
+    wiz = _target_snap(_WIZARD_ID, name="Wizard", x=10, y=10, tier="wizard")
+    chain = [
+        _player_cast_at(1, "Ride Drake", 10, 10),
+        _buff_apply_event(2, 1, wiz, buff_name="Drake Rider", turns_left=10),
+    ]
+    out = compose_digest(chain)
+    assert "No damage" not in out
+    assert out.startswith("Cast Ride Drake.")
+    assert "Drake Rider" in out
+
+
+def test_channel_start_skips_no_damage():
+    """A cast whose outcome is starting a channel (caster gains the
+    Channeling buff) carries no damage expectation this turn."""
+    wiz = _target_snap(_WIZARD_ID, name="Wizard", x=10, y=10, tier="wizard")
+    chain = [
+        _player_cast(1, spell_name="Searing Orb"),
+        _buff_apply_event(2, 1, wiz, buff_name="Channeling", turns_left=5),
+    ]
+    out = compose_digest(chain)
+    assert "No damage" not in out
+
+
+def test_offensive_whiff_still_reads_no_damage():
+    """The suppression is scoped: a normal targeted cast that produced
+    nothing still reads 'No damage.' (whiff information is real)."""
+    chain = [_player_cast_at(1, "Magic Missile", 5, 5)]
+    assert compose_digest(chain) == "Cast Magic Missile. No damage."
