@@ -6,6 +6,13 @@ an early work-in-progress RW3 port — expect frequent changes.
 ## Unreleased
 
 ### Fixed
+- Clearing a realm no longer swallows the final action's narration. The winning cast's
+  results now speak first, then "Level complete" — followed, for the first time, by the
+  realm summary the game shows on its stats panel: turns taken, spell casts, top damage
+  dealt and taken. (The summary code existed but read a stats file the game hadn't
+  written yet, so it had never spoken.)
+- Item pickups after a realm is cleared now speak — they were silently queued and
+  dropped, every level, all along.
 - Spell upgrades whose whole effect is stat changes (e.g. Lightning Bolt's Blood Horizon)
   no longer go silent after their level line — every upgrade now reads exactly what the
   game draws: stat gain lines, description, added tags, stack type.
@@ -21,6 +28,13 @@ an early work-in-progress RW3 port — expect frequent changes.
 - Summon previews no longer read "0 of 48 HP" — they read max HP, as drawn.
 
 ### Added
+- Auto pickup (the game's A key) now reports one summary when the collection walk ends,
+  instead of announcing every item in stride: Memory Orbs with SP gained and the new
+  total, Ruby Hearts with the max-HP gain and current HP, components by name. Canceling
+  the walk mid-route summarizes what was gathered so far. (Known quirk: the walk's final
+  item announces itself in full right after the summary.)
+- Pressing the Auto pickup key with nothing left to collect says "Nothing to pick up" —
+  the game itself gives no feedback there.
 - Rift previews now read each component's tags (shown in-game as colored letters) and
   distinguish the boss tiers the game shows by color: "Boss:" for encounter bosses,
   "Elite:" for named threats.
