@@ -2386,13 +2386,26 @@ class LoSTracker:
     def on_unit_added(self, evt):
         """Catch spawns/summons that appear directly in LoS."""
         try:
+            unit = evt.unit
+            if _is_player(unit):
+                # The player LANDING is the seed moment on ordinary level
+                # transitions: the game runs setup_level BEFORE spawn/deploy
+                # places the wizard, so the setup-time seed (which requires
+                # player_unit to exist) only ever covered save-loads. That
+                # hole kept the whole tracker — every enters-LoS
+                # announcement — silent in normal play since the port
+                # began. Surfaced by the Unit 5 smoke check; fixed
+                # 2026-07-03. Seed against the level the player was
+                # actually added to (add_obj stamps unit.level first).
+                if not self._seeded:
+                    lvl = getattr(unit, 'level', None)
+                    if lvl is not None:
+                        self.seed(lvl, unit)
+                return
             if _level_complete[0] or not self._seeded:
                 return
             game = _game_ref[0]
             if not game or not game.p1:
-                return
-            unit = evt.unit
-            if _is_player(unit):
                 return
             if not unit.is_alive() or not Level.are_hostile(unit, game.p1):
                 return

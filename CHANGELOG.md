@@ -6,6 +6,12 @@ an early work-in-progress RW3 port — expect frequent changes.
 ## Unreleased
 
 ### Fixed
+- "X appears" announcements are back — they had been silent on every normally-entered
+  level since the RW3 port began. The enemy-enters-view tracker only armed itself when a
+  level already contained the wizard at load time, which is true after loading a save and
+  false on every ordinary rift transition (the game builds the level first and places you
+  second). The tracker now arms the moment the wizard lands, so enemies walking into view
+  — and enemies revealed by melting walls — announce on fresh levels too.
 - Cloud arrivals no longer announce a cloud that never landed. When a new cloud tries
   to claim a tile whose current cloud refuses to be replaced, the game silently discards
   the newcomer — the arrival summary used to announce it anyway.
