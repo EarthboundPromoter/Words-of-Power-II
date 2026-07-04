@@ -1,5 +1,5 @@
 # Rift Wizard 2 Screen Reader Mod — Words of Power
-MOD_VERSION = "0.3.1"
+MOD_VERSION = "0.3.2"
 
 import sys
 import os
@@ -96,60 +96,65 @@ _SETTINGS_SCHEMA = [
      "# to journal_debug.log. Used by the mod author for debugging the data-model\n"
      "# pipeline. No effect on speech behavior. Leave false unless instructed.\n"
      "# Default: false"),
-    ('words_of_power', 'log_capture_enabled', 'true',
-     "# Capture the game's combat-log writes as internal validation records\n"
-     "# (coverage checking only — never spoken). Safe to leave on; set false\n"
-     "# as a field kill switch if instructed to diagnose a problem.\n"
-     "# Default: true"),
-    ('words_of_power', 'container_diff_enabled', 'true',
-     "# Capture in-place stat-container changes (resistances, tags, spell\n"
-     "# charges, stat bonuses) as internal records for future narration —\n"
-     "# nothing is spoken yet. Safe to leave on; set false as a field kill\n"
-     "# switch if instructed to diagnose a problem.\n"
-     "# Default: true"),
-    ('words_of_power', 'cause_markers_enabled', 'true',
-     "# Record cause-markers around component pickups, equipment-triggered\n"
-     "# component replays, and equipment crafting, so their effects carry\n"
-     "# their true cause internally — nothing is spoken yet. Safe to leave\n"
-     "# on; set false as a field kill switch if instructed to diagnose a\n"
-     "# problem.\n"
-     "# Default: true"),
-    ('words_of_power', 'reactive_markers_enabled', 'true',
-     "# Record which equipment/buff/passive REACTED when a reactive effect\n"
-     "# fires (the icon-flash family), so the effect carries its true cause\n"
-     "# internally — nothing is spoken yet. Safe to leave on; set false as a\n"
-     "# field kill switch if instructed to diagnose a problem.\n"
-     "# Default: true"),
+    ('words_of_power', 'log_capture_enabled', 'false',
+     "# Dev diagnostic: capture the game's combat-log writes as internal\n"
+     "# validation records (coverage checking only — never spoken). Adds\n"
+     "# capture work per combat-log line plus a per-turn coverage sweep;\n"
+     "# the cost is measurable in dense fights. Leave false unless\n"
+     "# instructed to enable it for diagnosis.\n"
+     "# Default: false"),
+    ('words_of_power', 'container_diff_enabled', 'false',
+     "# Dev diagnostic: capture in-place stat-container changes (resistances,\n"
+     "# tags, spell charges, stat bonuses) as internal records for future\n"
+     "# narration — nothing is spoken yet. Compares every unit's containers\n"
+     "# at each causal boundary, so the cost grows steeply with unit count\n"
+     "# (swarm fights are the worst case). Leave false unless instructed to\n"
+     "# enable it for diagnosis.\n"
+     "# Default: false"),
+    ('words_of_power', 'cause_markers_enabled', 'false',
+     "# Dev diagnostic: record cause-markers around component pickups,\n"
+     "# equipment-triggered component replays, and equipment crafting, so\n"
+     "# their effects carry their true cause internally — nothing is spoken\n"
+     "# yet. Leave false unless instructed to enable it for diagnosis.\n"
+     "# Default: false"),
+    ('words_of_power', 'reactive_markers_enabled', 'false',
+     "# Dev diagnostic: record which equipment/buff/passive REACTED when a\n"
+     "# reactive effect fires (the icon-flash family), so the effect carries\n"
+     "# its true cause internally — nothing is spoken yet. Leave false\n"
+     "# unless instructed to enable it for diagnosis.\n"
+     "# Default: false"),
     ('words_of_power', 'aoe_group_names', 'true',
      "# For spells whose area is a linked group of units (Mass Melt's chain\n"
      "# and similar): after the targeted unit, list who else is in the\n"
      "# group by name, allies first. Set false to hear the plain\n"
      "# \"Within AoE\" count phrasing for those spells instead.\n"
      "# Default: true"),
-    ('words_of_power', 'digest_enabled', 'false',
+    ('words_of_power', 'digest_enabled', 'true',
      "# Enable the direct-action digest: a composed summary of one player\n"
      "# keypress's full effect chain (cast, damage, kills, procs, side-effects)\n"
      "# emitted at turn-end as a single utterance, replacing the per-event\n"
      "# combat speech that would otherwise come from the batcher for that\n"
      "# chain. Crisis events (player damage taken, HP threshold, wizard\n"
      "# death) continue to fire immediately regardless of this setting.\n"
-     "# Default: false (opt-in; first-release rollout)"),
+     "# Default: true (the composer pipeline is the shipped speech engine\n"
+     "# as of 0.3.2)"),
     # ------------------------------------------------------------------
-    # [Composer] — the new section-producer pipeline (crisis + orphan,
-    # alongside the digest). Flags default OFF for a strangler-fig
-    # rollout: the legacy batcher continues handling combat narration
-    # until producers are validated in parallel mode and the kill
-    # switch is flipped.
+    # [Composer] — the section-producer pipeline (crisis + orphan,
+    # alongside the digest). As of 0.3.2 this pipeline IS the shipped
+    # combat narration: producers on, legacy combat handling off.
+    # (0.3.1's field sessions ran this configuration throughout; the
+    # planned parallel-mode rollout was ratified rather than rolled
+    # back.)
     # ------------------------------------------------------------------
-    ('Composer', 'crisis_enabled', 'false',
+    ('Composer', 'crisis_enabled', 'true',
      "# Enable the crisis producer: foregrounds player-state-change events\n"
      "# (damage taken, HP threshold, debuffs applied, buffs fading, wizard\n"
      "# death, cloud-on-tile, displacement) at the top of each turn's\n"
      "# utterance via the Wizard-prefix convention. Replaces the legacy\n"
      "# batcher's IMMEDIATE-tier handling of these events when also\n"
      "# legacy_batcher_combat_enabled=false.\n"
-     "# Default: false (opt-in; parallel-mode validation phase)"),
-    ('Composer', 'orphan_enabled', 'false',
+     "# Default: true (shipped as of 0.3.2)"),
+    ('Composer', 'orphan_enabled', 'true',
      "# Enable the orphan-window composer: composes the ambient/enemy-turn\n"
      "# body of each turn's utterance — non-player actions (enemy + ally\n"
      "# casts, attacks, deaths) and status ticks (DOTs, fades, unfreeze).\n"
@@ -157,8 +162,8 @@ _SETTINGS_SCHEMA = [
      "# producer at a distinct priority. Replaces the legacy batcher's\n"
      "# collapsed-tier combat handling when also\n"
      "# legacy_batcher_combat_enabled=false.\n"
-     "# Default: false (opt-in; parallel-mode validation phase)"),
-    ('Composer', 'equipment_enabled', 'false',
+     "# Default: true (shipped as of 0.3.2)"),
+    ('Composer', 'equipment_enabled', 'true',
      "# Enable the equipment producer: composes gear-driven narrative\n"
      "# (equipment_tick chains — sub-cast items like Explosive Spore\n"
      "# Manual, direct-effect items like Stone Mask) at priority 150,\n"
@@ -167,16 +172,16 @@ _SETTINGS_SCHEMA = [
      "# narrative evolve on different timelines. Replaces legacy batcher\n"
      "# coverage of equipment effects when also\n"
      "# legacy_batcher_combat_enabled=false.\n"
-     "# Default: false (opt-in; parallel-mode validation phase)"),
-    ('Composer', 'legacy_batcher_combat_enabled', 'true',
-     "# Strangler-fig kill switch. When true (default), the legacy batcher's\n"
-     "# combat handlers continue to render damage / casts / deaths / heals /\n"
-     "# buffs / shields / spawns alongside the digest. When false, those\n"
-     "# handlers bail at a shared check at top, leaving combat narration\n"
-     "# entirely to the new pipeline (digest + crisis + equipment + orphan).\n"
-     "# Flip to false only after crisis_enabled, equipment_enabled, and\n"
-     "# orphan_enabled have all been validated in parallel-mode play.\n"
-     "# Default: true"),
+     "# Default: true (shipped as of 0.3.2)"),
+    ('Composer', 'legacy_batcher_combat_enabled', 'false',
+     "# Strangler-fig kill switch, historical sense: when true, the legacy\n"
+     "# batcher's combat handlers render damage / casts / deaths / heals /\n"
+     "# buffs / shields / spawns ALONGSIDE the composer pipeline (doubled\n"
+     "# speech — parallel comparison and debugging only). When false\n"
+     "# (default), those handlers bail at a shared check at top and combat\n"
+     "# narration belongs entirely to the pipeline (digest + crisis +\n"
+     "# equipment + orphan).\n"
+     "# Default: false (the pipeline is the shipped narration as of 0.3.2)"),
     ('Composer', 'dot_renotify_enabled', 'false',
      "# Renotify the player each turn while a damage-over-time effect is\n"
      "# active on the wizard (Poisoned, Burning, Bleeding, etc.). When\n"
@@ -263,20 +268,19 @@ class _Cfg:
     show_coordinates = _settings.getboolean('words_of_power', 'show_coordinates', fallback=True)
     pathfind_marked = _settings.getboolean('words_of_power', 'pathfind_marked', fallback=True)
     journal_log_enabled = _settings.getboolean('words_of_power', 'journal_log_enabled', fallback=False)
-    log_capture_enabled = _settings.getboolean('words_of_power', 'log_capture_enabled', fallback=True)
-    container_diff_enabled = _settings.getboolean('words_of_power', 'container_diff_enabled', fallback=True)
-    cause_markers_enabled = _settings.getboolean('words_of_power', 'cause_markers_enabled', fallback=True)
-    reactive_markers_enabled = _settings.getboolean('words_of_power', 'reactive_markers_enabled', fallback=True)
+    log_capture_enabled = _settings.getboolean('words_of_power', 'log_capture_enabled', fallback=False)
+    container_diff_enabled = _settings.getboolean('words_of_power', 'container_diff_enabled', fallback=False)
+    cause_markers_enabled = _settings.getboolean('words_of_power', 'cause_markers_enabled', fallback=False)
+    reactive_markers_enabled = _settings.getboolean('words_of_power', 'reactive_markers_enabled', fallback=False)
     aoe_group_names = _settings.getboolean('words_of_power', 'aoe_group_names', fallback=True)
-    digest_enabled = _settings.getboolean('words_of_power', 'digest_enabled', fallback=False)
-    # [Composer] — new-pipeline flags. Defaults match the conservative
-    # strangler-fig rollout: producers off, legacy batcher on. Flip
-    # crisis/orphan true after wiring; flip legacy off after validation.
-    crisis_enabled = _settings.getboolean('Composer', 'crisis_enabled', fallback=False)
-    orphan_enabled = _settings.getboolean('Composer', 'orphan_enabled', fallback=False)
-    equipment_enabled = _settings.getboolean('Composer', 'equipment_enabled', fallback=False)
+    digest_enabled = _settings.getboolean('words_of_power', 'digest_enabled', fallback=True)
+    # [Composer] — pipeline flags. As of 0.3.2 the composer pipeline is the
+    # shipped speech engine: producers on, legacy combat narration off.
+    crisis_enabled = _settings.getboolean('Composer', 'crisis_enabled', fallback=True)
+    orphan_enabled = _settings.getboolean('Composer', 'orphan_enabled', fallback=True)
+    equipment_enabled = _settings.getboolean('Composer', 'equipment_enabled', fallback=True)
     legacy_batcher_combat_enabled = _settings.getboolean(
-        'Composer', 'legacy_batcher_combat_enabled', fallback=True
+        'Composer', 'legacy_batcher_combat_enabled', fallback=False
     )
     dot_renotify_enabled = _settings.getboolean('Composer', 'dot_renotify_enabled', fallback=False)
     crisis_damage_summed = _settings.getboolean('Composer', 'crisis_damage_summed', fallback=False)

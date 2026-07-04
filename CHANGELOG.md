@@ -41,6 +41,26 @@ an early work-in-progress RW3 port — expect frequent changes.
   flips (the Snow Queen's Diamond Aegis) are now recorded internally with their
   causes — groundwork for transform announcements in a later release.
 
+## 2026-07-04 — 0.3.2
+
+### Changed
+- The composer speech pipeline (direct-action digest, crisis lines, ambient enemy-turn
+  narration, equipment narration) is now the default speech engine. 0.3.1 installs were
+  already running it; 0.3.2 makes it the default.
+
+### Fixed
+- 0.3.1's settings.ini enabled the mod's internal diagnostics for all players: per-event
+  disk writes (journal_debug.log) plus capture instruments whose cost climbs steeply in
+  crowded fights. The result was heavy slowdown, worst in swarm fights. settings.ini is
+  no longer distributed — the mod generates one with correct defaults on first run — and
+  the five diagnostic flags (journal_log_enabled, log_capture_enabled,
+  container_diff_enabled, cause_markers_enabled, reactive_markers_enabled) now default
+  to off.
+- Upgrading from 0.3.1: delete mods/screen_reader/settings.ini and let the mod
+  regenerate it. Speech is unchanged; the diagnostics turn off. The mod never modifies
+  values already in your file, so this step is manual. If you've customized other
+  settings, instead set the five flags above to false by hand.
+
 ## 2026-07-03 — 0.3.1
 
 ### Added

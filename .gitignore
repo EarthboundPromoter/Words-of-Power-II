@@ -14,3 +14,7 @@ docs/
 build/
 dist/
 *.spec
+
+# The live config is per-install state, never a release artifact — the
+# v0.3.1 dev-config shipping accident is why this line exists.
+settings.ini
