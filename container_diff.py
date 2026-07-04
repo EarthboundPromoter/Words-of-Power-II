@@ -242,38 +242,60 @@ import dirty_containers as _dirty
 _WRAPPED_ATTRS = ('resists', 'cool_downs', 'tags')
 
 
-def _wrap_unit_containers(unit):
-    """Install dirty-marking twins on a unit's watched containers.
-    Idempotent and owner-aware (D2): already-owned wrappers are skipped;
-    a wrapper owned by a DIFFERENT unit (the Grey Goo donation shape) is
-    re-owned IN PLACE — object identity is preserved because the game may
-    intend the alias. Assignment bypasses the (journal-patched)
-    Unit.__setattr__ via object.__setattr__: no records, no marks, and no
-    interaction with the step-3 rebind watch. Pure observation setup — any
-    failure leaves the plain container in place (full-sweep-era behavior)."""
-    oid = id(unit)
+def _wrap_in_place(unit, name, cur):
+    """Wrap ONE container attr on a unit, owner-aware (D2): an
+    already-owned wrapper is left alone; a wrapper owned by a DIFFERENT
+    unit (the Grey Goo donation shape) is re-owned IN PLACE — object
+    identity preserved because the game may intend the alias; a plain
+    container is replaced by its wrapped twin. Assignment bypasses the
+    (journal-patched) Unit.__setattr__ via object.__setattr__: no records,
+    no marks, no re-entry into the step-3 rebind watch."""
     from collections import defaultdict
+    oid = id(unit)
+    if isinstance(cur, _dirty._DirtyMarkMixin):
+        if cur._owner_id != oid:
+            cur._owner_id = oid
+        return
+    if isinstance(cur, defaultdict):
+        wrapped = _dirty.DirtyDefaultDict(cur.default_factory, cur)
+    elif isinstance(cur, dict):
+        wrapped = _dirty.DirtyDict(cur)
+    elif isinstance(cur, list):
+        wrapped = _dirty.DirtyList(cur)
+    else:
+        return
+    _dirty.own(wrapped, oid)
+    object.__setattr__(unit, name, wrapped)
+
+
+def _wrap_unit_containers(unit):
+    """Install dirty-marking twins on all of a unit's watched containers.
+    Idempotent. Pure observation setup — any failure leaves the plain
+    container in place (full-sweep-era behavior)."""
     for name in _WRAPPED_ATTRS:
         try:
             cur = getattr(unit, name, None)
-            if cur is None:
-                continue
-            if isinstance(cur, _dirty._DirtyMarkMixin):
-                if cur._owner_id != oid:
-                    cur._owner_id = oid
-                continue
-            if isinstance(cur, defaultdict):
-                wrapped = _dirty.DirtyDefaultDict(cur.default_factory, cur)
-            elif isinstance(cur, dict):
-                wrapped = _dirty.DirtyDict(cur)
-            elif isinstance(cur, list):
-                wrapped = _dirty.DirtyList(cur)
-            else:
-                continue
-            _dirty.own(wrapped, oid)
-            object.__setattr__(unit, name, wrapped)
+            if cur is not None:
+                _wrap_in_place(unit, name, cur)
         except Exception:
             pass
+
+
+def _on_watched_attr_assigned(unit, name, value):
+    """The step-3 rebind/scalar observer, called by the journal's setattr
+    interceptor AFTER the store (store-first discipline is journal-side).
+    Seeded units only: template construction (Monsters factories assigning
+    unit.tags = [...] before add_obj) stays untouched — those wrap at seed.
+    Marks the owner dirty, then re-wraps a rebound container so coverage
+    never lapses (the cool_downs per-turn comprehension would otherwise
+    silently swap a wrapper for a plain dict). turns_to_death is mark-only
+    (a plain int; the store diffs it, nothing wraps it)."""
+    entry = store._units.get(id(unit))
+    if entry is None or entry[0] is not unit:
+        return
+    _dirty.dirty_ids.add(id(unit))
+    if name != 'turns_to_death':
+        _wrap_in_place(unit, name, value)
 
 
 def _unit_snapshot(unit, wizard):
@@ -862,6 +884,16 @@ def install(log_fn=None):
 
     _install_span_sweeps()
     _install_ctx_property(level_cls)
+
+    # Step-3 rebind/scalar watch: the journal's setattr interceptor calls
+    # our observer for these names (whole-container rebinds re-wrap +
+    # mark; turns_to_death marks only).
+    try:
+        import journal as _journal_mod
+        _journal_mod.register_container_watch(
+            _WRAPPED_ATTRS + ('turns_to_death',), _on_watched_attr_assigned)
+    except Exception as e:
+        _note_failure('register_container_watch', e)
 
     _installed = True
     if _log_fn:

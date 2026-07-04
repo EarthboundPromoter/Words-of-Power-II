@@ -132,3 +132,63 @@ def test_write_between_add_and_first_sweep_records():
     assert len(new) == 1
     payload = new[0]['payload']
     assert payload['unit']['name'] == "Wolf"
+
+
+# ---- step 3: the rebind/scalar watch (through the REAL setattr path) ----
+
+def test_cooldown_comprehension_rebind_rewraps_and_marks():
+    # The engine's per-turn shape (Level.py:2108): pre_advance rebinds
+    # cool_downs to a fresh PLAIN dict via comprehension. The watch must
+    # mark the unit and re-wrap the incoming dict, or coverage silently
+    # lapses from that turn on.
+    lvl = _fresh_level()
+    u = _unit("Wolf")
+    lvl.add_obj(u, 3, 3)
+    dirty_containers.dirty_ids.clear()
+    u.cool_downs = {k: v - 1 for k, v in u.cool_downs.items() if v > 1}
+    assert id(u) in dirty_containers.dirty_ids
+    assert isinstance(u.cool_downs, DirtyDict)
+    assert u.cool_downs._owner_id == id(u)
+
+
+def test_resists_rebind_grey_goo_shape():
+    # Equipment.py:3076 generalized: a plain template dict assigned onto a
+    # live unit's resists. Watch marks + wraps; contents preserved.
+    lvl = _fresh_level()
+    u = _unit("Slime")
+    lvl.add_obj(u, 3, 3)
+    dirty_containers.dirty_ids.clear()
+    from collections import defaultdict
+    donor = defaultdict(lambda: 0)
+    donor[Level.Tags.Poison] = 100
+    u.resists = donor
+    assert id(u) in dirty_containers.dirty_ids
+    assert isinstance(u.resists, DirtyDefaultDict)
+    assert u.resists._owner_id == id(u)
+    assert u.resists[Level.Tags.Poison] == 100
+
+
+def test_turns_to_death_scalar_marks():
+    lvl = _fresh_level()
+    u = _unit("Wisp")
+    lvl.add_obj(u, 3, 3)
+    dirty_containers.dirty_ids.clear()
+    u.turns_to_death = 5
+    assert id(u) in dirty_containers.dirty_ids
+    dirty_containers.dirty_ids.clear()
+    u.turns_to_death -= 1
+    assert id(u) in dirty_containers.dirty_ids
+
+
+def test_unseeded_template_assignment_untouched():
+    # Monsters factories assign unit.tags = [...] etc. at construction,
+    # before add_obj — the watch must leave templates alone (no wrap, no
+    # mark); they wrap at seed.
+    _fresh_level()  # watch installed
+    dirty_containers.dirty_ids.clear()
+    u = _unit("Template")
+    u.tags = [Level.Tags.Fire]
+    u.resists = {Level.Tags.Fire: 50}
+    assert not isinstance(u.tags, DirtyList)
+    assert not isinstance(u.resists, (DirtyDict, DirtyDefaultDict))
+    assert id(u) not in dirty_containers.dirty_ids

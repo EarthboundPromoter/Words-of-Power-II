@@ -45,6 +45,19 @@ _LOG_FLUSH_RECORDS = 200
 # no-op) and exception-guarded on its own side.
 _pre_request_hook = None
 
+# Dirty-marking step 3: the container/scalar rebind watch. container_diff
+# registers the attr-name set + observer at install (injection-style, same
+# as _pre_request_hook — journal stays uncoupled). Unregistered, the set is
+# empty and the hot unwatched-setattr path pays one frozenset miss.
+_container_watch_attrs = frozenset()
+_container_attr_hook = None
+
+
+def register_container_watch(attrs, hook):
+    global _container_watch_attrs, _container_attr_hook
+    _container_watch_attrs = frozenset(attrs)
+    _container_attr_hook = hook
+
 
 class _Journal:
     _atexit_registered = False
@@ -2076,6 +2089,19 @@ def install_hooks():
         # Old value is read from __dict__ directly (no __getattribute__ games).
         if name not in _WATCHED_ATTRS:
             original_unit_setattr(self, name, value)
+            # Container/scalar rebind watch (dirty-marking step 3): a
+            # registered observer sees assignments to the names it asked
+            # for — whole-dict rebinds (cool_downs comprehension,
+            # Level.py:2108; Grey Goo resists, Equipment.py:3076) and the
+            # turns_to_death scalar. Injection-style like _pre_request_hook:
+            # journal stays uncoupled from container_diff. Store-first
+            # discipline unchanged — the original already ran; the observer
+            # is guarded and can only lose a mark.
+            if name in _container_watch_attrs:
+                try:
+                    _container_attr_hook(self, name, value)
+                except Exception:
+                    pass
             return
         before = self.__dict__.get(name)
         original_unit_setattr(self, name, value)
