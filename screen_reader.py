@@ -562,6 +562,21 @@ else:
 import container_diff as _container_diff
 if cfg.container_diff_enabled:
     _container_diff.install(log_fn=log)
+    # Dirty-marking D4 version probe (plan step 7): does defaultdict's
+    # auto-insert on a missing-key READ route through subclass __setitem__
+    # on THIS interpreter? The game embeds 3.10, the test venv runs 3.13,
+    # and the design depends on NEITHER answer — this line just pins the
+    # fact per install so a coverage question never has to guess.
+    try:
+        import dirty_containers as _dc_probe
+        _probe = _dc_probe.own(_dc_probe.DirtyDefaultDict(lambda: 0), -1)
+        _probe['__probe__']
+        _probe_marks = -1 in _dc_probe.dirty_ids
+        _dc_probe.dirty_ids.discard(-1)
+        log(f"[ContainerDiff] interpreter probe: __missing__ insert "
+            f"marks dirty = {_probe_marks}")
+    except Exception as _probe_e:
+        log(f"[ContainerDiff] interpreter probe failed: {_probe_e!r}")
 else:
     log("[ContainerDiff] disabled (container_diff_enabled=false)")
 

@@ -64,7 +64,10 @@ def _install(config, journal_path):
     install_hooks()
     if config in ('container', 'full'):
         import container_diff
-        container_diff.install()
+        # log_fn=print: escaped-write backstop alarms (step 5) must be
+        # VISIBLE in bench output — "backstop silent" is an acceptance
+        # criterion, so silence has to be observable, not assumed.
+        container_diff.install(log_fn=print)
         container_diff.reseed()
     if config in ('logcap', 'full'):
         import log_capture
