@@ -7241,6 +7241,12 @@ if _PyGameView is not None:
                     # transition, not resolution.
                     _perf_turn_start[0] = None
                 else:
+                    # Perf sentinel: the mod-share clock — everything from
+                    # here to the sentinel line is OUR turn-end work
+                    # (capture boundary, speech compose, oracle), the part
+                    # of the wait the mod owns vs the game's resolution +
+                    # animation pacing.
+                    _mod_t0 = time.perf_counter()
                     try:
                         # Container-diff turn boundary (D2 boundary 7): closes
                         # the turn's final span BEFORE the pipeline composes,
@@ -7273,20 +7279,24 @@ if _PyGameView is not None:
                     # the evidence by default (the 0.3.1 lesson).
                     try:
                         if _perf_turn_start[0] is not None:
-                            _perf_ms = (time.perf_counter()
+                            _perf_now = time.perf_counter()
+                            _perf_ms = (_perf_now
                                         - _perf_turn_start[0]) * 1000.0
+                            _mod_ms = (_perf_now - _mod_t0) * 1000.0
                             _perf_turn_start[0] = None
                             if _perf_ms >= cfg.perf_log_threshold_ms:
                                 _lvl = getattr(self.game, 'cur_level', None)
                                 _n_units = len(getattr(_lvl, 'units', ()))
                                 _turn_no = getattr(_lvl, 'turn_no', '?')
                                 log(f"[Perf] turn {_turn_no} resolved in "
-                                    f"{_perf_ms:.0f}ms, {_n_units} units")
+                                    f"{_perf_ms:.0f}ms (mod {_mod_ms:.0f}ms), "
+                                    f"{_n_units} units")
                                 try:
                                     if _telemetry.is_enabled():
                                         _telemetry.emit(
                                             'turn_perf',
                                             ms=round(_perf_ms),
+                                            mod_ms=round(_mod_ms),
                                             units=_n_units)
                                 except Exception:
                                     pass
@@ -8053,6 +8063,11 @@ if _PyGameView is not None:
             old_name = _STATE_NAMES.get(_prev_state[0], str(_prev_state[0]))
             new_name = _STATE_NAMES.get(cur, f"Unknown State {cur}")
             log(f"[State] Transition: {old_name} → {new_name}")
+            # Perf sentinel: a combat turn never changes state — any
+            # transition (shop, deploy, level change) means the running
+            # clock would measure menu time, not resolution (the field
+            # data's 18.5s "turn": a deploy-screen browse). Void it.
+            _perf_turn_start[0] = None
 
             keybinds = _get_state_keybinds(self, cur)
 
