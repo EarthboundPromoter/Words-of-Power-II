@@ -24,10 +24,22 @@ an early work-in-progress RW3 port — expect frequent changes.
   summary, so a canceled walk no longer sounds identical to a completed one. Movement
   bumps during the walk stay silent — the summary is the feedback.
 
+- Rift previews now mark a component reward as such — "Component: Flame Blade
+  Fragment (Fire, Sorcery)" — matching the cyan name the game draws for reward
+  components, the same way "Boss:" and "Elite:" already voice the boss-tier colors.
+
 ### Fixed
 - The final auto-pickup item now lands inside the batch summary instead of announcing
   itself separately afterward — walk-end detection is now exact.
 - Memory Orb pickups say "4 SP total," matching the summary's wording.
+- Aiming at your own tile with a spell that can't target you no longer buries the
+  tile's contents under "Can't target self." — the tile (you) speaks first; the
+  reason still speaks if you actually press confirm there. Reasons that depend on
+  the tile's state, like "Tile occupied.", are unchanged.
+- The capture layer's last known gap is closed: in-place monster transforms (the
+  Mind Maggot growing wings, gaining a new name and attack) and boss debuff-immunity
+  flips (the Snow Queen's Diamond Aegis) are now recorded internally with their
+  causes — groundwork for transform announcements in a later release.
 
 ## 2026-07-03 — 0.3.1
 
