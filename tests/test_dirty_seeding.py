@@ -310,6 +310,54 @@ def test_escaped_alarm_dedupes_per_domain_and_unit():
     assert len(escaped) == 1
 
 
+# ---- step 6: save/load round-trip (the mechanism patched_on_loaded runs) ----
+
+def test_save_load_roundtrip_vanilla_payload_and_reseed():
+    # The game saves with dill (Game.py:12); same machinery here. Three
+    # claims in one flow: (1) the save payload references NO mod classes;
+    # (2) loaded units come back with PLAIN containers; (3) the post-load
+    # reseed + seed-and-wrap pass (what patched_on_loaded now does) makes
+    # the first post-load write a real, recorded delta — not a silent
+    # baseline fold, the gate's Finding-6 failure mode.
+    import dill
+    lvl = _fresh_level()
+    u = _unit("Wolf")
+    lvl.add_obj(u, 3, 3)
+    u.resists[Level.Tags.Fire] = 50
+    container_diff.sweep(lvl, site='test:steady')      # steady state
+
+    payload = dill.dumps(lvl)
+    assert b'DirtyDict' not in payload
+    assert b'DirtyDefaultDict' not in payload
+    assert b'DirtyList' not in payload
+    assert b'dirty_containers' not in payload
+
+    lvl2 = dill.loads(payload)
+    u2 = next(un for un in lvl2.units if un.name == "Wolf")
+    from collections import defaultdict
+    assert type(u2.resists) is defaultdict              # plain after load
+    assert u2.resists[Level.Tags.Fire] == 50            # data survived
+
+    # The patched_on_loaded pass:
+    container_diff.reseed()
+    journal.reset(id(lvl2), lvl2)
+    journal._level = lvl2
+    for un in list(lvl2.units):
+        container_diff.store.diff_unit(un)
+
+    assert isinstance(u2.resists, DirtyDefaultDict)     # re-wrapped
+    assert u2.resists._owner_id == id(u2)
+
+    # First post-load write records instead of folding:
+    u2.resists[Level.Tags.Ice] = 25
+    assert id(u2) in dirty_containers.dirty_ids
+    before = len(journal.records)
+    container_diff.sweep(lvl2, site='test:first-post-load')
+    new = [r for r in journal.records[before:]
+           if r['event_type'] == container_diff.KIND_RESISTS]
+    assert len(new) == 1
+
+
 def test_unseeded_template_assignment_untouched():
     # Monsters factories assign unit.tags = [...] etc. at construction,
     # before add_obj — the watch must leave templates alone (no wrap, no

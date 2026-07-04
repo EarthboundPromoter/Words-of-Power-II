@@ -2781,6 +2781,22 @@ def patched_on_loaded(self, filename):
     if em is not None:
         register_triggers(em)
         log(f"[Screen Reader] Post-load trigger re-registration on EventManager {id(em)}")
+    # Dirty-marking step 6 (plan D2.2, gate Finding 6): unpickled units are
+    # fresh objects with PLAIN containers (the wrappers reduce to vanilla
+    # types in the save) and an empty dirty-set — without this pass the
+    # whole first post-load turn runs dirty-blind and the backstop
+    # BASELINES the misses silently, the one failure it cannot alarm on.
+    # Reseed (stale pre-load snapshots die), then seed-and-wrap every
+    # live unit before the first turn advances.
+    if cfg.container_diff_enabled and lvl is not None:
+        try:
+            _container_diff.reseed()
+            for _u in list(getattr(lvl, 'units', ())):
+                _container_diff.store.diff_unit(_u)
+            log(f"[ContainerDiff] Post-load reseed + seed-and-wrap of "
+                f"{len(getattr(lvl, 'units', ()))} units")
+        except Exception as e:
+            log(f"[ContainerDiff] Post-load seeding FAILED: {e!r}")
 
 _Game_module.Game.on_loaded = patched_on_loaded
 
