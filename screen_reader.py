@@ -7256,6 +7256,7 @@ if _PyGameView is not None:
                             telemetry_mod=_telemetry)
                     except Exception as _cd_e:
                         log(f"[ContainerDiff] turn boundary failed: {_cd_e!r}")
+                    _mod_t1 = time.perf_counter()
                     try:
                         _wizard_unit = getattr(self.game, 'p1', None)
                         _pipeline.fire_pipeline(
@@ -7264,6 +7265,7 @@ if _PyGameView is not None:
                         )
                     except Exception as _pipe_e:
                         log(f"[Pipeline] error in fire_pipeline: {_pipe_e}")
+                    _mod_t2 = time.perf_counter()
                     try:
                         # Oracle parity sweep (validation-only, dev-gated by
                         # the telemetry seam; fast no-op for players). After
@@ -7278,18 +7280,30 @@ if _PyGameView is not None:
                     # [Perf] is standard-tier — a slow player's log carries
                     # the evidence by default (the 0.3.1 lesson).
                     try:
+                        if _autopickup['active']:
+                            # Mid-walk boundaries: not player-waited turns.
+                            _perf_turn_start[0] = None
                         if _perf_turn_start[0] is not None:
                             _perf_now = time.perf_counter()
                             _perf_ms = (_perf_now
                                         - _perf_turn_start[0]) * 1000.0
                             _mod_ms = (_perf_now - _mod_t0) * 1000.0
+                            # The mod share's three tenants: capture
+                            # boundary (backstop sweep), speech compose
+                            # (ships to players), oracle parity (dev-only —
+                            # players never pay this slice).
+                            _bnd_ms = (_mod_t1 - _mod_t0) * 1000.0
+                            _cmp_ms = (_mod_t2 - _mod_t1) * 1000.0
+                            _orc_ms = (_perf_now - _mod_t2) * 1000.0
                             _perf_turn_start[0] = None
                             if _perf_ms >= cfg.perf_log_threshold_ms:
                                 _lvl = getattr(self.game, 'cur_level', None)
                                 _n_units = len(getattr(_lvl, 'units', ()))
                                 _turn_no = getattr(_lvl, 'turn_no', '?')
                                 log(f"[Perf] turn {_turn_no} resolved in "
-                                    f"{_perf_ms:.0f}ms (mod {_mod_ms:.0f}ms), "
+                                    f"{_perf_ms:.0f}ms (mod {_mod_ms:.0f}ms: "
+                                    f"boundary {_bnd_ms:.0f}, compose "
+                                    f"{_cmp_ms:.0f}, oracle {_orc_ms:.0f}), "
                                     f"{_n_units} units")
                                 try:
                                     if _telemetry.is_enabled():
@@ -7297,6 +7311,9 @@ if _PyGameView is not None:
                                             'turn_perf',
                                             ms=round(_perf_ms),
                                             mod_ms=round(_mod_ms),
+                                            boundary_ms=round(_bnd_ms),
+                                            compose_ms=round(_cmp_ms),
+                                            oracle_ms=round(_orc_ms),
                                             units=_n_units)
                                 except Exception:
                                     pass
@@ -7672,6 +7689,10 @@ if _PyGameView is not None:
                     _autopickup['items'] = []
                     _autopickup['start_xp'] = getattr(p, 'xp', 0) if p else 0
                     _autopickup['final_step'] = False
+                    # Perf sentinel: a walk is ONE keypress spanning many
+                    # engine turns — its span is stroll length, not lag
+                    # (field data: a 70s "turn" crossing a cleared level).
+                    _perf_turn_start[0] = None
                     _autopickup['finish_grace'] = 30
                     log(f"[AutoPickup] {_log_ctx()} walk started: {len(self.path)} steps")
             else:
