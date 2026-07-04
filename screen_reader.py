@@ -4543,6 +4543,13 @@ if _PyGameView is not None:
                 s_text = _name(shrine)
                 comp = getattr(shrine, 'component', None)  # ComponentPickup reward
                 if comp is not None:
+                    # The game draws a ComponentPickup reward's name in CYAN
+                    # vs white (RiftWizard3.py:7492-7494) — the marking says
+                    # "this reward is a component". Transcode as a prefix,
+                    # Boss:/Elite: convention (owner ruling 2026-07-03;
+                    # plain "Component", not the dev-comment's rare/on-craft
+                    # gloss — the screen shows only component-ness).
+                    s_text = f"Component: {s_text}"
                     tag_names = [_name(t) for t in getattr(comp, 'tags', [])]
                     if tag_names:
                         s_text += " (" + ", ".join(tag_names) + ")"
@@ -4960,6 +4967,14 @@ if _PyGameView is not None:
                     reason = _get_cast_failure_reason(spell, target.x, target.y) or ""
                 except Exception:
                     reason = ""
+                if reason == "can't target self":
+                    # Single exception (owner ruling 2026-07-03): at hover
+                    # over the wizard's own tile the reason line buries the
+                    # tile data (the player character) and states a
+                    # spell-static fact; the confirm press still speaks it
+                    # (patched_cast_cur_spell). Tile-dynamic reasons at own
+                    # tile (e.g. "tile occupied") keep speaking.
+                    return ("", "", "")
                 if not reason or reason == "cannot cast":
                     reason = "invalid target"
                 return (f"{reason[0].upper()}{reason[1:]}. ", "", "")

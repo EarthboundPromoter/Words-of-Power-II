@@ -2166,6 +2166,14 @@ _COMPOSER_KNOWN_EVENT_TYPES = frozenset({
     # window's effects parent to it. Payload carries 'recipient' like the
     # other marker kinds, so crisis structurally never sees it.
     'reactive_proc',
+    # G-H/G-I attrs fix (2026-07-03 ruling, capture-only, composer-staged):
+    # in-place transform signals (MindMaggot: rename + sprite + flight —
+    # the became-stitch's inputs) and the Diamond Aegis immunity flip. A
+    # transform lands its records in whatever chain caused the advance;
+    # payloads carry 'target' snapshots, so the crisis twin set lists
+    # them too.
+    'flight_gained', 'flight_lost', 'unit_renamed', 'sprite_change',
+    'debuff_immunity_gained', 'debuff_immunity_lost',
 })
 
 

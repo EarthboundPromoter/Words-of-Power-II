@@ -24,6 +24,11 @@ from journal import (
     _shield_blocked_payload,
     _payload_shield_removed,
     _team_change_record,
+    _flying_change_record,
+    _rename_record,
+    _sprite_change_record,
+    _debuff_immune_change_record,
+    _classify_watched,
 )
 
 
@@ -274,3 +279,93 @@ def test_team_change_player_to_enemy_is_turned():
     assert et == 'team_turned'                 # "turned hostile"
     assert payload['team_before'] == 0
     assert payload['team_after'] == 1
+
+
+# ---- G-H/G-I attrs fix (2026-07-03 ruling): flying / name / asset_name /
+# ---- debuff_immune builders. Kinds are direction-named (shield/team
+# ---- precedent); no-op filtering lives IN the builders.
+
+
+def test_flying_gained_on_zero_crossing():
+    et, payload = _flying_change_record(_unit(name="Mind Maggot"), 0, 1)
+    assert et == 'flight_gained'
+    assert payload['flying_before'] == 0
+    assert payload['flying_after'] == 1
+    assert payload['target']['name'] == "Mind Maggot"
+
+
+def test_flying_stack_increment_is_noop():
+    # 1->2 renders nothing (the flag is already up) — G-H capture-per-render.
+    assert _flying_change_record(_unit(), 1, 2) is None
+    assert _flying_change_record(_unit(), 0, 0) is None
+    assert _flying_change_record(_unit(), None, 0) is None
+
+
+def test_flying_lost_from_any_positive():
+    et, payload = _flying_change_record(_unit(), 2, 0)
+    assert et == 'flight_lost'
+    assert payload['flying_before'] == 2
+    assert payload['flying_after'] == 0
+
+
+def test_rename_records_transition():
+    et, payload = _rename_record(
+        _unit(name="Mind Maggot Drone"), "Mind Maggot", "Mind Maggot Drone")
+    assert et == 'unit_renamed'
+    assert payload['name_before'] == "Mind Maggot"
+    assert payload['name_after'] == "Mind Maggot Drone"
+    # Snapshot is post-write: carries the NEW identity (team precedent).
+    assert payload['target']['name'] == "Mind Maggot Drone"
+
+
+def test_rename_noop_returns_none():
+    assert _rename_record(_unit(), "Orc", "Orc") is None
+
+
+def test_sprite_change_records_transition_and_noop():
+    et, payload = _sprite_change_record(
+        _unit(name="Mind Maggot"), "mind_maggot", "mind_maggot_winged")
+    assert et == 'sprite_change'
+    assert payload['asset_before'] == "mind_maggot"
+    assert payload['asset_after'] == "mind_maggot_winged"
+    assert _sprite_change_record(_unit(), "orc", "orc") is None
+
+
+def test_debuff_immune_flip_and_standing_rewrite():
+    et, payload = _debuff_immune_change_record(_unit(name="Snow Queen"), False, True)
+    assert et == 'debuff_immunity_gained'
+    assert payload['immune_before'] is False
+    assert payload['immune_after'] is True
+    et, _ = _debuff_immune_change_record(_unit(), True, False)
+    assert et == 'debuff_immunity_lost'
+    # The Diamond Aegis rewrites `shields > 0` every turn/attempt
+    # (FinalBosses.py:1414-1415) — same-value rewrites are the no-op case.
+    assert _debuff_immune_change_record(_unit(), True, True) is None
+    assert _debuff_immune_change_record(_unit(), None, False) is None
+
+
+def test_classify_watched_routes_the_new_attrs():
+    unit = _unit(name="Mind Maggot")
+    assert _classify_watched(unit, 'flying', 0, 1)[0] == 'flight_gained'
+    assert _classify_watched(unit, 'name', "A", "B")[0] == 'unit_renamed'
+    assert _classify_watched(unit, 'asset_name', "a", "b")[0] == 'sprite_change'
+    assert _classify_watched(unit, 'debuff_immune', False, True)[0] == 'debuff_immunity_gained'
+
+
+def test_new_attrs_are_watched():
+    from journal import _WATCHED_ATTRS
+    for attr in ('flying', 'name', 'asset_name', 'debuff_immune'):
+        assert attr in _WATCHED_ATTRS, attr
+
+
+def test_new_kinds_staged_in_both_producer_known_sets():
+    # Records-only discipline: the six new kinds must be composer-staged in
+    # BOTH producers (digest known-set + crisis staged twin — these payloads
+    # carry 'target' unit snapshots). Lazy imports keep this file light.
+    import digest
+    import crisis
+    kinds = ('flight_gained', 'flight_lost', 'unit_renamed', 'sprite_change',
+             'debuff_immunity_gained', 'debuff_immunity_lost')
+    for kind in kinds:
+        assert kind in digest._COMPOSER_KNOWN_EVENT_TYPES, kind
+        assert kind in crisis._STAGED_CAPTURE_ONLY_KINDS, kind

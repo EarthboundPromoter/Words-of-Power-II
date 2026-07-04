@@ -76,6 +76,12 @@ _STAGED_CAPTURE_ONLY_KINDS = frozenset({
     # Unit 5 D3 (tile-keyed payload, no unit snapshot — listed for
     # ALL_KINDS uniformity with the digest set).
     'tile_flavor_change',
+    # G-H/G-I attrs fix (2026-07-03 ruling, capture-only). These payloads
+    # DO carry 'target' unit snapshots (shield/team precedent), and future
+    # content could write them on the wizard — staged so a wizard-subject
+    # instance never counts as wizard_records_no_output noise.
+    'flight_gained', 'flight_lost', 'unit_renamed', 'sprite_change',
+    'debuff_immunity_gained', 'debuff_immunity_lost',
 })
 
 

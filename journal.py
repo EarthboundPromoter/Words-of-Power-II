@@ -654,9 +654,22 @@ def _payload_shield_removed(event):
 #               write exists); gains AND spends record (voice-ignores-spends is a
 #               composer ruling). Init writes (Game.py:498, Mutators.py:1105) fire
 #               pre-live -> gated; unpickle bypasses __setattr__ -> no load flood.
+#   'flying'  — G-H/G-I attrs fix (2026-07-03 ruling): int counter, record only
+#               ZERO-CROSSINGS (the flag is what renders; 1->2 renders nothing).
+#               Live writers: MindMaggot transform (`flying += 1`,
+#               Monsters.py:2055); factory `unit.flying = True` writes are
+#               pre-live -> gated.
+#   'name'    — same ruling: live identity change (MindMaggot `name += " Drone"`,
+#               Monsters.py:2058) = the "became" signal. Factory names pre-live.
+#   'asset_name' — same ruling: live sprite swap (Monsters.py:2057), the render
+#               half of the transform. Factory assets pre-live.
+#   'debuff_immune' — same ruling: bool flip only (Diamond Aegis rewrites
+#               `shields > 0` every turn, FinalBosses.py:1415 — the no-op
+#               filter in the builder eats the standing rewrites).
 # This is the taxonomy's universal-chokepoint capture (§2) — no per-site hooks, so
 # future content is caught automatically.
-_WATCHED_ATTRS = frozenset({'shields', 'team', 'cur_hp', 'max_hp', 'xp'})
+_WATCHED_ATTRS = frozenset({'shields', 'team', 'cur_hp', 'max_hp', 'xp',
+                            'flying', 'name', 'asset_name', 'debuff_immune'})
 
 
 def _is_live_unit(unit):
@@ -874,6 +887,77 @@ def _team_change_payload(unit, before, after):
     }
 
 
+def _flying_change_record(unit, before, after):
+    """Classify a `flying` write into a record, or None. `flying` is an int
+    counter used as a flag; the RENDER is the flag (hover sprite / examine
+    line), so only ZERO-CROSSINGS record (G-H ruling: capture per render —
+    a 1->2 stack change renders nothing and stays silent). The MindMaggot
+    transform's `flying += 1` (Monsters.py:2055) is the marquee 0->1 case."""
+    b = before or 0
+    a = after or 0
+    if (b > 0) == (a > 0):
+        return None
+    payload = {
+        'target': _snapshot_unit(unit),
+        'flying_before': b,
+        'flying_after': a,
+    }
+    if a > 0:
+        return 'flight_gained', payload
+    return 'flight_lost', payload
+
+
+def _rename_record(unit, before, after):
+    """Classify a live `name` rebind into a 'unit_renamed' record, or None for
+    a no-op. A live rename is the identity half of the G-I "became" signal
+    (MindMaggot `name += " Drone"`, Monsters.py:2058); the composer's
+    became-stitch fuses it with the coincident sprite/flight records. The
+    snapshot is post-write (carries the NEW name, team precedent);
+    name_before/name_after carry the transition."""
+    if before == after:
+        return None
+    return 'unit_renamed', {
+        'target': _snapshot_unit(unit),
+        'name_before': before,
+        'name_after': after,
+    }
+
+
+def _sprite_change_record(unit, before, after):
+    """Classify a live `asset_name` rebind into a 'sprite_change' record, or
+    None for a no-op. The sprite swap is the RENDERED half of an in-place
+    transform (Monsters.py:2057) — what a sighted player actually sees change.
+    Factory asset assignments are pre-live and never reach here."""
+    if before == after:
+        return None
+    return 'sprite_change', {
+        'target': _snapshot_unit(unit),
+        'asset_before': before,
+        'asset_after': after,
+    }
+
+
+def _debuff_immune_change_record(unit, before, after):
+    """Classify a `debuff_immune` write into a record, or None. Bool-flip
+    semantics: the Diamond Aegis rewrites `shields > 0` on apply, every
+    advance, every buff-attempt, and every shield loss (FinalBosses.py:
+    1414-1415) — the standing same-value rewrites are the no-op case; only
+    the shielded<->unshielded transitions carry information (G-H ruling:
+    capture where rendered — the buff's own description is the render)."""
+    b = bool(before)
+    a = bool(after)
+    if b == a:
+        return None
+    payload = {
+        'target': _snapshot_unit(unit),
+        'immune_before': b,
+        'immune_after': a,
+    }
+    if a:
+        return 'debuff_immunity_gained', payload
+    return 'debuff_immunity_lost', payload
+
+
 def _classify_watched(unit, name, before, after):
     """Dispatch a watched-attr before/after to its change-record builder, or
     None for a no-op. Shared by the __setattr__ interceptor (per-write) and the
@@ -894,6 +978,14 @@ def _classify_watched(unit, name, before, after):
         return _max_hp_change_record(unit, before, after)
     if name == 'xp':
         return _xp_change_record(unit, before, after)
+    if name == 'flying':
+        return _flying_change_record(unit, before, after)
+    if name == 'name':
+        return _rename_record(unit, before, after)
+    if name == 'asset_name':
+        return _sprite_change_record(unit, before, after)
+    if name == 'debuff_immune':
+        return _debuff_immune_change_record(unit, before, after)
     return None
 
 
