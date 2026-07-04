@@ -20,6 +20,7 @@ Schema is NOT backwards compatible with the auto-_to_payload era; pre-0.4.0
 journal_debug.log files cannot be replayed against the new shape.
 """
 
+import atexit
 import json
 import math
 import os
@@ -29,6 +30,12 @@ from collections import deque
 import Level
 
 _UNSET = object()
+
+# Debug-log write batching: records buffer in memory and hit the disk in one
+# write when this many accumulate (plus at level transitions, close, and
+# interpreter exit). Sized to bound crash tail-loss to well under one dense
+# turn while keeping syscalls out of the per-event path (the 0.3.1 slowdown).
+_LOG_FLUSH_RECORDS = 200
 
 # Unit 3 (reactive_markers): the pre-request tap. Called at the top of the
 # three cast-request patches (act_cast / defer_cast / queue_spell) BEFORE
@@ -40,9 +47,12 @@ _pre_request_hook = None
 
 
 class _Journal:
+    _atexit_registered = False
+
     def __init__(self):
         self.records = []
         self.cause_stack = []
+        self._log_buffer = []
         self.sequence = 0
         self.action_chain_id = 0
         self.level_id = None
@@ -115,16 +125,42 @@ class _Journal:
         self.level_id = level_id
         if self._fp:
             self._emit({"__meta__": "level_reset", "level_id": level_id, "seq": self.sequence})
+            # Level transitions are a natural pause — land the departed
+            # level's records now so the on-disk journal is whole per floor.
+            self.flush_log()
 
     def open_log(self, path):
         try:
             self._fp = open(path, "w", encoding="utf-8")
+            self._log_buffer = []
+            # Flush-at-exit so a normal quit never loses the tail. Registered
+            # once per process; harmless if open_log runs again (flush_log on
+            # a closed journal is a no-op).
+            if not _Journal._atexit_registered:
+                atexit.register(self.flush_log)
+                _Journal._atexit_registered = True
             self._emit({"__meta__": "journal_log_opened", "ts": time.time()})
         except Exception:
             self._fp = None
 
+    def flush_log(self):
+        """Write the buffered records out. The only disk-touching point:
+        called from _emit at the size threshold, from reset() at level
+        transitions, from close_log, and at interpreter exit. A hard crash
+        can lose at most _LOG_FLUSH_RECORDS records of tail — the 0.3.1
+        field report showed flush-per-record is a real per-event cost, and
+        this file is a diagnostic, not a flight recorder."""
+        if self._fp and self._log_buffer:
+            try:
+                self._fp.write("".join(self._log_buffer))
+                self._fp.flush()
+            except Exception:
+                pass
+            self._log_buffer = []
+
     def close_log(self):
         if self._fp:
+            self.flush_log()
             try:
                 self._fp.close()
             except Exception:
@@ -208,9 +244,15 @@ class _Journal:
         return self.record("cast_begin", payload, parent_seq)
 
     def _emit(self, obj):
+        # Serialize now (the record dict is mutable and may gain marks later;
+        # emission order is the ground truth the replay tools depend on), but
+        # defer the disk write to flush_log — one write per ~200 records
+        # instead of a write+flush syscall pair per record.
         try:
-            self._fp.write(json.dumps(obj, default=str, separators=(",", ":")) + "\n")
-            self._fp.flush()
+            self._log_buffer.append(
+                json.dumps(obj, default=str, separators=(",", ":")) + "\n")
+            if len(self._log_buffer) >= _LOG_FLUSH_RECORDS:
+                self.flush_log()
         except Exception:
             pass
 
