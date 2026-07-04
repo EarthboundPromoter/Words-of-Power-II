@@ -120,6 +120,12 @@ _SETTINGS_SCHEMA = [
      "# internally — nothing is spoken yet. Safe to leave on; set false as a\n"
      "# field kill switch if instructed to diagnose a problem.\n"
      "# Default: true"),
+    ('words_of_power', 'aoe_group_names', 'true',
+     "# For spells whose area is a linked group of units (Mass Melt's chain\n"
+     "# and similar): after the targeted unit, list who else is in the\n"
+     "# group by name, allies first. Set false to hear the plain\n"
+     "# \"Within AoE\" count phrasing for those spells instead.\n"
+     "# Default: true"),
     ('words_of_power', 'digest_enabled', 'false',
      "# Enable the direct-action digest: a composed summary of one player\n"
      "# keypress's full effect chain (cast, damage, kills, procs, side-effects)\n"
@@ -261,6 +267,7 @@ class _Cfg:
     container_diff_enabled = _settings.getboolean('words_of_power', 'container_diff_enabled', fallback=True)
     cause_markers_enabled = _settings.getboolean('words_of_power', 'cause_markers_enabled', fallback=True)
     reactive_markers_enabled = _settings.getboolean('words_of_power', 'reactive_markers_enabled', fallback=True)
+    aoe_group_names = _settings.getboolean('words_of_power', 'aoe_group_names', fallback=True)
     digest_enabled = _settings.getboolean('words_of_power', 'digest_enabled', fallback=False)
     # [Composer] — new-pipeline flags. Defaults match the conservative
     # strangler-fig rollout: producers off, legacy batcher on. Flip
@@ -293,6 +300,7 @@ log(f"[Settings] log_capture_enabled = {cfg.log_capture_enabled}")
 log(f"[Settings] container_diff_enabled = {cfg.container_diff_enabled}")
 log(f"[Settings] cause_markers_enabled = {cfg.cause_markers_enabled}")
 log(f"[Settings] reactive_markers_enabled = {cfg.reactive_markers_enabled}")
+log(f"[Settings] aoe_group_names = {cfg.aoe_group_names}")
 log(f"[Settings] digest_enabled = {cfg.digest_enabled}")
 log(f"[Settings] crisis_enabled = {cfg.crisis_enabled}")
 log(f"[Settings] orphan_enabled = {cfg.orphan_enabled}")
@@ -309,11 +317,12 @@ log(f"[Settings] ally_shield_totals = {cfg.ally_shield_totals}")
 def _legacy_combat_off():
     """True when the legacy batcher's COMBAT narration is disabled — the new
     composer pipeline (crisis/digest/orphan) owns it. Gates ONLY the handler
-    branches the pipeline replaces; sole-source branches that no producer
-    covers (ambient non-player deaths, spawns, ambient heals/shields, the
-    charge-threshold warning, item pickups, cooldown-ready, buff-fade
-    warnings, soul jar, enters-LoS) keep speaking, as does the per-hit HP
-    readout. Flip via settings.ini [Composer] legacy_batcher_combat_enabled."""
+    branches the pipeline replaces (including ambient spawns and ambient/
+    enemy-turn damage — orphan owns both); sole-source branches that no
+    producer covers (the charge-threshold warning, item pickups,
+    cooldown-ready, buff-fade warnings, soul jar, enters-LoS) keep speaking,
+    as does the per-hit HP readout. Flip via settings.ini [Composer]
+    legacy_batcher_combat_enabled."""
     return not cfg.legacy_batcher_combat_enabled
 
 # ============================================================================
@@ -474,6 +483,18 @@ import journal as _journal
 _journal.install_hooks()
 if cfg.journal_log_enabled:
     _journal_log_path = os.path.join(mod_dir, "journal_debug.log")
+    # Archive the previous session's journal before open_log truncates it —
+    # the residual-class watch and Tier-2 journal-evidence decisions need
+    # record trees that accumulate across sessions (capture-exit review
+    # finding). Mirrors the speech-log rotation at module top.
+    if os.path.exists(_journal_log_path) and os.path.getsize(_journal_log_path) > 0:
+        _j_stamp = datetime.datetime.fromtimestamp(
+            os.path.getmtime(_journal_log_path)).strftime("%Y-%m-%d_%H-%M-%S")
+        try:
+            os.rename(_journal_log_path,
+                      os.path.join(log_archive_dir, f"journal_debug_{_j_stamp}.log"))
+        except OSError:
+            pass  # duplicate stamp etc. — just overwrite
     _journal.journal.open_log(_journal_log_path)
     log(f"[Journal] Capture hooks installed; debug log -> {_journal_log_path}")
 else:
@@ -1311,7 +1332,17 @@ _pending_level_announcement = [None]
 # composes ONE summary. start_xp snapshots the player's SP at walk start
 # so the orb line reports the true diff (correct even if something else,
 # e.g. a Relocator Beacon tick, adds an orb mid-walk).
-_autopickup = {'active': False, 'items': [], 'start_xp': 0}
+# final_step/finish_grace: the deterministic walk-end tell (owner
+# 2026-07-03). The walk drives movement through try_move WHILE the path is
+# non-empty; any keydown clears the whole path first (RiftWizard3.py:2731),
+# so no manual move can look like a walk move. A walk try_move with exactly
+# ONE step left IS the final step: arm final_step there, and the final
+# tile's pickup event (which fires inside that move) folds itself into the
+# summary. A path that empties with final_step never armed is, by
+# elimination, a keydown CANCEL — summarized with the "stopped" prefix.
+# finish_grace covers only the freak final-step-but-no-pickup case.
+_autopickup = {'active': False, 'items': [], 'start_xp': 0,
+               'final_step': False, 'finish_grace': 0}
 _game_ref = [None]  # Stored reference to Game instance (set in process_level_input)
 
 def _log_ctx():
@@ -1953,17 +1984,22 @@ def on_item_pickup(event):
                 kind = 'other'  # components and anything future: name-only in summary
             _autopickup['items'].append((item_name, kind))
             log(f"[Item] {_log_ctx()} autopickup gathered: {item_name}")
+            if _autopickup.get('final_step'):
+                # This is the final walk step's pickup (armed in
+                # patched_try_move): fold it in and compose the summary now.
+                _finish_autopickup(None)
             return
         desc = ((event.item.get_description() or '') if hasattr(event.item, 'get_description')
                 else getattr(event.item, 'description', ''))
         text = f"Picked up {item_name}"
         if desc and desc != "Undescribed Item":
             text += f". {desc}"
-        # If it's a Memory Orb, append new SP total
+        # If it's a Memory Orb, append new SP total — "total" spelled out,
+        # matching the autopickup summary's vocabulary ("N SP total").
         if item_name == "Memory Orb":
             player = getattr(getattr(event.item, 'level', None), 'player_unit', None)
             if player:
-                text += f", {player.xp} SP"
+                text += f", {player.xp} SP total"
         log(f"[Item] {_log_ctx()} {text}")
         batcher.speak_queued(text)
     except Exception as e:
@@ -1981,28 +2017,38 @@ def _group_counted_names(names):
         counts[n] = counts.get(n, 0) + 1
     return [f"{counts[n]} {n}" if counts[n] > 1 else n for n in order]
 
-def _finish_autopickup(view):
-    """Compose the auto-pickup summary when the walk's path empties
-    (finished or canceled — partial gains still summarize).
+def _finish_autopickup(view, canceled=False):
+    """Compose the auto-pickup summary when the walk ends.
 
+    canceled=True (keydown wiped the path mid-walk) prefixes the summary
+    with "Auto-pickup stopped." so a cancel is ear-distinct from a
+    completed walk (they were identical before — owner 2026-07-03).
     Orbs and hearts report cumulative effects; components report names
     only (owner ruling 2026-07-03). Component on_pickup effects DO fire
     on cleared levels — Level.py:2823 calls component.on_pickup
     unconditionally — but narrating each would be noise; their
     descriptions remain available via examine/D-detail."""
     _autopickup['active'] = False
+    _autopickup['final_step'] = False
+    _autopickup['finish_grace'] = 0
     items = _autopickup['items']
     _autopickup['items'] = []
     if not items:
-        log("[AutoPickup] walk ended: nothing gathered")
+        # Canceled-before-anything stays silent: the canceling keypress
+        # already produces its own feedback (movement, menu, etc.).
+        log(f"[AutoPickup] walk {'canceled' if canceled else 'ended'}: nothing gathered")
         return
     try:
-        p = view.game.p1 if getattr(view, 'game', None) else None
+        game = getattr(view, 'game', None) or _game_ref[0]
+        p = game.p1 if game else None
         orbs = [n for (n, k) in items if k == 'orb']
         hearts = [n for (n, k) in items if k == 'heart']
         others = [n for (n, k) in items if k == 'other']
         total = len(items)
-        chunks = [f"Picked up {total} item{'s' if total != 1 else ''}."]
+        head = f"Picked up {total} item{'s' if total != 1 else ''}."
+        if canceled:
+            head = f"Auto-pickup stopped. {head}"
+        chunks = [head]
         if orbs:
             line = f"{len(orbs)} Memory Orb{'s' if len(orbs) != 1 else ''}"
             if p is not None:
@@ -2640,6 +2686,8 @@ def patched_setup_level(self, level_num):
     _level_complete[0] = False
     _autopickup['active'] = False
     _autopickup['items'] = []
+    _autopickup['final_step'] = False
+    _autopickup['finish_grace'] = 0
     adjacency_tracker.reset()
     los_tracker.reset()
     if getattr(self, 'player_unit', None):
@@ -4855,53 +4903,124 @@ if _PyGameView is not None:
 
     def _check_aoe_warning(view):
         """Check what units are in the current spell's AoE.
-        Returns (range_warning, aoe_info) tuple — both may be empty strings.
-        range_warning ("Out of range. ") goes first.
-        aoe_info ("Within AoE. You, 3 enemies.") goes before tile/target details.
-        Reports enemies, allies, and player in blast zone (#17).
-        Only warns for true AoE spells (radius > 0, beams, cones) — not single-target spells."""
+        Returns (range_warning, aoe_info, group_suffix) — all may be empty.
+        range_warning ("Out of range. " / a cast-fail reason) goes first.
+        aoe_info ("Within AoE You, 1 ally, 2 enemies.") goes before the tile
+        brief; census order You, allies, enemies (owner ruling 2026-07-03:
+        friendly-fire opt-out — ally presence must differentiate fast).
+        group_suffix goes AFTER the tile brief: for chain-class spells whose
+        footprint is the linked UNITS (Mass Melt), it lists who ELSE is in
+        the group by name, allies first, duplicates counted — the cursor
+        unit is omitted because the tile brief just named it. Gated by
+        settings aoe_group_names (off -> count census like any footprint).
+        Follows the engine (ratification ledger: AoE-footprint point fix):
+        can_cast + the spell's own get_impacted_tiles replace the old
+        base-radius/keyword guess and the manual range math. The census
+        speaks only when the footprint extends past the cursor tile — the
+        cursor tile's content is already spoken as the target, so
+        single-tile spells (Blink, swaps) census nothing (#17's
+        false-positive class dies by construction)."""
         try:
             spell = getattr(view, 'cur_spell', None)
             target = getattr(view, 'cur_spell_target', None)
             if spell is None or target is None:
-                return ("", "")
+                return ("", "", "")
             # Skip walk/movement spells
             if _name(spell).lower() == 'walk':
-                return ("", "")
-            # Determine if this spell is truly AoE.
-            # Check the spell's BASE radius (intrinsic to the spell), not get_stat,
-            # because global radius modifiers (e.g., Aether Wisp) stack onto every
-            # spell including non-AoE ones like Blink/Teleport. Those modifiers are
-            # cosmetic on translocation spells — the radius ring renders, but no
-            # damage/effect propagates to impacted tiles. Reporting "Within AoE
-            # 1 enemy" for Blink when the cursor sits on a unit is misleading.
-            base_radius = getattr(spell, 'radius', 0) or 0
-            is_aoe = base_radius > 0
-            if not is_aoe:
-                # Check for beam/cone/burst in description
-                desc = ""
-                if hasattr(spell, 'get_description'):
-                    try:
-                        desc = read_text(spell.get_description()).lower()
-                    except Exception:
-                        pass
-                elif hasattr(spell, 'description'):
-                    desc = read_text(spell.description).lower()
-                if any(kw in desc for kw in ('beam', 'line', 'cone', 'burst', 'all enemies', 'all units')):
-                    is_aoe = True
-            if not is_aoe:
-                return ("", "")
+                return ("", "", "")
             player = getattr(getattr(view, 'game', None), 'p1', None)
             if player is None:
-                return ("", "")
-            if not hasattr(spell, 'get_impacted_tiles'):
-                return ("", "")
-            impacted = spell.get_impacted_tiles(target.x, target.y)
+                return ("", "", "")
             level = view.game.cur_level
+            if level is None:
+                return ("", "", "")
+            caster = getattr(spell, 'caster', None) or player
+            try:
+                can = spell.can_cast(target.x, target.y)
+            except Exception:
+                return ("", "", "")
+            if not can:
+                # Problems speak first, sourced from the same truth the game
+                # paints: out-of-ball = the ball draw_targeting draws
+                # (RiftWizard3.py:5502-5507); in-range-but-invalid = the red
+                # layer, spoken as the cast-fail reason vocabulary (owner-
+                # approved reuse — same strings [Cast Fail] speaks at
+                # confirm, now at cursor time).
+                try:
+                    if getattr(spell, 'melee', False):
+                        ball = level.get_points_in_ball(caster.x, caster.y, 1, diag=True)
+                    else:
+                        ball = level.get_points_in_ball(caster.x, caster.y, spell.get_stat('range'))
+                    in_ball = any(p.x == target.x and p.y == target.y for p in ball)
+                except Exception:
+                    in_ball = True
+                if not in_ball:
+                    return ("Out of range. ", "", "")
+                try:
+                    reason = _get_cast_failure_reason(spell, target.x, target.y) or ""
+                except Exception:
+                    reason = ""
+                if not reason or reason == "cannot cast":
+                    reason = "invalid target"
+                return (f"{reason[0].upper()}{reason[1:]}. ", "", "")
+            if not hasattr(spell, 'get_impacted_tiles'):
+                return ("", "", "")
+            # list() is load-bearing: the default get_impacted_tiles yields
+            # from a GENERATOR (get_points_in_ball, Level.py:3663) — it can
+            # be iterated exactly once, and this function iterates it three
+            # times (gate, chain check, census).
+            impacted = list(spell.get_impacted_tiles(target.x, target.y))
+            # Census gate: speak only when the footprint extends past the
+            # cursor tile (its content is already spoken as the target).
+            footprint = {(p.x, p.y) for p in impacted}
+            footprint.discard((target.x, target.y))
+            if not footprint:
+                return ("", "", "")
+            if cfg.aoe_group_names and impacted and all(hasattr(p, 'cur_hp') for p in impacted):
+                # Chain-class footprint: the engine returned the linked UNITS
+                # themselves (Mass Melt's connected group). Composition
+                # (owner, 2026-07-03): target-first — the tile brief names
+                # the cursor unit, this suffix lists who ELSE is chained.
+                # You, then allies (friendly-fire opt-out ordering), then
+                # enemies; same-name units grouped with counts.
+                seen_ids = set()
+                you = False
+                ally_counts = {}
+                enemy_counts = {}
+                for u in impacted:
+                    if id(u) in seen_ids:
+                        continue
+                    seen_ids.add(id(u))
+                    if u.x == target.x and u.y == target.y:
+                        continue
+                    if getattr(u, 'cur_hp', 0) <= 0:
+                        continue
+                    if _is_player(u):
+                        you = True
+                    elif getattr(u, 'team', None) == Level.TEAM_PLAYER:
+                        nm = _name(u)
+                        ally_counts[nm] = ally_counts.get(nm, 0) + 1
+                    else:
+                        nm = _name(u)
+                        enemy_counts[nm] = enemy_counts.get(nm, 0) + 1
+                parts = []
+                if you:
+                    parts.append("You")
+                for nm, n in ally_counts.items():
+                    parts.append(f"Ally {nm}" if n == 1 else f"{n} Ally {_pluralize(nm)}")
+                for nm, n in enemy_counts.items():
+                    parts.append(nm if n == 1 else f"{n} {_pluralize(nm)}")
+                if not parts:
+                    return ("", "", "")
+                return ("", "", f"{', '.join(parts)}.")
             player_hit = False
             enemies = 0
             allies = 0
+            counted = set()
             for p in impacted:
+                if (p.x, p.y) in counted:
+                    continue
+                counted.add((p.x, p.y))
                 if not level.is_point_in_bounds(Level.Point(p.x, p.y)):
                     continue
                 if p.x == player.x and p.y == player.y:
@@ -4916,36 +5035,22 @@ if _PyGameView is not None:
                     else:
                         enemies += 1
             if not player_hit and enemies == 0 and allies == 0:
-                return ("", "")
+                return ("", "", "")
             details = []
             if player_hit:
                 details.append("You")
-            if enemies > 0:
-                details.append(f"{enemies} {'enemy' if enemies == 1 else 'enemies'}")
+            # Allies before enemies (owner ruling 2026-07-03): the player
+            # needs to veto a friendly hit fast — desirable vs undesirable
+            # positioning must differentiate at the head of the line.
             if allies > 0:
                 details.append(f"{allies} {'ally' if allies == 1 else 'allies'}")
-            # Range gate: check if target tile is within casting range
-            range_warning = ""
-            caster = getattr(spell, 'caster', None)
-            if caster is not None:
-                dx = abs(caster.x - target.x)
-                dy = abs(caster.y - target.y)
-                melee = getattr(spell, 'melee', False)
-                try:
-                    r = spell.get_stat('range') + (getattr(caster, 'radius', 0) if melee else 0)
-                except Exception:
-                    r = getattr(spell, 'range', 0)
-                if melee:
-                    if max(dx, dy) > (1 + getattr(caster, 'radius', 0)):
-                        range_warning = "Out of range. "
-                else:
-                    if dx * dx + dy * dy > r * r:
-                        range_warning = "Out of range. "
+            if enemies > 0:
+                details.append(f"{enemies} {'enemy' if enemies == 1 else 'enemies'}")
             aoe_info = f"Within AoE {', '.join(details)}."
-            return (range_warning, aoe_info)
+            return ("", aoe_info, "")
         except Exception as e:
             log(f"[AoE Check] Error: {e}")
-            return ("", "")
+            return ("", "", "")
 
     def _describe_target(view):
         """Get a spoken description of the current target."""
@@ -4972,17 +5077,30 @@ if _PyGameView is not None:
         _aoe_announced_state[0] = False
         _last_examine_xy[0] = None
         try:
+            tab_targets = getattr(self, 'tab_targets', [])
+            if not tab_targets:
+                # Tab is a target CYCLER, not a selector (owner ruling
+                # 2026-07-03): with nothing to cycle to, the cursor is not
+                # an aimed target — a cast-fail reason here editorializes a
+                # non-fact ("Can't target self"). State the truth and stop.
+                async_tts.speak("No targets")
+                log("[Target] No targets")
+                return
             text = _describe_target(self)
             # Add position counter: "2 of 5"
-            tab_targets = getattr(self, 'tab_targets', [])
             if tab_targets:
                 current = self.deploy_target or self.cur_spell_target
                 if current in tab_targets:
                     idx = tab_targets.index(current) + 1
                     text = f"{idx} of {len(tab_targets)}. {text}"
-            # AoE: range warning first, then AoE details, then target
-            range_warn, aoe_info = _check_aoe_warning(self)
-            text = f"{range_warn}{aoe_info} {text}".strip() if (range_warn or aoe_info) else text
+            # AoE: range warning first, then AoE details, then target;
+            # chain-group names trail the target (owner composition ruling).
+            range_warn, aoe_info, group_suffix = _check_aoe_warning(self)
+            _prefix = f"{range_warn}{aoe_info}".strip()
+            if _prefix:
+                text = f"{_prefix} {text}"
+            if group_suffix:
+                text = f"{text}. {group_suffix}"
             async_tts.speak(text)
             log(f"[Target] {text}")
         except Exception as e:
@@ -5005,6 +5123,29 @@ if _PyGameView is not None:
     _aoe_announced_state = [False]  # what we last told the user about AoE
     _last_examine_xy = [None]  # (x, y) of last announced tile — for dedup
 
+    def _own_aura_clauses(view, point):
+        """Look-mode: name the player's own auras covering this tile (owner
+        ruling 2026-07-03 — the self-side counterpart of the threat query's
+        buff-aware enemy check). Reads the same engine oracle the game's
+        overlay paints from (buff.can_threaten), so speech tracks exactly
+        what the shimmer field conveys to a sighted player."""
+        clauses = []
+        try:
+            player = getattr(getattr(view, 'game', None), 'p1', None)
+            if player is None:
+                return clauses
+            for buff in getattr(player, 'buffs', []):
+                try:
+                    if buff.can_threaten.__func__ == Level.Buff.can_threaten:
+                        continue
+                    if buff.can_threaten(point.x, point.y):
+                        clauses.append(f"In your {_name(buff)}.")
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return clauses
+
     def _announce_look_tile(view, point):
         """Announce full tile contents in Look mode (V key). Main thread only.
         Portal tiles use speak_batched so each segment is navigable via [/]."""
@@ -5016,6 +5157,7 @@ if _PyGameView is not None:
                 chunks = _describe_portal_chunks(tile.prop, view)
                 if cfg.show_coordinates:
                     chunks[0] = f"{chunks[0]} ({point.x},{point.y})"
+                chunks.extend(_own_aura_clauses(view, point))
                 try:
                     _telemetry.emit('look', cx=point.x, cy=point.y, portal=True,
                                     msg=chunks[0] if chunks else "")
@@ -5027,6 +5169,9 @@ if _PyGameView is not None:
                 text = _describe_tile(view, point)
                 if cfg.show_coordinates:
                     text = f"{text} ({point.x},{point.y})"
+                aura_clauses = _own_aura_clauses(view, point)
+                if aura_clauses:
+                    text = f"{text} {' '.join(aura_clauses)}"
                 try:
                     _telemetry.emit('look', cx=point.x, cy=point.y, msg=text)
                 except Exception:
@@ -5047,8 +5192,11 @@ if _PyGameView is not None:
             tile_text = _describe_tile_brief(view, point)
             if cfg.show_coordinates:
                 tile_text = f"{tile_text} ({point.x},{point.y})"
-            range_warn, aoe_info = _check_aoe_warning(view)
-            text = f"{range_warn}{aoe_info} {tile_text}".strip() if (range_warn or aoe_info) else tile_text
+            range_warn, aoe_info, group_suffix = _check_aoe_warning(view)
+            _prefix = f"{range_warn}{aoe_info}".strip()
+            text = f"{_prefix} {tile_text}" if _prefix else tile_text
+            if group_suffix:
+                text = f"{text}. {group_suffix}"
             try:
                 _telemetry.emit('target_tile', cx=point.x, cy=point.y,
                                 spell=_name(spell), msg=text)
@@ -7317,14 +7465,21 @@ if _PyGameView is not None:
                 batcher.start_batching()
             _turn_announced[0] = False
 
-        # Autopickup walk finished (or was canceled): compose the summary.
-        # Known quirk (owner-accepted 2026-07-03): the path empties BEFORE
-        # the final tile's pickup event fires, so the last item misses the
-        # summary and speaks its normal per-item announcement (full effect
-        # text) right after it. Fixing this would mean second-guessing the
-        # game's path/step ordering — left as-is.
+        # Autopickup walk over: compose the summary. The walk-end tell is
+        # deterministic (final_step, armed in patched_try_move on the walk's
+        # last-step move): if armed, the final tile's pickup event is in
+        # flight and on_item_pickup composes — the grace here covers only
+        # the freak no-pickup-came case. If the path emptied with final_step
+        # never armed, that is by elimination a keydown CANCEL
+        # (RiftWizard3.py:2731) — summarize what was gathered, marked.
         if _autopickup['active'] and not getattr(self, 'path', None):
-            _finish_autopickup(self)
+            if _autopickup['final_step']:
+                if _autopickup['finish_grace'] > 0:
+                    _autopickup['finish_grace'] -= 1
+                else:
+                    _finish_autopickup(self)
+            else:
+                _finish_autopickup(self, canceled=True)
 
         # Post-processing: deploy abort detection
         # (Confirm is handled by patched_deploy, which sets _was_deploying = False first)
@@ -7351,12 +7506,16 @@ if _PyGameView is not None:
                     # Re-pressed mid-walk: the game rebuilt the path from the
                     # remaining pickups. Keep accumulating into the same
                     # summary — don't drop what's already gathered.
+                    _autopickup['final_step'] = False
+                    _autopickup['finish_grace'] = 30
                     log(f"[AutoPickup] {_log_ctx()} walk re-pathed: {len(self.path)} steps")
                 else:
                     p = self.game.p1 if getattr(self, 'game', None) else None
                     _autopickup['active'] = True
                     _autopickup['items'] = []
                     _autopickup['start_xp'] = getattr(p, 'xp', 0) if p else 0
+                    _autopickup['final_step'] = False
+                    _autopickup['finish_grace'] = 30
                     log(f"[AutoPickup] {_log_ctx()} walk started: {len(self.path)} steps")
             else:
                 # The game gives no feedback when there is nothing reachable
@@ -7428,6 +7587,28 @@ if _PyGameView is not None:
         Auto-walk (self.path non-empty) suppresses all speech to avoid rapid-fire spam."""
         # Auto-walk in progress — execute silently
         if getattr(self, 'path', None):
+            # Deterministic walk-end tell: exactly one step left = this IS
+            # the final step (the game pops steps only on success,
+            # RiftWizard3.py:2718, and keydown clears the whole path, :2731).
+            # Arm BEFORE the move — the final tile's pickup event fires
+            # inside it; disarm on a blocked attempt (path retained, the
+            # walk retries next frame).
+            walk_final = _autopickup['active'] and len(self.path) == 1
+            if walk_final:
+                _autopickup['final_step'] = True
+            result = _original_try_move(self, movedir)
+            if walk_final and not result:
+                _autopickup['final_step'] = False
+            return result
+
+        # Cancel-keypress window (owner 2026-07-03): the keydown that cancels
+        # a walk clears the path BEFORE its own movement handling runs
+        # (RiftWizard3.py:2731), so its move/bump spoke as if manual — the
+        # "Blocked" heard mid-walk. _autopickup['active'] stays True until
+        # the stopped-summary composes, so it marks the whole walk window:
+        # movement speech stays silent inside it; the summary IS the
+        # cancel's feedback. Post-summary manual moves speak normally.
+        if _autopickup['active']:
             return _original_try_move(self, movedir)
 
         # Pre-check: is there a hostile at the destination? (melee attack, not movement)
