@@ -128,6 +128,14 @@ _SETTINGS_SCHEMA = [
      "# when asked to help diagnose a bug. 'off' keeps only startup and\n"
      "# errors.\n"
      "# Default: standard"),
+    ('words_of_power', 'perf_log_threshold_ms', '100',
+     "# Log a '[Perf] turn N resolved in Xms' line whenever resolving a\n"
+     "# turn (your keypress to the turn's speech) takes at least this many\n"
+     "# milliseconds. 100 is roughly where a delay becomes humanly\n"
+     "# noticeable, so a normal log stays quiet and a slow session\n"
+     "# documents itself. Set 0 to log every turn (diagnosis); set very\n"
+     "# high to silence.\n"
+     "# Default: 100"),
     ('words_of_power', 'journal_log_enabled', 'false',
      "# Dev-only: write a per-event JSONL trace of internal capture-stage records\n"
      "# to journal_debug.log. Used by the mod author for debugging the data-model\n"
@@ -306,6 +314,8 @@ class _Cfg:
     pathfind_marked = _settings.getboolean('words_of_power', 'pathfind_marked', fallback=True)
     debug_log = _settings.get(
         'words_of_power', 'debug_log', fallback='standard').strip().lower()
+    perf_log_threshold_ms = _settings.getint(
+        'words_of_power', 'perf_log_threshold_ms', fallback=100)
     journal_log_enabled = _settings.getboolean('words_of_power', 'journal_log_enabled', fallback=False)
     log_capture_enabled = _settings.getboolean('words_of_power', 'log_capture_enabled', fallback=False)
     container_diff_enabled = _settings.getboolean('words_of_power', 'container_diff_enabled', fallback=False)
@@ -1390,6 +1400,10 @@ _pending_hp_unit = None
 # Both reset on level transition in patched_setup_level.
 _turn_count = [0]
 _turn_announced = [False]
+# Perf sentinel: perf_counter captured when the player acts (is_awaiting_input
+# drops), read at the turn-boundary pipeline block — the full span the player
+# waits through (engine resolution + capture + speech compose + oracle).
+_perf_turn_start = [None]
 _last_turn_time = [0]  # time.time() of last spoken turn announcement (debounce)
 _level_complete = [False]  # Suppress post-level noise (minion heals, etc.) (#46)
 # Level-complete announcement (header + stats sections), staged by
@@ -7222,6 +7236,10 @@ if _PyGameView is not None:
                         _container_diff.reseed()
                     except Exception as _cd_e:
                         log(f"[ContainerDiff] reseed failed: {_cd_e!r}")
+                    # A level-start beat is not a combat turn — a clock
+                    # started by the entering keypress would measure the
+                    # transition, not resolution.
+                    _perf_turn_start[0] = None
                 else:
                     try:
                         # Container-diff turn boundary (D2 boundary 7): closes
@@ -7248,6 +7266,32 @@ if _PyGameView is not None:
                             _journal.journal.records, _telemetry)
                     except Exception as _or_e:
                         log(f"[LogCapture] parity sweep error: {_or_e!r}")
+                    # Perf sentinel: the player-waited span, keypress to
+                    # composed speech. Threshold-gated so normal play adds
+                    # no log noise; 0 logs every turn (diagnosis mode).
+                    # [Perf] is standard-tier — a slow player's log carries
+                    # the evidence by default (the 0.3.1 lesson).
+                    try:
+                        if _perf_turn_start[0] is not None:
+                            _perf_ms = (time.perf_counter()
+                                        - _perf_turn_start[0]) * 1000.0
+                            _perf_turn_start[0] = None
+                            if _perf_ms >= cfg.perf_log_threshold_ms:
+                                _lvl = getattr(self.game, 'cur_level', None)
+                                _n_units = len(getattr(_lvl, 'units', ()))
+                                _turn_no = getattr(_lvl, 'turn_no', '?')
+                                log(f"[Perf] turn {_turn_no} resolved in "
+                                    f"{_perf_ms:.0f}ms, {_n_units} units")
+                                try:
+                                    if _telemetry.is_enabled():
+                                        _telemetry.emit(
+                                            'turn_perf',
+                                            ms=round(_perf_ms),
+                                            units=_n_units)
+                                except Exception:
+                                    pass
+                    except Exception as _perf_e:
+                        log(f"[Perf] sentinel error: {_perf_e!r}")
 
                 # Terrain-LoS floor (Unit 5 D5): a melt whose cast gen ran
                 # unwrapped, or a menu-time carve, leaves the flag armed —
@@ -7565,6 +7609,7 @@ if _PyGameView is not None:
         if not getattr(self.game.cur_level, 'is_awaiting_input', True):
             if _turn_announced[0]:
                 batcher.start_batching()
+                _perf_turn_start[0] = time.perf_counter()
             _turn_announced[0] = False
 
         # Autopickup walk over: compose the summary. The walk-end tell is

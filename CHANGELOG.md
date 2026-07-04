@@ -23,6 +23,11 @@ an early work-in-progress RW3 port — expect frequent changes.
 - Canceling an auto-pickup walk now says "Auto-pickup stopped." before the partial
   summary, so a canceled walk no longer sounds identical to a completed one. Movement
   bumps during the walk stay silent — the summary is the feedback.
+- Performance sentinel: when resolving a turn (your keypress to the turn's speech)
+  takes 100ms or more, the log records "[Perf] turn N resolved in Xms, M units" — so a
+  session that feels slow documents itself and a bug report carries the evidence.
+  Tunable via the new `perf_log_threshold_ms` setting (0 logs every turn; the mod's
+  own overhead per turn is microseconds).
 - New setting `debug_log` (off / standard / verbose, default standard) controls how
   much the mod writes to screen_reader_debug.log. Standard records what you did and
   what was spoken, plus startup and errors — enough for most problem reports. Verbose
