@@ -180,6 +180,70 @@ def test_turns_to_death_scalar_marks():
     assert id(u) in dirty_containers.dirty_ids
 
 
+# ---- step 4: the drained sweep ----
+
+def test_dirty_sweep_records_and_drains():
+    lvl = _fresh_level()
+    u = _unit("Wolf")
+    lvl.add_obj(u, 3, 3)
+    u.resists[Level.Tags.Fire] = 50
+    before = len(journal.records)
+    container_diff.sweep(lvl, site='test:drain')
+    new = [r for r in journal.records[before:]
+           if r['event_type'] == container_diff.KIND_RESISTS]
+    assert len(new) == 1
+    assert not dirty_containers.dirty_ids     # drained
+
+
+def test_silent_write_missed_by_drain_caught_by_full():
+    # The escaped-write shape the D6 backstop exists for: a mutation that
+    # bypasses the wrapper (unbound vanilla setitem) marks nothing. The
+    # drained sweep must miss it (that's the design's honest trade); the
+    # full-mode turn-boundary sweep must catch it.
+    lvl = _fresh_level()
+    u = _unit("Wolf")
+    lvl.add_obj(u, 3, 3)
+    dict.__setitem__(u.resists, Level.Tags.Fire, 50)   # silent, no mark
+    before = len(journal.records)
+    container_diff.sweep(lvl, site='test:drain')
+    assert not [r for r in journal.records[before:]
+                if r['event_type'] == container_diff.KIND_RESISTS]
+    container_diff.sweep(lvl, site='test:backstop', full=True)
+    caught = [r for r in journal.records[before:]
+              if r['event_type'] == container_diff.KIND_RESISTS]
+    assert len(caught) == 1
+
+
+def test_wizard_nested_bonus_recorded_with_empty_dirty_set():
+    # The always-wizard rule (D5, gate amendment): nested bonus writes go
+    # through inner dicts no wrapper sees — the dirty set stays EMPTY —
+    # yet the sweep must still record them, because the wizard is compared
+    # unconditionally on every sweep.
+    lvl = _fresh_level()
+    wiz = _unit("Wizard", hp=100)
+    wiz.is_player_controlled = True
+    lvl.add_obj(wiz, 5, 5)
+    lvl.player_unit = wiz
+    container_diff.sweep(lvl, site='test:baseline')
+    wiz.tag_bonuses[Level.Tags.Fire]['damage'] += 5
+    assert not dirty_containers.dirty_ids     # nothing marked — the point
+    before = len(journal.records)
+    container_diff.sweep(lvl, site='test:nested')
+    new = [r for r in journal.records[before:]
+           if r['event_type'] == container_diff.KIND_STAT_BONUS]
+    assert len(new) == 1
+
+
+def test_reseed_clears_dirty_set():
+    lvl = _fresh_level()
+    u = _unit("Wolf")
+    lvl.add_obj(u, 3, 3)
+    u.resists[Level.Tags.Fire] = 50
+    assert dirty_containers.dirty_ids
+    container_diff.reseed()
+    assert not dirty_containers.dirty_ids
+
+
 def test_unseeded_template_assignment_untouched():
     # Monsters factories assign unit.tags = [...] etc. at construction,
     # before add_obj — the watch must leave templates alone (no wrap, no

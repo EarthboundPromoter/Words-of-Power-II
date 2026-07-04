@@ -556,11 +556,42 @@ def _span_parent_seq():
     return None
 
 
-def _emit_deltas(level, bracket, detail, parent_fn):
+def _emit_deltas(level, bracket, detail, parent_fn, full=False):
     from journal import journal, _snapshot_unit
     units = getattr(level, 'units', None)
     if units:
-        for unit in list(units):
+        player = getattr(level, 'player_unit', None)
+        if full:
+            # Backstop mode (turn_boundary, plan D6): every unit, the
+            # full-sweep-era iteration. Drain the set too — everyone is
+            # being compared anyway; stale marks must not carry over.
+            _dirty.dirty_ids.clear()
+            to_compare = list(units)
+        else:
+            # Dirty-drain (step 4, plan D5): compare ONLY units that
+            # announced a write since the last sweep, resolved through the
+            # store (id -> identity-guarded live ref) — plus ALWAYS the
+            # wizard, empty set or not. Plan deviation, deliberate: the
+            # nested bonus family is written through inner dicts no
+            # wrapper sees, so a bonus-only equip marks NOTHING and the
+            # plan's "empty -> return" would lose that record's bracket;
+            # the unconditional wizard compare (~tens of µs) is what keeps
+            # the whole family exact. Copy-then-clear: marks landing
+            # during the compare survive to the next sweep.
+            to_compare = []
+            if _dirty.dirty_ids:
+                drained = set(_dirty.dirty_ids)
+                _dirty.dirty_ids.clear()
+                pid = id(player) if player is not None else None
+                for oid in drained:
+                    if oid == pid:
+                        continue  # compared unconditionally below
+                    entry = store._units.get(oid)
+                    if entry is not None:
+                        to_compare.append(entry[0])
+            if player is not None:
+                to_compare.append(player)
+        for unit in to_compare:
             deltas = store.diff_unit(unit)
             if not deltas:
                 continue
@@ -620,19 +651,25 @@ def _emit_deltas(level, bracket, detail, parent_fn):
             _note_drift('tile_flavor', "%s,%s" % (x, y))
 
 
-def sweep(level, bracket=None, detail=None, site='?', parent_fn=None):
-    """Full sweep of the level (plan D1: every snapshotted unit + the spell
-    shelf, no owner-only fast path). bracket names the mechanism of the
-    JUST-CLOSED span for exit sweeps ('buff_apply', 'equip', ...); entry
-    sweeps pass None — their deltas belong to the enclosing span, whose
-    identity is the record's parent, not a mechanism tag. parent_fn
+def sweep(level, bracket=None, detail=None, site='?', parent_fn=None,
+          full=False):
+    """Boundary sweep. Since the dirty-marking build (plan REV B, D5) the
+    default mode compares only dirty-marked units plus, always, the wizard
+    — coverage is identical to the old full sweep because every container
+    write announces itself (wrappers + the rebind watch) and the wizard is
+    unconditional. full=True restores the every-unit iteration: the
+    turn_boundary backstop cadence (D6). bracket names the mechanism of
+    the JUST-CLOSED span for exit sweeps ('buff_apply', 'equip', ...);
+    entry sweeps pass None — their deltas belong to the enclosing span,
+    whose identity is the record's parent, not a mechanism tag. parent_fn
     overrides parent resolution (the ctx-switch sweep pins the CLOSING
     window's cast explicitly — the live context already points at the new
     one by store-first time)."""
     if level is None:
         return
     try:
-        _emit_deltas(level, bracket, detail, parent_fn or _span_parent_seq)
+        _emit_deltas(level, bracket, detail, parent_fn or _span_parent_seq,
+                     full=full)
     except Exception as e:
         _note_failure(site, e)
 
@@ -654,6 +691,7 @@ def reseed():
     _drift_pending.clear()
     _flavor_snapshot.clear()
     _flavor_level = None
+    _dirty.dirty_ids.clear()   # level transition: stale marks die here (D5)
     store.reseed()
 
 
@@ -666,7 +704,9 @@ def turn_boundary(level, telemetry_mod=None):
     unattributed records. Drift alarms flush here through the telemetry
     seam (dev-only; None/no-sentinel -> inert)."""
     global _pending_ctx
-    sweep(level, site='turn_boundary')
+    # full=True: the once-per-turn backstop iteration (plan D6) — the one
+    # cadence where every unit is compared regardless of marks.
+    sweep(level, site='turn_boundary', full=True)
     _pending_ctx = None
     if _drift_pending:
         try:
