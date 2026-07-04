@@ -244,6 +244,72 @@ def test_reseed_clears_dirty_set():
     assert not dirty_containers.dirty_ids
 
 
+# ---- step 5: the turn-boundary backstop alarm ----
+
+class _FakeTelemetry:
+    def __init__(self):
+        self.emitted = []
+
+    def is_enabled(self):
+        return True
+
+    def emit(self, kind, **fields):
+        self.emitted.append((kind, fields))
+
+
+def test_escaped_write_raises_backstop_alarm():
+    lvl = _fresh_level()
+    u = _unit("Wolf")
+    lvl.add_obj(u, 3, 3)
+    dict.__setitem__(u.resists, Level.Tags.Fire, 50)   # bypasses wrapper
+    tel = _FakeTelemetry()
+    container_diff.turn_boundary(lvl, telemetry_mod=tel)
+    escaped = [(k, f) for k, f in tel.emitted
+               if k == 'container_escaped_write']
+    assert len(escaped) == 1
+    assert escaped[0][1]['domain'] == 'resists'
+    assert escaped[0][1]['unit'] == "Wolf"
+
+
+def test_marked_write_does_not_alarm():
+    lvl = _fresh_level()
+    u = _unit("Wolf")
+    lvl.add_obj(u, 3, 3)
+    u.resists[Level.Tags.Fire] = 50                    # normal, marks
+    tel = _FakeTelemetry()
+    container_diff.turn_boundary(lvl, telemetry_mod=tel)
+    assert not [k for k, _ in tel.emitted if k == 'container_escaped_write']
+
+
+def test_wizard_nested_write_exempt_from_alarm():
+    # The wizard's nested bonus writes never mark BY DESIGN (always-compare
+    # covers them) — the backstop must not cry wolf about the one unit
+    # whose unmarked deltas are expected.
+    lvl = _fresh_level()
+    wiz = _unit("Wizard", hp=100)
+    wiz.is_player_controlled = True
+    lvl.add_obj(wiz, 5, 5)
+    lvl.player_unit = wiz
+    container_diff.sweep(lvl, site='test:baseline')
+    wiz.tag_bonuses[Level.Tags.Fire]['damage'] += 5
+    tel = _FakeTelemetry()
+    container_diff.turn_boundary(lvl, telemetry_mod=tel)
+    assert not [k for k, _ in tel.emitted if k == 'container_escaped_write']
+
+
+def test_escaped_alarm_dedupes_per_domain_and_unit():
+    lvl = _fresh_level()
+    u = _unit("Wolf")
+    lvl.add_obj(u, 3, 3)
+    dict.__setitem__(u.resists, Level.Tags.Fire, 50)
+    tel = _FakeTelemetry()
+    container_diff.turn_boundary(lvl, telemetry_mod=tel)
+    dict.__setitem__(u.resists, Level.Tags.Fire, 75)   # same shape again
+    container_diff.turn_boundary(lvl, telemetry_mod=tel)
+    escaped = [k for k, _ in tel.emitted if k == 'container_escaped_write']
+    assert len(escaped) == 1
+
+
 def test_unseeded_template_assignment_untouched():
     # Monsters factories assign unit.tags = [...] etc. at construction,
     # before add_obj — the watch must leave templates alone (no wrap, no

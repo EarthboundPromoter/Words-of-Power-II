@@ -511,6 +511,9 @@ _failed_notes = set()      # once-per-site failure-note dedupe
 # craft effects) must not flood the JSONL every turn.
 _drift_seen = set()
 _drift_pending = []
+# Step 5 (D6): escaped-write alarms — turn-boundary deltas on units the
+# dirty-set never named. Same flush cadence and seam as drift.
+_escaped_pending = []
 
 # The suspended cast window (plan D2 boundary 4a, window-defer semantics).
 # The engine clears current_cast_context between steps of the same queued
@@ -561,10 +564,14 @@ def _emit_deltas(level, bracket, detail, parent_fn, full=False):
     units = getattr(level, 'units', None)
     if units:
         player = getattr(level, 'player_unit', None)
+        marked = None
         if full:
             # Backstop mode (turn_boundary, plan D6): every unit, the
-            # full-sweep-era iteration. Drain the set too — everyone is
-            # being compared anyway; stale marks must not carry over.
+            # full-sweep-era iteration. Keep the pre-drain marks: a delta
+            # on a unit that never marked (and is not the wizard, whose
+            # nested domains legitimately never mark) means a write path
+            # escaped the wrappers — the alarm this cadence exists for.
+            marked = set(_dirty.dirty_ids)
             _dirty.dirty_ids.clear()
             to_compare = list(units)
         else:
@@ -596,6 +603,14 @@ def _emit_deltas(level, bracket, detail, parent_fn, full=False):
             if not deltas:
                 continue
             snap = _snapshot_unit(unit)
+            if (marked is not None and id(unit) not in marked
+                    and unit is not player):
+                # Step 5 (D6): escaped write path. The record below still
+                # emits (turn-boundary attribution — honest, just late);
+                # the alarm is what makes the miss visible instead of
+                # silently absorbed.
+                for domain, _ in deltas:
+                    _note_escaped(domain, getattr(unit, 'name', '?'))
             for domain, changes in deltas:
                 parent = parent_fn()
                 # 'unattributed' = neither a causal parent NOR a mechanism
@@ -674,6 +689,26 @@ def sweep(level, bracket=None, detail=None, site='?', parent_fn=None,
         _note_failure(site, e)
 
 
+def _note_escaped(domain, name):
+    """The D6 backstop alarm: a turn-boundary delta on a unit the dirty-set
+    never named. Loud in the dev log immediately (this is a coverage bug in
+    OUR instrumentation, not game noise), deduped per (domain, unit-name),
+    flushed through the telemetry seam alongside drift (shipped installs:
+    log line only if the log is verbose; telemetry inert)."""
+    key = ('escaped', domain, name)
+    if key in _drift_seen:
+        return
+    _drift_seen.add(key)
+    if _log_fn:
+        try:
+            _log_fn("[ContainerDiff] ESCAPED WRITE: %s on %s "
+                    "(unit never dirty-marked — a write path bypassed the "
+                    "wrappers)" % (domain, name))
+        except Exception:
+            pass
+    _escaped_pending.append({'domain': domain, 'unit': name})
+
+
 def _note_drift(domain, name):
     key = (domain, name)
     if key in _drift_seen:
@@ -689,6 +724,7 @@ def reseed():
     _pending_ctx = None
     _drift_seen.clear()
     _drift_pending.clear()
+    _escaped_pending.clear()
     _flavor_snapshot.clear()
     _flavor_level = None
     _dirty.dirty_ids.clear()   # level transition: stale marks die here (D5)
@@ -708,16 +744,19 @@ def turn_boundary(level, telemetry_mod=None):
     # cadence where every unit is compared regardless of marks.
     sweep(level, site='turn_boundary', full=True)
     _pending_ctx = None
-    if _drift_pending:
+    if _drift_pending or _escaped_pending:
         try:
             enabled = getattr(telemetry_mod, 'is_enabled', None)
             if callable(enabled) and enabled():
                 for item in _drift_pending:
                     telemetry_mod.emit('container_drift', **item)
+                for item in _escaped_pending:
+                    telemetry_mod.emit('container_escaped_write', **item)
         except Exception as e:
             _note_failure('drift_flush', e)
         finally:
             _drift_pending.clear()
+            _escaped_pending.clear()
 
 
 # ----------------------------------------------------------------------
