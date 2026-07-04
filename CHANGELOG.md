@@ -3,6 +3,32 @@
 All notable changes to **Words of Power II** are listed here, newest first. This is
 an early work-in-progress RW3 port — expect frequent changes.
 
+## Unreleased
+
+### Added
+- Spell targeting now follows the game's own footprint. The "Within AoE" census reads
+  from the same engine source that paints the blue tiles, so every true area spell
+  reports — beams, cones, and linked-group spells like Mass Melt's chain, which the old
+  radius-and-keyword guess missed entirely. Single-tile spells (Blink and friends) no
+  longer produce false "Within AoE" warnings. The census lists allies before enemies,
+  so a friendly about to be caught in the blast is the first thing heard.
+- Linked-group spells name their chain: after the targeted unit, who else is connected
+  — "Orc (7,4). 2 Goblins." — allies first. New setting `aoe_group_names` (default on);
+  off falls back to the plain count phrasing.
+- Invalid targets speak their reason at the cursor: "No line of sight.", "No target.",
+  "Tile occupied." — the same reasons previously heard only after a failed cast
+  attempt. "Out of range." now comes from the game's own range circle for every spell.
+- Look mode names your own auras covering the examined tile: "In your Fire Aura."
+- Pressing Tab with no valid targets says "No targets" instead of a spurious reason.
+- Canceling an auto-pickup walk now says "Auto-pickup stopped." before the partial
+  summary, so a canceled walk no longer sounds identical to a completed one. Movement
+  bumps during the walk stay silent — the summary is the feedback.
+
+### Fixed
+- The final auto-pickup item now lands inside the batch summary instead of announcing
+  itself separately afterward — walk-end detection is now exact.
+- Memory Orb pickups say "4 SP total," matching the summary's wording.
+
 ## 2026-07-03 — 0.3.1
 
 ### Added
