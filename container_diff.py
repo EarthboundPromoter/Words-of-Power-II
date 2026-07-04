@@ -230,6 +230,52 @@ _DOMAIN_KINDS = {
 }
 
 
+# Dirty-marking wrappers (plan REV B, D1/D2). Module-level import is safe
+# here: dirty_containers is mod-local pure Python (collections only), so the
+# pure-logic tests stay cheap and nothing game-side loads early.
+import dirty_containers as _dirty
+
+# The container attrs wrapped on EVERY unit. Wizard-only domains (flat and
+# nested bonus families) are deliberately NOT wrapped: the drained sweep
+# always compares the wizard (D5), which covers them completely — including
+# the nested double-subscript writes no outer wrapper can see.
+_WRAPPED_ATTRS = ('resists', 'cool_downs', 'tags')
+
+
+def _wrap_unit_containers(unit):
+    """Install dirty-marking twins on a unit's watched containers.
+    Idempotent and owner-aware (D2): already-owned wrappers are skipped;
+    a wrapper owned by a DIFFERENT unit (the Grey Goo donation shape) is
+    re-owned IN PLACE — object identity is preserved because the game may
+    intend the alias. Assignment bypasses the (journal-patched)
+    Unit.__setattr__ via object.__setattr__: no records, no marks, and no
+    interaction with the step-3 rebind watch. Pure observation setup — any
+    failure leaves the plain container in place (full-sweep-era behavior)."""
+    oid = id(unit)
+    from collections import defaultdict
+    for name in _WRAPPED_ATTRS:
+        try:
+            cur = getattr(unit, name, None)
+            if cur is None:
+                continue
+            if isinstance(cur, _dirty._DirtyMarkMixin):
+                if cur._owner_id != oid:
+                    cur._owner_id = oid
+                continue
+            if isinstance(cur, defaultdict):
+                wrapped = _dirty.DirtyDefaultDict(cur.default_factory, cur)
+            elif isinstance(cur, dict):
+                wrapped = _dirty.DirtyDict(cur)
+            elif isinstance(cur, list):
+                wrapped = _dirty.DirtyList(cur)
+            else:
+                continue
+            _dirty.own(wrapped, oid)
+            object.__setattr__(unit, name, wrapped)
+        except Exception:
+            pass
+
+
 def _unit_snapshot(unit, wizard):
     snap = {
         'resists': _snap_flat(getattr(unit, 'resists', None)),
@@ -275,6 +321,10 @@ class ContainerStore:
         wizard = bool(getattr(unit, 'is_player_controlled', False))
         entry = self._units.get(id(unit))
         if entry is None or entry[0] is not unit:
+            # First sight (or id reuse): baseline AND wrap. Wrapping rides
+            # the same moment as the snapshot so "seeded" always implies
+            # "marked from here on" (D2).
+            _wrap_unit_containers(unit)
             self._units[id(unit)] = (unit, _unit_snapshot(unit, wizard))
             return []
 
@@ -652,6 +702,9 @@ def install(log_fn=None):
     original_unit_equip = unit_cls.equip
     original_unit_unequip = unit_cls.unequip
     original_remove_obj = level_cls.remove_obj
+    # Seed-on-add (plan D2.1, gate-amended) — getattr-gated like the Unit 5
+    # hooks so the RW2 backport declines per-hook.
+    original_add_obj = getattr(level_cls, 'add_obj', None)
     # Unit 5 D3: getattr-gated (RW2 backport declines per-hook).
     original_set_tileset = getattr(level_cls, 'set_tileset', None)
     original_set_group_tileset = getattr(level_cls, 'set_group_tileset', None)
@@ -703,6 +756,23 @@ def install(log_fn=None):
                 store.drop_unit(obj)
             except Exception:
                 pass
+
+    def patched_add_obj(self, obj, x, y):
+        # Seed-and-wrap the moment a unit enters play (D2.1). Closes the
+        # bootstrap gap the gate found: under the drained sweep nothing
+        # else observes a new unit until its own pre_advance or the turn
+        # boundary, so an in-place write in that window would fold into a
+        # late baseline instead of recording. Baselining here means writes
+        # from the very next moment on produce real, correctly-parented
+        # deltas. Original runs FIRST — seeding is post-placement
+        # observation, exception-guarded, never in the engine's way.
+        result = original_add_obj(self, obj, x, y)
+        try:
+            if isinstance(obj, unit_cls):
+                store.diff_unit(obj)
+        except Exception:
+            pass
+        return result
 
     def _record_flavor_method_changes(level, pre, via):
         # pre = [(x, y, chasm_type_before, tileset_before)]. Emit only for
@@ -783,6 +853,8 @@ def install(log_fn=None):
     unit_cls.equip = patched_unit_equip
     unit_cls.unequip = patched_unit_unequip
     level_cls.remove_obj = patched_remove_obj
+    if original_add_obj is not None:
+        level_cls.add_obj = patched_add_obj
     if original_set_tileset is not None:
         level_cls.set_tileset = patched_set_tileset
     if original_set_group_tileset is not None:
