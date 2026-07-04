@@ -50,8 +50,37 @@ except Exception:
         _telemetry = None
 
 
+# --- Debug-log tiers: _log_mode gates what reaches screen_reader_debug.log.
+# 'verbose' = everything (pre-0.3.2 behavior); 'standard' = drop the
+# event-rate internals tagged below; 'off' = startup block + error lines
+# only. Starts 'verbose' so the whole startup sequence (banner, settings
+# echo, hook installs) lands in every mode — the mode switches to the
+# configured value after the settings echo. Tag tiering stays deliberately
+# coarse until the composer-phase speech audits retune the tag universe.
+_log_mode = 'verbose'
+
+# Event-rate tags: lines that scale with game events (one per heal, death,
+# move, pipeline decision — the bulk of a long session's file). Player-
+# action-rate tags ([Tooltip], [Select], [Shop], the scans) stay standard:
+# they record what the player did; [Spoke] records what they heard.
+_LOG_VERBOSE_TAGS = frozenset((
+    '[Enemy Heal]', '[Collapsed minion]', '[Collapsed world]', '[Death]',
+    '[Shield]', '[Move]', '[Cast]', '[LoS]', '[Contact]', '[Turn]',
+    '[Batch]', '[Pipeline]', '[Digest]', '[Orphan]', '[Mark]', '[Dedup]',
+))
+
+
 def log(message):
-    """Write to both console and log file."""
+    """Write to both console and log file, gated by the debug_log setting."""
+    if _log_mode != 'verbose':
+        if _log_mode == 'off':
+            m = message.lower()
+            if 'error' not in m and 'traceback' not in m:
+                return
+        elif message.startswith('['):
+            end = message.find(']')
+            if end != -1 and message[:end + 1] in _LOG_VERBOSE_TAGS:
+                return
     timestamp = datetime.datetime.now().strftime("%H:%M:%S")
     full_message = f"[{timestamp}] {message}"
     print(full_message)
@@ -91,6 +120,14 @@ _SETTINGS_SCHEMA = [
      "# (\"Move north.\") to the regular mark readout. Set false to silence the\n"
      "# navigation channel without losing the rest of the mark info.\n"
      "# Default: true"),
+    ('words_of_power', 'debug_log', 'standard',
+     "# How much the mod writes to screen_reader_debug.log. 'standard'\n"
+     "# (default) records what you did and what was spoken, plus startup\n"
+     "# and errors — enough for most problem reports. 'verbose' adds the\n"
+     "# mod's per-event internals: large files on long sessions; set it\n"
+     "# when asked to help diagnose a bug. 'off' keeps only startup and\n"
+     "# errors.\n"
+     "# Default: standard"),
     ('words_of_power', 'journal_log_enabled', 'false',
      "# Dev-only: write a per-event JSONL trace of internal capture-stage records\n"
      "# to journal_debug.log. Used by the mod author for debugging the data-model\n"
@@ -267,6 +304,8 @@ else:
 class _Cfg:
     show_coordinates = _settings.getboolean('words_of_power', 'show_coordinates', fallback=True)
     pathfind_marked = _settings.getboolean('words_of_power', 'pathfind_marked', fallback=True)
+    debug_log = _settings.get(
+        'words_of_power', 'debug_log', fallback='standard').strip().lower()
     journal_log_enabled = _settings.getboolean('words_of_power', 'journal_log_enabled', fallback=False)
     log_capture_enabled = _settings.getboolean('words_of_power', 'log_capture_enabled', fallback=False)
     container_diff_enabled = _settings.getboolean('words_of_power', 'container_diff_enabled', fallback=False)
@@ -297,8 +336,11 @@ if cfg.orphan_los_grouping not in ('section', 'block', 'line'):
     cfg.orphan_los_grouping = 'section'
 if cfg.spawn_coord_cap < 0:
     cfg.spawn_coord_cap = 5
+if cfg.debug_log not in ('off', 'standard', 'verbose'):
+    cfg.debug_log = 'standard'
 log(f"[Settings] show_coordinates = {cfg.show_coordinates}")
 log(f"[Settings] pathfind_marked = {cfg.pathfind_marked}")
+log(f"[Settings] debug_log = {cfg.debug_log}")
 log(f"[Settings] journal_log_enabled = {cfg.journal_log_enabled}")
 log(f"[Settings] log_capture_enabled = {cfg.log_capture_enabled}")
 log(f"[Settings] container_diff_enabled = {cfg.container_diff_enabled}")
@@ -316,6 +358,11 @@ log(f"[Settings] spawn_coord_cap = {cfg.spawn_coord_cap}")
 log(f"[Settings] orphan_los_grouping = {cfg.orphan_los_grouping}")
 log(f"[Settings] enemy_shield_totals = {cfg.enemy_shield_totals}")
 log(f"[Settings] ally_shield_totals = {cfg.ally_shield_totals}")
+
+# Startup block complete — switch the log to its configured mode. Everything
+# above (banner, settings echo) lands in every mode; hook-install lines below
+# land in standard and verbose.
+_log_mode = cfg.debug_log
 
 
 def _legacy_combat_off():
@@ -591,6 +638,9 @@ class SyncTTS:
     def speak(self, text):
         self._history.append(text)
         self._cursor = -1  # reset to live on new speech
+        # The one line every utterance passes through: standard-tier logs
+        # always record what was heard, independent of which feature spoke.
+        log(f"[Spoke] {text}")
         self.base_tts.speak(text)
 
     def cancel(self):
@@ -633,7 +683,9 @@ class SyncTTS:
         for chunk in chunks:
             self._history.append(chunk)
         self._cursor = -1
-        self.base_tts.speak(' '.join(chunks))
+        joined = ' '.join(chunks)
+        log(f"[Spoke] {joined}")
+        self.base_tts.speak(joined)
 
     def speak_chunks(self, chunks):
         """Unified speech entry point for list[str] describers.

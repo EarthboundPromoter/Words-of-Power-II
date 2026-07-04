@@ -23,6 +23,13 @@ an early work-in-progress RW3 port — expect frequent changes.
 - Canceling an auto-pickup walk now says "Auto-pickup stopped." before the partial
   summary, so a canceled walk no longer sounds identical to a completed one. Movement
   bumps during the walk stay silent — the summary is the feedback.
+- New setting `debug_log` (off / standard / verbose, default standard) controls how
+  much the mod writes to screen_reader_debug.log. Standard records what you did and
+  what was spoken, plus startup and errors — enough for most problem reports. Verbose
+  restores the full per-event internals (multi-megabyte files on long sessions; set it
+  when asked to help diagnose a bug). Off keeps only startup and errors. Every spoken
+  utterance now also logs as a "[Spoke]" line, so a standard log always shows exactly
+  what was heard.
 
 - Rift previews now mark a component reward as such — "Component: Flame Blade
   Fragment (Fire, Sorcery)" — matching the cyan name the game draws for reward
