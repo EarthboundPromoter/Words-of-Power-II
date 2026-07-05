@@ -31,6 +31,15 @@ if os.path.exists(log_file_path) and os.path.getsize(log_file_path) > 0:
         os.rename(log_file_path, os.path.join(log_archive_dir, archive_name))
     except OSError:
         pass  # If rename fails (e.g. duplicate), just overwrite
+
+# Cap the archive folder: prune oldest-first once the just-archived log is
+# in (so the newest survivor is always the last session). log() doesn't
+# exist yet this early — the result is reported after the banner below.
+import log_archive as _log_archive
+_LOG_ARCHIVE_CAP_BYTES = 25 * 1024 * 1024
+_pruned_count, _pruned_bytes = _log_archive.prune(
+    log_archive_dir, _LOG_ARCHIVE_CAP_BYTES)
+
 log_file = open(log_file_path, 'w', encoding='utf-8')
 
 # Dev-only telemetry: writes structured JSONL to local disk for the author's
@@ -113,6 +122,11 @@ log(f"Mod directory: {mod_dir}")
 log(f"Game directory: {game_dir}")
 log(f"Log file: {log_file_path}")
 log("=" * 60)
+
+if _pruned_count:
+    log(f"[Logs] Archive folder over its {_LOG_ARCHIVE_CAP_BYTES // (1024 * 1024)} MB cap: "
+        f"removed the {_pruned_count} oldest archived log(s), "
+        f"{_pruned_bytes / (1024 * 1024):.1f} MB")
 
 # ============================================================================
 # SETTINGS
