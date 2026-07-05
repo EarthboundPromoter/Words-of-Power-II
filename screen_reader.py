@@ -191,6 +191,14 @@ _SETTINGS_SCHEMA = [
      "# its true cause internally — nothing is spoken yet. Leave false\n"
      "# unless instructed to enable it for diagnosis.\n"
      "# Default: false"),
+    ('words_of_power', 'diagnostics_migrated', 'true',
+     "# Internal one-time marker — leave this alone. 0.3.1 shipped a\n"
+     "# settings.ini with the five diagnostic flags above turned on, which\n"
+     "# slowed the game badly in crowded fights. A settings file without\n"
+     "# this marker predates the fix, so the mod turns those five flags\n"
+     "# off once and stamps this. Deleting the marker re-runs that\n"
+     "# adjustment on the next launch.\n"
+     "# Default: true"),
     ('words_of_power', 'aoe_group_names', 'true',
      "# For spells whose area is a linked group of units (Mass Melt's chain\n"
      "# and similar): after the targeted unit, list who else is in the\n"
@@ -329,6 +337,24 @@ if not os.path.exists(_settings_path):
 else:
     _settings.read(_settings_path, encoding='utf-8')
     log("[Settings] Loaded settings.ini")
+    # One-time 0.3.2 upgrade adjustment: 0.3.1 shipped a settings.ini with
+    # the five dev-diagnostic flags on (the reported swarm-fight slowdown).
+    # A file without the diagnostics_migrated marker predates the fix, so
+    # the five flags are forced off in place — comments and every other
+    # user-set value untouched. Keys the old file doesn't have at all are
+    # left to backfill_missing below, which also stamps the marker itself
+    # (a schema key defaulting true), making this a single-shot pass.
+    if not _settings.has_option('words_of_power', 'diagnostics_migrated'):
+        _forced = _settings_schema.force_values(
+            _settings_path, _settings,
+            [('words_of_power', _k, 'false') for _k in (
+                'journal_log_enabled', 'log_capture_enabled',
+                'container_diff_enabled', 'cause_markers_enabled',
+                'reactive_markers_enabled')],
+            log_fn=log)
+        if _forced:
+            log("[Settings] 0.3.2 upgrade: turned diagnostic flags off "
+                "in settings.ini (one-time; other settings untouched)")
     _settings_schema.backfill_missing(
         _settings_path, _settings, _SETTINGS_SCHEMA, log_fn=log)
 
@@ -3061,13 +3087,15 @@ if _main is not None:
 
 if not _keybinds_migrated:
     # First load — will also patch the live instance and announce.
-    # Write the flag so subsequent loads don't repeat.
-    if not _settings.has_section('words_of_power'):
-        _settings.add_section('words_of_power')
-    _settings.set('words_of_power', 'keybinds_migrated', 'true')
+    # Write the flag so subsequent loads don't repeat. Persisted with the
+    # targeted in-place writer: a whole-file ConfigParser rewrite (the old
+    # way) strips every comment from settings.ini, and with 0.3.2 no longer
+    # shipping the file, every fresh install hits this path on first boot.
     try:
-        with open(_settings_path, 'w', encoding='utf-8') as _f:
-            _settings.write(_f)
+        _settings_schema.force_values(
+            _settings_path, _settings,
+            [('words_of_power', 'keybinds_migrated', 'true')],
+            insert_missing=True)
         log("[Keybinds] Migration flag saved to settings.ini")
     except Exception as _e:
         log(f"[Keybinds] Could not save settings.ini: {_e}")
