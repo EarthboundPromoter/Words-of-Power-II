@@ -36,6 +36,11 @@ an early work-in-progress RW3 port — expect frequent changes.
   utterance now also logs as a "[Spoke]" line, so a standard log always shows exactly
   what was heard.
 
+- The debug log no longer echoes to the game's console window by default. The
+  console renders each line synchronously, and on busy turns that echo was
+  measurably delaying the turn's speech — the log file itself is unchanged and
+  still records everything. New setting `console_echo` (default false) restores
+  the live console view; error lines always echo regardless.
 - Rift previews now mark a component reward as such — "Component: Flame Blade
   Fragment (Fire, Sorcery)" — matching the cyan name the game draws for reward
   components, the same way "Boss:" and "Elite:" already voice the boss-tier colors.

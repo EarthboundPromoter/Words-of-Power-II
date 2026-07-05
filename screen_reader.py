@@ -59,6 +59,16 @@ except Exception:
 # coarse until the composer-phase speech audits retune the tag universe.
 _log_mode = 'verbose'
 
+# --- Console echo: the exe is a console-subsystem build (PyInstaller), so a
+# real console is attached and print() renders SYNCHRONOUSLY — each echoed
+# line stalls the game thread for the draw, and the long lines (full composed
+# utterances) are the slow ones. The file gets every line regardless; the
+# console echo is a duplicate view, so it is off by default (S39 replay
+# attribution: the live compose slice ran ~7x the replayed producers with
+# echo on). Error/traceback lines always echo. Starts True so the startup
+# block behaves as before; switches to the configured value with _log_mode.
+_console_echo = True
+
 # Event-rate tags: lines that scale with game events (one per heal, death,
 # move, pipeline decision — the bulk of a long session's file). Player-
 # action-rate tags ([Tooltip], [Select], [Shop], the scans) stay standard:
@@ -71,7 +81,8 @@ _LOG_VERBOSE_TAGS = frozenset((
 
 
 def log(message):
-    """Write to both console and log file, gated by the debug_log setting."""
+    """Write to the log file (and the console when console_echo is on),
+    gated by the debug_log setting. Error/traceback lines always echo."""
     if _log_mode != 'verbose':
         if _log_mode == 'off':
             m = message.lower()
@@ -83,7 +94,12 @@ def log(message):
                 return
     timestamp = datetime.datetime.now().strftime("%H:%M:%S")
     full_message = f"[{timestamp}] {message}"
-    print(full_message)
+    if _console_echo:
+        print(full_message)
+    else:
+        m = message.lower()
+        if 'error' in m or 'traceback' in m:
+            print(full_message)
     log_file.write(full_message + "\n")
     log_file.flush()
     try:
@@ -128,6 +144,13 @@ _SETTINGS_SCHEMA = [
      "# when asked to help diagnose a bug. 'off' keeps only startup and\n"
      "# errors.\n"
      "# Default: standard"),
+    ('words_of_power', 'console_echo', 'false',
+     "# Echo the debug log to the game's console window as well as the file.\n"
+     "# The console renders each line synchronously — echoing measurably\n"
+     "# slows busy turns — and the file gets every line either way, so this\n"
+     "# is off by default. Error lines always echo. Set true to watch the\n"
+     "# log scroll live in the console.\n"
+     "# Default: false"),
     ('words_of_power', 'perf_log_threshold_ms', '100',
      "# Log a '[Perf] turn N resolved in Xms' line whenever resolving a\n"
      "# turn (your keypress to the turn's speech) takes at least this many\n"
@@ -314,6 +337,8 @@ class _Cfg:
     pathfind_marked = _settings.getboolean('words_of_power', 'pathfind_marked', fallback=True)
     debug_log = _settings.get(
         'words_of_power', 'debug_log', fallback='standard').strip().lower()
+    console_echo = _settings.getboolean(
+        'words_of_power', 'console_echo', fallback=False)
     perf_log_threshold_ms = _settings.getint(
         'words_of_power', 'perf_log_threshold_ms', fallback=100)
     journal_log_enabled = _settings.getboolean('words_of_power', 'journal_log_enabled', fallback=False)
@@ -351,6 +376,7 @@ if cfg.debug_log not in ('off', 'standard', 'verbose'):
 log(f"[Settings] show_coordinates = {cfg.show_coordinates}")
 log(f"[Settings] pathfind_marked = {cfg.pathfind_marked}")
 log(f"[Settings] debug_log = {cfg.debug_log}")
+log(f"[Settings] console_echo = {cfg.console_echo}")
 log(f"[Settings] journal_log_enabled = {cfg.journal_log_enabled}")
 log(f"[Settings] log_capture_enabled = {cfg.log_capture_enabled}")
 log(f"[Settings] container_diff_enabled = {cfg.container_diff_enabled}")
@@ -371,8 +397,10 @@ log(f"[Settings] ally_shield_totals = {cfg.ally_shield_totals}")
 
 # Startup block complete — switch the log to its configured mode. Everything
 # above (banner, settings echo) lands in every mode; hook-install lines below
-# land in standard and verbose.
+# land in standard and verbose. Console echo switches here too: the startup
+# block echoes for everyone, the session echoes only when configured.
 _log_mode = cfg.debug_log
+_console_echo = cfg.console_echo
 
 
 def _legacy_combat_off():
