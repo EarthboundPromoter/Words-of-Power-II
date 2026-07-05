@@ -5,7 +5,8 @@ equipment_tick chains.
 Walks for equipment_tick chain roots (synthesized by
 journal.patched_buff_advance when a Buff with buff_type=BUFF_TYPE_ITEM
 ticks). Each chain represents one equipment item firing its on_advance
-during the wizard's pre_advance phase.
+during the wizard's post-action buff advance (Unit.advance_buffs,
+Level.py:3437 — after the cast and its spells have fully resolved).
 
 Sits between the digest (player keypress narrative) and orphan (ambient
 content) in the pipeline so the listener hears:
@@ -22,13 +23,15 @@ Orphan respects equipment_v1 in turn so the same record never renders
 twice across the pipeline.
 
 Why this is a separate producer rather than a section inside orphan:
-equipment ticks are player-aligned (the wizard equipped them) but they
-fire BEFORE the keypress chain, so they don't fit cleanly inside
-either the digest's keypress narrative or orphan's ambient body.
-Giving them their own producer with priority 150 puts the gear
-narrative right after the player's chosen action and before enemy
-turn content, matching the listener's mental model of "what I did,
-what my gear did, what they did."
+equipment ticks are player-aligned (the wizard equipped them) and fire
+AFTER the keypress chain resolves (Unit.advance_buffs, Level.py:3437),
+but as their own chain roots — not descendants of the cast — so they
+don't fit inside the digest's chain composition. Giving them their own
+producer with priority 150 puts the gear narrative right after the
+player's chosen action and before enemy turn content, which matches
+the engine's actual resolution order: cast, then gear ticks, then the
+enemy phase. (An earlier version of this docstring claimed ticks fire
+BEFORE the keypress chain — wrong, corrected 2026-07-05; taxonomy A8.)
 """
 
 from helpers import _pluralize, classify_resist_outcome, dedupe_unit_members
