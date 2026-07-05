@@ -1,6 +1,6 @@
 # Words of Power II
 
-**Version 0.3.1 — beta**
+**Version 0.3.2 — beta**
 
 A screen-reader mod for **Rift Wizard 3**: it speaks the game's state and events
 through NVDA or JAWS (via Tolk) so the game can be played without sight. It's the Rift
@@ -71,7 +71,7 @@ any speech is running is a catch-22. A bundled program handles it:
 2. Run `screen_reader/bin/enable_screen_reader.exe` (or `python enable_screen_reader.py`
    from the folder). Windows may warn the program is unsigned — choose *Run anyway*.
    `--disable` turns the mod back off.
-3. Launch the game. You'll hear "Words of Power version 0.3.1" if it's working. A debug
+3. Launch the game. You'll hear "Words of Power version 0.3.2" if it's working. A debug
    log is written to `screen_reader_debug.log` in the mod folder.
 
 The very first screen on launch is **Language select** (voiced, English only) — just
@@ -248,10 +248,9 @@ This is a limited beta — bug reports are the point.
 - **GitHub:** open an issue at
   [Words-of-Power-II issues](https://github.com/EarthboundPromoter/Words-of-Power-II/issues).
 
-A support email is coming; for now Discord or GitHub is best. Please include what you
-were doing, what you heard (or didn't), and the relevant part of
-`screen_reader_debug.log` from the mod folder. If the game crashed, `crash.txt` (in the
-game folder) helps too.
+Please include what you were doing, what you heard (or didn't), and the relevant part
+of `screen_reader_debug.log` from the mod folder. If the game crashed, `crash.txt` (in
+the game folder) helps too.
 
 ## Known Issues and Untested Features
 
@@ -265,10 +264,11 @@ Expect rough edges in an early beta:
 - **Crafting depth.** The core loop works (browse, filter, pick components, confirm,
   equip), but some extras aren't in — for instance per-component keyboard browsing of
   your bank.
-- **A few screens aren't voiced yet.** Most screens read — the main menu, options,
-  shops, character sheet, key rebinding, combat log, game-mode/trial/custom-run setup,
-  and so on. Not yet voiced: the new **How to Play** screen, the **Mods** list, and
-  **Language** select. They're on the list.
+- **The Mods list isn't voiced yet.** Every other screen reads — the main menu,
+  options, shops, character sheet, key rebinding, combat log, game-mode/trial/custom-run
+  setup, **How to Play**, **Language** select, and so on. The **Mods** screen is the one
+  holdout (the bundled enabler program above covers turning this mod on, so you don't
+  need that screen to get running).
 - **Some mouse-only base-game controls aren't wired up yet.** A few parts of Rift
   Wizard 3's interface are mouse-driven; keyboard and speech support for them is doable
   and simply isn't in yet.
