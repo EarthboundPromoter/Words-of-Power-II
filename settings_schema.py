@@ -54,6 +54,86 @@ def render_default_settings(schema):
     return "\n".join(parts)
 
 
+def force_values(path, parser, items, insert_missing=False, log_fn=None):
+    """Set (section, key, value) triples in the settings file IN PLACE,
+    preserving comments and layout — the counterpart to backfill_missing
+    for keys that must be CHANGED, not added (the 0.3.2 diagnostics
+    adjustment, the keybinds-migrated flag). Never rewrites the whole file
+    through ConfigParser: that strips every comment.
+
+    A key present in the file has every occurrence rewritten (the tolerant
+    parser reads last-value-wins, so all copies must agree). A key absent
+    from the file is skipped unless insert_missing=True, in which case it
+    is inserted at the end of its section's block (section appended at end
+    of file when truly absent) — schema-comment insertion stays
+    backfill_missing's job. The live parser is updated to match. Returns
+    the list of (section, key) pairs whose stored value actually changed.
+    """
+    with open(path, encoding='utf-8') as f:
+        lines = f.read().splitlines()
+
+    changed = []
+    file_dirty = False
+    for section, key, value in items:
+        header_idx = None
+        section_end = len(lines)
+        for i, ln in enumerate(lines):
+            stripped = ln.strip()
+            if header_idx is None:
+                if stripped == f"[{section}]":
+                    header_idx = i
+            elif stripped.startswith('[') and stripped.endswith(']'):
+                section_end = i
+                break
+
+        found = False
+        value_differs = False
+        if header_idx is not None:
+            for j in range(header_idx + 1, section_end):
+                s = lines[j].strip()
+                if s.startswith('#') or s.startswith(';'):
+                    continue
+                for delim in ('=', ':'):
+                    name, _, _rest = s.partition(delim)
+                    if _ and name.strip().lower() == key.lower():
+                        found = True
+                        if _rest.strip() != value:
+                            lines[j] = f"{key} = {value}"
+                            value_differs = True
+                            file_dirty = True
+                        break
+
+        if not found:
+            if not insert_missing:
+                continue
+            if header_idx is None:
+                lines.append("")
+                lines.append(f"[{section}]")
+                lines.append(f"{key} = {value}")
+            else:
+                lines[section_end:section_end] = [f"{key} = {value}"]
+            value_differs = True
+            file_dirty = True
+
+        if not parser.has_section(section):
+            parser.add_section(section)
+        parser.set(section, key, value)
+        if value_differs:
+            changed.append((section, key))
+
+    if file_dirty:
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write("\n".join(lines) + "\n")
+
+    if changed and log_fn:
+        try:
+            keys = ', '.join(f"[{s}].{k}" for s, k in changed)
+            log_fn(f"[Settings] Forced values: {keys}")
+        except Exception:
+            pass
+    return changed
+
+
 def backfill_missing(path, parser, schema, log_fn=None):
     """Insert schema keys missing from the loaded settings.ini into their
     DECLARED section (never appended blindly at end of file).

@@ -109,3 +109,113 @@ def test_legacy_eof_backfill_shape_recovers(tmp_path):
     reparsed = _read(path)
     assert reparsed.get('words_of_power', 'beta') == 'false'   # schema default
     assert reparsed.get('Composer', 'beta') == 'true'          # inert leftover
+
+
+# ---------------------------------------------------------------------------
+# force_values — the targeted in-place writer (0.3.2 diagnostics adjustment,
+# keybinds-migrated flag). Its contract: change ONLY the named keys' value
+# text; every comment and every other line survives byte-for-byte.
+# ---------------------------------------------------------------------------
+
+def test_force_rewrites_value_preserving_everything_else(tmp_path):
+    path = _write(tmp_path,
+                  "# file header\n[words_of_power]\n# alpha comment\n"
+                  "alpha = true\nbeta = false\n\n[Composer]\ngamma = 5\n")
+    parser = _read(path)
+    changed = settings_schema.force_values(
+        path, parser, [('words_of_power', 'alpha', 'false')])
+    assert changed == [('words_of_power', 'alpha')]
+    lines = open(path, encoding='utf-8').read().splitlines()
+    assert "# file header" in lines and "# alpha comment" in lines
+    assert "alpha = false" in lines
+    assert "beta = false" in lines and "gamma = 5" in lines
+    # the LIVE parser reflects the new value without a re-read
+    assert parser.get('words_of_power', 'alpha') == 'false'
+
+
+def test_force_only_touches_the_named_section(tmp_path):
+    # Same key name in two sections: only the addressed one changes.
+    path = _write(tmp_path,
+                  "[words_of_power]\ngamma = 1\n[Composer]\ngamma = 1\n")
+    settings_schema.force_values(
+        path, _read(path), [('Composer', 'gamma', '2')])
+    reparsed = _read(path)
+    assert reparsed.get('words_of_power', 'gamma') == '1'
+    assert reparsed.get('Composer', 'gamma') == '2'
+
+
+def test_force_rewrites_all_duplicate_copies(tmp_path):
+    # strict=False reads last-value-wins, so a half-rewritten duplicate
+    # pair would silently revert the change: every copy must agree.
+    path = _write(tmp_path,
+                  "[words_of_power]\nalpha = true\nalpha = true\n")
+    settings_schema.force_values(
+        path, _read(path), [('words_of_power', 'alpha', 'false')])
+    content = open(path, encoding='utf-8').read()
+    assert content.count("alpha = false") == 2
+    assert "alpha = true" not in content
+
+
+def test_force_skips_absent_key_by_default(tmp_path):
+    # Insertion (with schema comments) is backfill_missing's job.
+    path = _write(tmp_path, "[words_of_power]\nalpha = true\n")
+    before = open(path, encoding='utf-8').read()
+    changed = settings_schema.force_values(
+        path, _read(path), [('words_of_power', 'beta', 'false')])
+    assert changed == []
+    assert open(path, encoding='utf-8').read() == before
+
+
+def test_force_insert_missing_lands_in_declared_section(tmp_path):
+    path = _write(tmp_path,
+                  "[words_of_power]\nalpha = true\n\n[Composer]\ngamma = 5\n")
+    parser = _read(path)
+    changed = settings_schema.force_values(
+        path, parser, [('words_of_power', 'beta', 'true')],
+        insert_missing=True)
+    assert changed == [('words_of_power', 'beta')]
+    lines = open(path, encoding='utf-8').read().splitlines()
+    assert lines.index('beta = true') < lines.index('[Composer]')
+    assert parser.get('words_of_power', 'beta') == 'true'
+
+
+def test_force_noop_when_value_already_set(tmp_path):
+    path = _write(tmp_path, "[words_of_power]\nalpha = true\n")
+    before = open(path, encoding='utf-8').read()
+    changed = settings_schema.force_values(
+        path, _read(path), [('words_of_power', 'alpha', 'true')])
+    assert changed == []
+    assert open(path, encoding='utf-8').read() == before
+
+
+def test_force_matches_colon_delimited_keys(tmp_path):
+    # configparser accepts "key: value"; a hand-edited file must not dodge
+    # the rewrite on delimiter style.
+    path = _write(tmp_path, "[words_of_power]\nalpha: true\n")
+    settings_schema.force_values(
+        path, _read(path), [('words_of_power', 'alpha', 'false')])
+    assert _read(path).get('words_of_power', 'alpha') == 'false'
+
+
+def test_upgrade_scenario_031_ini(tmp_path):
+    # Facsimile of the real 0.3.2 upgrade pass over a 0.3.1 shipped file:
+    # force the diagnostic flags off, then backfill stamps the marker.
+    # Customizations (coordinates) and comments survive.
+    schema = [
+        ('words_of_power', 'show_coordinates', 'true', "# coords comment"),
+        ('words_of_power', 'journal_log_enabled', 'false', "# journal comment"),
+        ('words_of_power', 'diagnostics_migrated', 'true', "# marker comment"),
+    ]
+    path = _write(tmp_path,
+                  "# user file from 0.3.1\n[words_of_power]\n"
+                  "show_coordinates = false\njournal_log_enabled = true\n")
+    parser = _read(path)
+    assert not parser.has_option('words_of_power', 'diagnostics_migrated')
+    settings_schema.force_values(
+        path, parser, [('words_of_power', 'journal_log_enabled', 'false')])
+    settings_schema.backfill_missing(path, parser, schema)
+    reparsed = _read(path)
+    assert reparsed.get('words_of_power', 'journal_log_enabled') == 'false'
+    assert reparsed.get('words_of_power', 'show_coordinates') == 'false'  # kept
+    assert reparsed.get('words_of_power', 'diagnostics_migrated') == 'true'
+    assert "# user file from 0.3.1" in open(path, encoding='utf-8').read()
