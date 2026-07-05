@@ -3,7 +3,7 @@
 All notable changes to **Words of Power II** are listed here, newest first. This is
 an early work-in-progress RW3 port — expect frequent changes.
 
-## Unreleased
+## 2026-07-05 — 0.3.2
 
 ### Added
 - Spell targeting now follows the game's own footprint. The "Within AoE" census reads
@@ -41,24 +41,14 @@ an early work-in-progress RW3 port — expect frequent changes.
   measurably delaying the turn's speech — the log file itself is unchanged and
   still records everything. New setting `console_echo` (default false) restores
   the live console view; error lines always echo regardless.
+- The mod now caps its logs folder (mods/screen_reader/logs) at 25 MB: each launch
+  deletes the oldest archived debug logs over the cap, newest always kept. Logs that
+  piled up before 0.3.2 count toward the cap, so expect a large folder to shrink on
+  first launch — this is a good moment to clear the folder out and start fresh; copy
+  anything you want to keep somewhere else before upgrading.
 - Rift previews now mark a component reward as such — "Component: Flame Blade
   Fragment (Fire, Sorcery)" — matching the cyan name the game draws for reward
   components, the same way "Boss:" and "Elite:" already voice the boss-tier colors.
-
-### Fixed
-- The final auto-pickup item now lands inside the batch summary instead of announcing
-  itself separately afterward — walk-end detection is now exact.
-- Memory Orb pickups say "4 SP total," matching the summary's wording.
-- Aiming at your own tile with a spell that can't target you no longer buries the
-  tile's contents under "Can't target self." — the tile (you) speaks first; the
-  reason still speaks if you actually press confirm there. Reasons that depend on
-  the tile's state, like "Tile occupied.", are unchanged.
-- The capture layer's last known gap is closed: in-place monster transforms (the
-  Mind Maggot growing wings, gaining a new name and attack) and boss debuff-immunity
-  flips (the Snow Queen's Diamond Aegis) are now recorded internally with their
-  causes — groundwork for transform announcements in a later release.
-
-## 2026-07-04 — 0.3.2
 
 ### Changed
 - The composer speech pipeline (direct-action digest, crisis lines, ambient enemy-turn
@@ -73,10 +63,21 @@ an early work-in-progress RW3 port — expect frequent changes.
   the five diagnostic flags (journal_log_enabled, log_capture_enabled,
   container_diff_enabled, cause_markers_enabled, reactive_markers_enabled) now default
   to off.
-- Upgrading from 0.3.1: delete mods/screen_reader/settings.ini and let the mod
-  regenerate it. Speech is unchanged; the diagnostics turn off. The mod never modifies
-  values already in your file, so this step is manual. If you've customized other
-  settings, instead set the five flags above to false by hand.
+- Upgrading from 0.3.1: the fix applies itself — on first launch, 0.3.2 turns the five
+  diagnostic flags off in your existing settings.ini, once, in place. Comments and every
+  other setting you may have customized are untouched, and the file keeps working exactly
+  as before for future edits. No manual steps needed.
+- The final auto-pickup item now lands inside the batch summary instead of announcing
+  itself separately afterward — walk-end detection is now exact.
+- Memory Orb pickups say "4 SP total," matching the summary's wording.
+- Aiming at your own tile with a spell that can't target you no longer buries the
+  tile's contents under "Can't target self." — the tile (you) speaks first; the
+  reason still speaks if you actually press confirm there. Reasons that depend on
+  the tile's state, like "Tile occupied.", are unchanged.
+- The capture layer's last known gap is closed: in-place monster transforms (the
+  Mind Maggot growing wings, gaining a new name and attack) and boss debuff-immunity
+  flips (the Snow Queen's Diamond Aegis) are now recorded internally with their
+  causes — groundwork for transform announcements in a later release.
 
 ## 2026-07-03 — 0.3.1
 
