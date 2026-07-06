@@ -79,19 +79,28 @@ def _as_pages(sections):
     return pages
 
 
-def test_scan_creatures_yields_heading_plus_six_nodes():
+def test_scan_creatures_yields_heading_plus_seven_nodes():
+    # Slice 1 of the cursor-tool pass reshaped this page: an intro line on
+    # the tap-vs-hold pairing, and the scans rehomed onto the game's
+    # highlight keys (J->I, Y->U, Q->O).
     model = build_how_to_play_model(_as_pages(_sections()))
     creatures = model[0]
     assert creatures.nodes[0].text == 'Words Of Power: Scan Creatures'
     assert creatures.nodes[0].level == 0
     body = creatures.nodes[1:]
-    assert len(body) == 6
-    assert body[0].text == (
+    assert len(body) == 7
+    assert body[0].text.startswith(
+        "The scan keys are the game's own highlight keys"
+    )
+    assert body[1].text == (
         'F: Health, shields, SP, and active buffs and debuffs. '
         'Shift+F gives an ally overview'
     )
-    assert body[5].text == (
-        'Alt + J/N/Q/Y: Mark or unmark the last scanned target, '
+    assert body[2].text.startswith('I: Enemy scan.')
+    assert body[4].text.startswith('U: Ally scan.')
+    assert body[5].text.startswith('O: Landmark scan.')
+    assert body[6].text == (
+        'Alt + I/N/O/U: Mark or unmark the last scanned target, '
         'so Shift+P can report the path to it'
     )
 

@@ -800,3 +800,26 @@ def _walkable_neighbors(level, target_xy):
         if level.tiles[nx][ny].can_walk:
             neighbors.append((nx, ny))
     return neighbors
+
+
+# ---- Keybind-following dispatch (cursor-tool pass, slice 1) ----
+# The mirrored keys (T, L, U, I, O) speak the category the game's own held key
+# draws. Dispatch consults the live key_binds table per press so the
+# speak/show pairing survives player rebinds by construction; the hardcoded
+# fallback only matters when the bind table is unavailable (e.g. tests, or an
+# API drift that renames the bind id).
+
+def _bound_keys(key_binds, bind_id, fallback):
+    """Return the tuple of keycodes bound to bind_id in the game's key_binds
+    table (None slots filtered), or (fallback,) when the table or id is
+    unavailable. key_binds values are lists like [K_i, None]."""
+    if bind_id is not None and key_binds is not None:
+        try:
+            return tuple(k for k in key_binds[bind_id] if k)
+        except (KeyError, IndexError, TypeError):
+            pass
+    return (fallback,)
+
+def _key_matches_bind(key_binds, bind_id, key, fallback):
+    """True if a pressed keycode is bound to bind_id (see _bound_keys)."""
+    return key in _bound_keys(key_binds, bind_id, fallback)

@@ -136,10 +136,10 @@ Two sets of keys: the ones the mod adds, and Rift Wizard 3's own. A few things f
 
 | Key | Function |
 |-----|----------|
-| **J** | Enemy scan. Press repeatedly to cycle enemies, nearest first. Shift+J reverses. |
-| **Y** | Ally scan. Cycle allies; Shift+Y reverses. |
+| **I** | Enemy scan. Press repeatedly to cycle enemies, nearest first. Shift+I reverses. Same key as the game's Highlight Enemies: tap to scan, hold to light the tiles. |
+| **U** | Ally scan. Cycle allies; Shift+U reverses. Rides the game's Highlight Allies key. |
 | **N** | Spawner/nest scan. Cycle nests; Shift+N reverses. |
-| **Q** | Landmark scan — rifts, shops, shrines, orbs, pickups. Cycle; Shift+Q reverses. |
+| **O** | Landmark scan — rifts, shops, shrines, orbs, pickups. Cycle; Shift+O reverses. Rides the game's Highlight Objects key. |
 | **L** | Line of sight — enemy count by type and direction. Adds speech to the game's line-of-sight overlay. |
 | **T** | Threat — whether your current square is threatened, and by what. Adds speech to the game's threat-zone overlay. |
 | **B** | Spatial scan — walkable distance in all 8 directions. |
@@ -153,7 +153,7 @@ Two sets of keys: the ones the mod adds, and Rift Wizard 3's own. A few things f
 | **F** | Vitals — HP, shields, and active status effects with durations. |
 | **Shift + F** | Ally overview — all allies with HP. |
 | **G** | Charges — selected spell's charges, or all spells if none is selected. |
-| **Alt + J / N / Q / Y** | Mark or unmark the last target from that scan. One mark at a time; clears when the unit dies or the landmark is collected. |
+| **Alt + I / N / O / U** | Mark or unmark the last target from that scan. One mark at a time; clears when the unit dies or the landmark is collected. |
 | **P** | Path to the look-mode cursor — full route to whatever it's on. |
 | **Shift + P** | Re-announce the path to your marked target. |
 | **Shift + Tab** | Previous target while targeting, walking, or looking (reverse of the game's Tab cycle). A fresh press starts from the far end of the list — in walk mode that jumps straight to the rifts. Needs the Steam overlay turned off for this game (see setup above). |

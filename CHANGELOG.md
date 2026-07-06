@@ -19,6 +19,17 @@ an early work-in-progress RW3 port — expect frequent changes.
 - New setting `speak_pickup_effects` (default true): set false to trim Ruby Heart
   and Memory Orb cursor reads to name-only. Walk-on shrines always speak their
   effect.
+### Changed
+- **The scan keys moved onto the game's own highlight keys** — the key that
+  lights a category on screen is now the key that speaks it. Enemy scan: J is
+  now **I** (Highlight Enemies). Ally scan: Y is now **U** (Highlight Allies).
+  Landmark scan: Q is now **O** (Highlight Objects). Tap to scan, hold to show
+  the tiles; the pairing follows your rebinds — rebind Highlight Enemies and
+  the enemy scan moves with it. N (spawners) and X (hazards) are unchanged;
+  they have no game highlight. Alt+key marking moved with the scans
+  (Alt + I / N / O / U). J, Q, and Y are now unbound, reserved for upcoming
+  features. This is a hard switch with no legacy-keys setting — the old
+  letters simply stop answering.
 
 ### Fixed
 - Walk-on props (Ruby Heart, Memory Orb, and the three walk-on shrines) now read

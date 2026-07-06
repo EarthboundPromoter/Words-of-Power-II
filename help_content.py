@@ -27,12 +27,13 @@ ASCII is guaranteed to render. Meaning is unchanged.
 # --- Page bodies (native-markup raw text; leading newline matches native) ---
 
 _SCAN_CREATURES = """
+The scan keys are the game's own highlight keys: the key that lights a category on screen is the key that speaks it. Tap to scan; hold to show the tiles.
 [F:shields]: Health, shields, SP, and active buffs and debuffs. Shift+F gives an ally overview
-[J:shields]: Enemy scan. Repeat to cycle, nearest first; Shift reverses
+[I:shields]: Enemy scan. Repeat to cycle, nearest first; Shift reverses
 [N:shields]: Spawner scan. Repeat to cycle, nearest first; Shift reverses
-[Y:shields]: Ally scan. Repeat to cycle, nearest first; Shift reverses
-[Q:shields]: Landmark scan. Rifts, shops, shrines, crafting components, memory orbs, and ruby hearts. Repeat to cycle, nearest first; Shift reverses
-[Alt + J/N/Q/Y:shields]: Mark or unmark the last scanned target, so Shift+P can report the path to it
+[U:shields]: Ally scan. Repeat to cycle, nearest first; Shift reverses
+[O:shields]: Landmark scan. Rifts, shops, shrines, crafting components, memory orbs, and ruby hearts. Repeat to cycle, nearest first; Shift reverses
+[Alt + I/N/O/U:shields]: Mark or unmark the last scanned target, so Shift+P can report the path to it
 """
 
 _SCAN_SURROUNDINGS = """

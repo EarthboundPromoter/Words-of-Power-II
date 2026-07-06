@@ -1264,7 +1264,8 @@ from helpers import (_cardinal_direction, _bearing_index, _direction_offset, _pl
                      _classify_terrain, _TERRAIN_LABELS, _scan_corridor_branches,
                      _quadrant_label, _number_deploy_dupes,
                      _merge_same_shape_groups,
-                     _compress_path, _classify_unreachable, _walkable_neighbors)
+                     _compress_path, _classify_unreachable, _walkable_neighbors,
+                     _key_matches_bind)
 
 # ---- Pathfinding Via Hints ----
 _VIA_HINT_CAP = 3  # Max blocked entries per scan that get pathfinding computation
@@ -3103,6 +3104,13 @@ if _main is not None:
     # Tab bind id — read (never rewritten) so the Shift+Tab reverse cycle
     # follows a player's Tab rebind
     _KB_TAB = getattr(_main, 'KEY_BIND_TAB', None)
+    # Mirrored-key bind ids (cursor-tool pass, slice 1): the key that draws a
+    # category is the key that speaks it, so dispatch follows these binds.
+    _KB_THREAT = getattr(_main, 'KEY_BIND_THREAT', None)
+    _KB_LOS = getattr(_main, 'KEY_BIND_LOS', None)
+    _KB_HL_ALLIES = getattr(_main, 'KEY_BIND_HIGHLIGHT_ALLIES', None)
+    _KB_HL_ENEMIES = getattr(_main, 'KEY_BIND_HIGHLIGHT_ENEMIES', None)
+    _KB_HL_OBJECTS = getattr(_main, 'KEY_BIND_HIGHLIGHT_OBJECTS', None)
 
     if _default_kb is not None and _KB_PREV is not None:
         # Always set screen-reader-friendly defaults (affects fresh installs
@@ -5651,14 +5659,35 @@ if _PyGameView is not None:
     _PyGameView.try_examine_tile = patched_try_examine_tile
     log("  Cursor AoE warning + Look mode + spell targeting tile hook installed")
 
-    # ---- Custom Hotkeys: Vitals (F), Enemy Scan (E), Charges (Q) ----
+    # ---- Custom Hotkeys ----
     # These hook process_level_input to intercept KEYDOWN events for our keys.
-    # Our keys (E, F, Q) have no handler in normal (non-cheat) gameplay, so passing
-    # them through to the original method is safe — they'll be ignored.
+    # Mod-original keys (F, N, X, ...) have no handler in normal (non-cheat)
+    # gameplay, so passing them through to the original method is safe — they'll
+    # be ignored. Mirrored keys (T, L, U, I, O) are shared with the game ON
+    # PURPOSE: the game draws those categories from held-key polls in the draw
+    # path (RiftWizard3.py:5948-5963, no KEYDOWN handlers, no key repeat), so a
+    # tap speaks once and a hold draws — neither side consumes the other's
+    # channel. Dispatch for mirrored keys follows view.key_binds per press
+    # (_is_bind), so the speak/show pairing survives player rebinds.
 
     import pygame
 
     _original_process_level_input = _PyGameView.process_level_input
+
+    def _is_bind(view, bind_id, key, fallback):
+        """Mirrored-key dispatch predicate: does this pressed keycode match the
+        game bind? fallback = the shipped default keycode, used only when the
+        bind table or id is unavailable."""
+        return _key_matches_bind(getattr(view, 'key_binds', None), bind_id, key, fallback)
+
+    # NOTE (cursor-tool pass, slice 1): a held-highlight speech channel
+    # (voicing the game's per-frame examine retarget while T/U/I/O is held)
+    # was built here and CUT at the owner's ruling — a tap is physically a
+    # short hold, so it double-spoke on every scan tap, and under Layer 5
+    # routing every routed tap would double-speak by construction. Held keys
+    # stay speech-silent: tap speaks, hold draws. The highlight keys carry the
+    # scans only because they align with game-sanctioned functions, the way L
+    # and T already do. Analysis in docs/CURSOR_TOOL_UX_PASS.md Layer 1b.
 
     def _query_vitals(view):
         """Speak player vitals: HP, shields, SP, active buffs/debuffs."""
@@ -7269,12 +7298,12 @@ if _PyGameView is not None:
         lines = [
             "Mod keybind reference.",
             "F, vitals. HP, shields, status effects. Shift F, ally overview.",
-            "J, enemy scan. Press repeatedly to cycle, nearest first. Shift reverses.",
+            "I, enemy scan. Press repeatedly to cycle, nearest first. Shift reverses.",
             "L, line of sight. Enemy count by type and direction.",
             "N, spawner scan. Press repeatedly to cycle nests. Shift reverses.",
-            "Y, ally scan. Press repeatedly to cycle allies. Shift reverses.",
-            "Alt plus J, N, Q, or Y, mark or unmark the last scanned target.",
-            "Q, landmark scan. Cycle nearest first. Shift Q reverses.",
+            "U, ally scan. Press repeatedly to cycle allies. Shift reverses.",
+            "Alt plus I, N, O, or U, mark or unmark the last scanned target.",
+            "O, landmark scan. Cycle nearest first. Shift O reverses.",
             "G, charges. Selected spell or all spells.",
             "T, threat. Adjacent enemy count and positions.",
             "D, detail. Full description of whatever is under the cursor.",
@@ -7680,14 +7709,19 @@ if _PyGameView is not None:
                                         deploying=bool(deploying))
                 except Exception:
                     pass
-                # Reset scan cycling on keys that aren't the respective scan key
-                if evt.key != pygame.K_j:  # enemy scanner relocated E→J (RW3 binds E=Crafting)
+                # Reset scan cycling on keys that aren't the respective scan key.
+                # Scan keys ride the game's highlight binds (cursor-tool pass,
+                # slice 1): enemy scan = Highlight Enemies (I), ally = Highlight
+                # Allies (U), landmark = Highlight Objects (O) — the key that
+                # draws a category is the key that speaks it. Spawner scan stays
+                # on N (mod-only category, no game highlight exists).
+                if not _is_bind(self, _KB_HL_ENEMIES, evt.key, pygame.K_i):
                     _enemy_scanner.reset()
                 if evt.key != pygame.K_n:
                     _spawner_scanner.reset()
-                if evt.key != pygame.K_q:
+                if not _is_bind(self, _KB_HL_OBJECTS, evt.key, pygame.K_o):
                     _landmark_scanner.reset()
-                if evt.key != pygame.K_y:
+                if not _is_bind(self, _KB_HL_ALLIES, evt.key, pygame.K_u):
                     _ally_scanner.reset()
                 # Deploy-only number keys: overview (1) and category cycling (2-5)
                 if deploying and evt.key == pygame.K_1:
@@ -7730,7 +7764,7 @@ if _PyGameView is not None:
                         _query_ally_overview(self)
                     else:
                         _query_vitals(self)
-                elif evt.key == pygame.K_j:  # enemy scan (was E; E now opens RW3 Crafting)
+                elif _is_bind(self, _KB_HL_ENEMIES, evt.key, pygame.K_i):  # enemy scan (rides Highlight Enemies)
                     mods = pygame.key.get_mods()
                     if mods & pygame.KMOD_ALT:
                         _mark_scanned_target(self)
@@ -7746,7 +7780,7 @@ if _PyGameView is not None:
                         ref, lvl, qual = _get_scan_reference(self)
                         rev = bool(mods & pygame.KMOD_SHIFT)
                         _query_spawners(self, scan_level=lvl, ref_point=ref, qualifier=qual, reverse=rev)
-                elif evt.key == pygame.K_y:
+                elif _is_bind(self, _KB_HL_ALLIES, evt.key, pygame.K_u):  # ally scan (rides Highlight Allies)
                     mods = pygame.key.get_mods()
                     if mods & pygame.KMOD_ALT:
                         _mark_scanned_target(self)
@@ -7756,7 +7790,7 @@ if _PyGameView is not None:
                         _query_allies(self, scan_level=lvl, ref_point=ref, qualifier=qual, reverse=rev)
                 elif evt.key == pygame.K_g:
                     _query_charges(self)
-                elif evt.key == pygame.K_q:
+                elif _is_bind(self, _KB_HL_OBJECTS, evt.key, pygame.K_o):  # landmark scan (rides Highlight Objects)
                     mods = pygame.key.get_mods()
                     if mods & pygame.KMOD_ALT:
                         _mark_scanned_target(self)
@@ -7767,7 +7801,7 @@ if _PyGameView is not None:
                 elif evt.key == pygame.K_x:
                     ref, lvl, qual = _get_scan_reference(self)
                     _query_hazards(self, scan_level=lvl, ref_point=ref, qualifier=qual)
-                elif evt.key == pygame.K_l:
+                elif _is_bind(self, _KB_LOS, evt.key, pygame.K_l):  # LoS summary (rides Show Line of Sight)
                     ref, lvl, qual = _get_scan_reference(self)
                     _query_los_summary(self, scan_level=lvl, ref_point=ref, qualifier=qual)
                 elif evt.key == pygame.K_LCTRL:
@@ -7804,7 +7838,7 @@ if _PyGameView is not None:
                     # Consume so the game's K_p (pdb.set_trace dev cheat) doesn't fire.
                     self.events = [e for e in self.events
                                    if not (e.type == pygame.KEYDOWN and e.key == pygame.K_p)]
-                elif evt.key == pygame.K_t:
+                elif _is_bind(self, _KB_THREAT, evt.key, pygame.K_t):  # threat query (rides Show Threat Zone)
                     ref, lvl, qual = _get_scan_reference(self)
                     _query_threat(self, scan_level=lvl, ref_point=ref, qualifier=qual)
                 elif evt.key == pygame.K_b:
