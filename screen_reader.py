@@ -3304,18 +3304,36 @@ if _PyGameView is not None:
         return ' '.join(w.capitalize() for w in a.replace('_', ' ').split())
 
     def _format_bonus_lines(obj):
-        """Extract bonus dictionary lines from an Equipment, Spell, or Upgrade object."""
-        lines = []
+        """Extract bonus dictionary lines from an Equipment, Spell, or Upgrade
+        object. One line per bonus SOURCE (tag / spell / all-spells) with its
+        attributes grouped — "Blood spells gain 50% Minion Health, 1 Max
+        Charges" — never one sentence per attribute: the game draws a line per
+        (source, attr) pair (RiftWizard3.py:7113-7165) and the repeated prefix
+        scans as column alignment on screen but stutters aurally (field report
+        2026-07-05). Grouping merges a source's percent and flat items into
+        one sentence, so a multi-tag item reads tag-by-tag rather than the
+        draw order's all-percents-then-all-flats. Every attribute keeps its
+        own value-and-unit item; nothing is dropped."""
+        groups = []  # [prefix, [item, ...]] in first-seen order
+        index = {}
+
+        def add(prefix, item):
+            if prefix in index:
+                groups[index[prefix]][1].append(item)
+            else:
+                index[prefix] = len(groups)
+                groups.append([prefix, [item]])
+
         for tag, bonuses in getattr(obj, 'tag_bonuses_pct', {}).items():
             tag_n = _name(tag)
             for attr, val in bonuses.items():
                 if val:
-                    lines.append(f"{tag_n} spells gain {int(val)}% {_fmt_attr(attr)}")
+                    add(f"{tag_n} spells gain", f"{int(val)}% {_fmt_attr(attr)}")
         for tag, bonuses in getattr(obj, 'tag_bonuses', {}).items():
             tag_n = _name(tag)
             for attr, val in bonuses.items():
                 if val:
-                    lines.append(f"{tag_n} spells gain {val} {_fmt_attr(attr)}")
+                    add(f"{tag_n} spells gain", f"{val} {_fmt_attr(attr)}")
         for spell_class, bonuses in getattr(obj, 'spell_bonuses_pct', {}).items():
             spell_ex = None
             try:
@@ -3329,7 +3347,7 @@ if _PyGameView is not None:
                 if spell_ex is not None and attr not in getattr(spell_ex, 'stats', []):
                     continue
                 if val:
-                    lines.append(f"{spell_n} gains {int(val)}% {_fmt_attr(attr)}")
+                    add(f"{spell_n} gains", f"{int(val)}% {_fmt_attr(attr)}")
         for spell_class, bonuses in getattr(obj, 'spell_bonuses', {}).items():
             spell_ex = None
             try:
@@ -3341,7 +3359,7 @@ if _PyGameView is not None:
                 if spell_ex is not None and attr not in getattr(spell_ex, 'stats', []):
                     continue
                 if val:
-                    lines.append(f"{spell_n} gains {val} {_fmt_attr(attr)}")
+                    add(f"{spell_n} gains", f"{val} {_fmt_attr(attr)}")
         # Stats a spell upgrade introduces to its spell — drawn as gain lines,
         # filtered to displayed attrs plus hp_cost (RiftWizard3.py:7147-7153).
         # Upgrades whose whole body is such lines (e.g. Blood Horizon) were
@@ -3351,19 +3369,20 @@ if _PyGameView is not None:
             shown = getattr(_main, 'tt_attrs', None) or _tt_attrs
             for attr, val in getattr(obj, 'new_attributes', {}).items():
                 if attr in shown or attr == 'hp_cost':
-                    lines.append(f"{_name(prereq)} gains {val} {_fmt_attr(attr)}")
+                    add(f"{_name(prereq)} gains", f"{val} {_fmt_attr(attr)}")
         for attr, val in getattr(obj, 'global_bonuses_pct', {}).items():
             if val:
                 if val >= 0:
-                    lines.append(f"All spells gain {int(val)}% {_fmt_attr(attr)}")
+                    add("All spells gain", f"{int(val)}% {_fmt_attr(attr)}")
                 else:
-                    lines.append(f"All spells lose {int(val)}% {_fmt_attr(attr)}")
+                    add("All spells lose", f"{int(val)}% {_fmt_attr(attr)}")
         for attr, val in getattr(obj, 'global_bonuses', {}).items():
             if val:
                 if val >= 0:
-                    lines.append(f"All spells gain {val} {_fmt_attr(attr)}")
+                    add("All spells gain", f"{val} {_fmt_attr(attr)}")
                 else:
-                    lines.append(f"All spells lose {val} {_fmt_attr(attr)}")
+                    add("All spells lose", f"{val} {_fmt_attr(attr)}")
+        lines = [f"{prefix} {', '.join(items)}" for prefix, items in groups]
         for tag, val in getattr(obj, 'resists', {}).items():
             if val:
                 lines.append(f"{val}% {_name(tag)} resist")

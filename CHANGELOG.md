@@ -3,6 +3,14 @@
 All notable changes to **Words of Power II** are listed here, newest first. This is
 an early work-in-progress RW3 port — expect frequent changes.
 
+## Unreleased
+
+### Changed
+- Grouped bonus lines under one prefix per source: "Blood spells gain 50% Minion
+  Health, 50% Damage, 1 Max Charges, 2 Range, 3 Minion Damage" instead of five
+  separate "Blood spells gain..." sentences. Applies everywhere bonuses are read
+  (crafting, character sheet, shops, tooltips); no bonus is dropped.
+
 ## 2026-07-05 — 0.3.3
 
 ### Fixed
