@@ -3,6 +3,14 @@
 All notable changes to **Words of Power II** are listed here, newest first. This is
 an early work-in-progress RW3 port — expect frequent changes.
 
+## 2026-07-05 — 0.3.3
+
+### Fixed
+- Rerouted the crafting screen's item reading through the shared examine
+  describer, thus restoring the "Attributes:" stat block that the crafting
+  reader never spoke — gear whose numbers live only there (Ghost Slippers'
+  minion health and damage, for example) was silent about them.
+
 ## 2026-07-05 — 0.3.2
 
 ### Added

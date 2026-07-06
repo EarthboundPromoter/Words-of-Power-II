@@ -1,5 +1,5 @@
 # Rift Wizard 2 Screen Reader Mod — Words of Power
-MOD_VERSION = "0.3.2"
+MOD_VERSION = "0.3.3"
 
 import sys
 import os
@@ -3740,12 +3740,13 @@ if _PyGameView is not None:
                 parts.append("recipe " + _tag_count_text(recipe_tags))
         except Exception:
             pass
-        bonus_lines = _format_bonus_lines(eq)
-        if bonus_lines:
-            parts.append(". ".join(bonus_lines))
-        desc = _clean_desc(_desc_text(eq))
-        if desc:
-            parts.append(desc)
+        # The highlighted blueprint fills the examine panel through
+        # draw_examine_upgrade (draw_examine dispatch, RiftWizard3.py:6954) —
+        # share its body instead of a hand-built subset, which dropped the
+        # "Attributes:" stat block (silent minion stats on SummonShoes gear,
+        # field report 2026-07-05). 'tags' skipped: the recipe line above
+        # already names the item's tags, with counts.
+        parts.extend(t for lbl, t in _describe_upgrade_body(eq) if lbl != 'tags')
         return ". ".join(parts)
 
     def _describe_component(view, comp):
@@ -3773,12 +3774,9 @@ if _PyGameView is not None:
         name = _name(eq)
         slot = _SLOT_NAMES.get(getattr(eq, 'slot', -1), "Equipment")
         parts = [f"Building {name}, {slot}"]
-        bonus_lines = _format_bonus_lines(eq)
-        if bonus_lines:
-            parts.append(". ".join(bonus_lines))
-        desc = _clean_desc(_desc_text(eq))
-        if desc:
-            parts.append(desc)
+        # Full examine-panel body (draw_examine_upgrade) — no recipe line here,
+        # so keep the 'tags' segment
+        parts.extend(t for _lbl, t in _describe_upgrade_body(eq))
         text = ". ".join(parts)
         async_tts.speak(text)
         log(f"[Craft] Item: {text}")
