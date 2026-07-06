@@ -5,6 +5,11 @@ an early work-in-progress RW3 port — expect frequent changes.
 
 ## Unreleased
 
+### Fixed
+- Shrine tooltips at rift selection now read the shrine's description instead of
+  its name alone. Stocked shops read their item list, matching the game's own
+  examine panel.
+
 ### Changed
 - Grouped bonus lines under one prefix per source: "Blood spells gain 50% Minion
   Health, 50% Damage, 1 Max Charges, 2 Range, 3 Minion Damage" instead of five

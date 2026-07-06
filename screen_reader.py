@@ -4400,6 +4400,23 @@ if _PyGameView is not None:
 
     _original_move_examine_target = _PyGameView.move_examine_target
 
+    def _describe_shop_prop(shop):
+        """Shop/Shrine body, mirroring draw_examine_shop (RiftWizard3.py:7516):
+        name, then the description ONLY when there are no items — the shrine
+        case (7535-7538) — else the item names. Shared by the tooltip cycle
+        and the D-key prop detail so the two reads can't drift."""
+        parts = [_name(shop, "Shop")]
+        items = getattr(shop, 'items', [])
+        if not items:
+            # clean-then-strip: the Shop base class ships description " "
+            # (Level.py:2834), which must not speak as a dangling separator
+            desc = _clean_desc(_desc_text(shop)).strip()
+            if desc:
+                parts.append(desc)
+        else:
+            parts.append("Items: " + ", ".join(_name(item) for item in items))
+        return ". ".join(parts)
+
     def _describe_examine_tooltip(view):
         """Describe the current examine_target for PgUp/PgDn tooltip cycling.
         Handles units (summoned creatures), spells, upgrades, and equipment."""
@@ -4459,6 +4476,14 @@ if _PyGameView is not None:
                 return (f"{counter}. Prospective Equipment, {len(eq_names)}: "
                         + ", ".join(eq_names))
             return f"{counter}. Prospective Equipment: None"
+
+        # Shrine/shop — rift-selection portals append the shrine as a Shop
+        # (Portal.get_extra_examine_tooltips, Level.py:2773-2776); the game
+        # examines it through draw_examine_shop. Without this branch it fell
+        # to the name-only fallback and the shrine's description was never
+        # spoken (field report 2026-07-05).
+        if isinstance(target, Level.Shop):
+            return f"{counter}. {_describe_shop_prop(target)}"
 
         # Rift portal — contents live in level_gen_params, not a .name; without this
         # it falls to the _name fallback and reads "something". Mirrors the main
@@ -6104,20 +6129,10 @@ if _PyGameView is not None:
             if desc:
                 parts.append(_clean_desc(desc))
             return ". ".join(parts)
-        # Shop/Shrine — name, description, item list
+        # Shop/Shrine — shared body (name; description only when item-less,
+        # as the game gates it; else the item names)
         if hasattr(prop, 'items') and hasattr(prop, 'name'):
-            parts = [_name(prop)]
-            items = getattr(prop, 'items', [])
-            # Game shows a shop's description ONLY when it has no items — the
-            # shrine case (draw_examine_shop, RiftWizard3.py:7535-7538)
-            if not items:
-                desc = _desc_text(prop)
-                if desc:
-                    parts.append(_clean_desc(desc))
-            else:
-                item_names = [_name(item) for item in items]
-                parts.append("Items: " + ", ".join(item_names))
-            return ". ".join(parts)
+            return _describe_shop_prop(prop)
         # Any prop carrying a single .item — describe it (defensive; not a stock RW3 prop)
         if hasattr(prop, 'item') and isinstance(prop, Level.Prop):
             item = prop.item
