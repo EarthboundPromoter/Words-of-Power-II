@@ -7747,9 +7747,13 @@ if _PyGameView is not None:
                 elif (_KB_TAB is not None
                         and evt.key in self.key_binds[_KB_TAB]
                         and getattr(self, 'cur_spell', None) is not None
+                        and self.can_execute_inputs()
                         and _tab_shift_check(self, evt)):
                     # Shift+Tab: reverse target cycle (spell contexts only —
                     # the cur_spell gate covers targeting, walk, and look).
+                    # can_execute_inputs mirrors the game's own Tab gate
+                    # (RiftWizard3.py:2737): forward Tab is blocked during
+                    # cast-fail frames and animations, so reverse must be too.
                     _cycle_tab_reverse(self)
                     # Consume the Tab keydown — the game's own dispatch
                     # (RiftWizard3.py:2797) ignores modifiers and would
