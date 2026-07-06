@@ -219,6 +219,15 @@ _SETTINGS_SCHEMA = [
      "# group by name, allies first. Set false to hear the plain\n"
      "# \"Within AoE\" count phrasing for those spells instead.\n"
      "# Default: true"),
+    ('words_of_power', 'speak_pickup_effects', 'true',
+     "# When the cursor passes over a Ruby Heart or Memory Orb, speak the\n"
+     "# pickup's effect after its name (\"Ruby Heart. Increase max HP by 25\n"
+     "# and restore all health\"), whether or not a unit stands on the tile.\n"
+     "# Set false to hear just the name for these two common pickups. The\n"
+     "# walk-on shrines (Perfection, Spiders, Necromancy) always speak\n"
+     "# their full effect: rare, and stepping on one alters your build\n"
+     "# permanently.\n"
+     "# Default: true"),
     ('words_of_power', 'digest_enabled', 'true',
      "# Enable the direct-action digest: a composed summary of one player\n"
      "# keypress's full effect chain (cast, damage, kills, procs, side-effects)\n"
@@ -387,6 +396,7 @@ class _Cfg:
     cause_markers_enabled = _settings.getboolean('words_of_power', 'cause_markers_enabled', fallback=False)
     reactive_markers_enabled = _settings.getboolean('words_of_power', 'reactive_markers_enabled', fallback=False)
     aoe_group_names = _settings.getboolean('words_of_power', 'aoe_group_names', fallback=True)
+    speak_pickup_effects = _settings.getboolean('words_of_power', 'speak_pickup_effects', fallback=True)
     digest_enabled = _settings.getboolean('words_of_power', 'digest_enabled', fallback=True)
     # [Composer] — pipeline flags. As of 0.3.2 the composer pipeline is the
     # shipped speech engine: producers on, legacy combat narration off.
@@ -423,6 +433,7 @@ log(f"[Settings] container_diff_enabled = {cfg.container_diff_enabled}")
 log(f"[Settings] cause_markers_enabled = {cfg.cause_markers_enabled}")
 log(f"[Settings] reactive_markers_enabled = {cfg.reactive_markers_enabled}")
 log(f"[Settings] aoe_group_names = {cfg.aoe_group_names}")
+log(f"[Settings] speak_pickup_effects = {cfg.speak_pickup_effects}")
 log(f"[Settings] digest_enabled = {cfg.digest_enabled}")
 log(f"[Settings] crisis_enabled = {cfg.crisis_enabled}")
 log(f"[Settings] orphan_enabled = {cfg.orphan_enabled}")
@@ -4574,8 +4585,14 @@ if _PyGameView is not None:
                                      getattr(Level, 'Component', ())))
 
     def _misc_prop_desc(prop):
-        """The spoken description for a misc-class prop, empty if none."""
+        """The spoken description for a misc-class prop, empty if none.
+        The two common pickups respect the speak_pickup_effects setting
+        (occupancy-independent); walk-on shrines always speak — rare and
+        build-committing (owner ruling 2026-07-06)."""
         if not _is_misc_prop(prop):
+            return ""
+        if not cfg.speak_pickup_effects and isinstance(
+                prop, (Level.HeartDot, Level.MemoryOrb)):
             return ""
         return _clean_desc(_desc_text(prop)).strip()
 
@@ -4653,29 +4670,32 @@ if _PyGameView is not None:
             if not level.is_point_in_bounds(Level.Point(x, y)):
                 return "Out of bounds"
             tile = level.tiles[x][y]
+            parts = []
             # Unit: just name + HP
             unit = tile.unit
             if unit:
                 hp = getattr(unit, 'cur_hp', None)
                 max_hp = getattr(unit, 'max_hp', None)
-                parts = [_name(unit)]
+                parts.append(_name(unit))
                 if hp is not None and max_hp is not None:
                     parts.append(f"{hp} of {max_hp} HP")
                 on_death = _get_on_death_text(unit)
                 if on_death:
                     parts.append(on_death)
-                return ". ".join(parts)
-            # Prop — walk-on pickups/shrines speak their effect here too,
-            # same read as Look mode (owner 2026-07-06: both cursor paths)
+            # Prop — spoken even under a unit (owner 2026-07-06: the map
+            # holds the prop and the game's highlight-objects redraw shows
+            # it, RiftWizard3.py:5724-5733 — the unit must not hide it).
+            # Walk-on pickups/shrines speak their effect, same as Look mode.
             if tile.prop:
-                text = _name(tile.prop)
+                parts.append(_name(tile.prop))
                 desc = _misc_prop_desc(tile.prop)
                 if desc:
-                    text = f"{text}. {desc}"
-                return text
-            # Cloud
+                    parts.append(desc)
+            # Cloud — also spoken under a unit (standing in it is game-shown)
             if tile.cloud:
-                return _name(tile.cloud, "Cloud")
+                parts.append(_name(tile.cloud, "Cloud"))
+            if parts:
+                return ". ".join(parts)
             # Terrain
             if tile.is_wall():
                 return "Wall"
@@ -5310,6 +5330,38 @@ if _PyGameView is not None:
             log(f"[AoE Check] Error: {e}")
             return ("", "", "")
 
+    def _prop_beneath_text(view, unit):
+        """Prop on a described unit's own tile. The game's examine prefers
+        the unit (try_examine_tile, RiftWizard3.py:2615), so a Tab read built
+        from examine_target alone never mentions the prop beneath — which the
+        map holds and the highlight-objects redraw shows a sighted player
+        (RiftWizard3.py:5724-5733). Same name+effect read as the cursor
+        paths (owner 2026-07-06). Empty string when there's nothing there."""
+        try:
+            game = getattr(view, 'game', None)
+            if game is None:
+                return ""
+            deploying = getattr(game, 'deploying', False)
+            level = game.next_level if deploying else game.cur_level
+            if level is None:
+                return ""
+            x = getattr(unit, 'x', None)
+            y = getattr(unit, 'y', None)
+            if x is None or y is None:
+                return ""
+            tile = level.tiles[x][y]
+            # Stale-position guard: only speak the prop if the unit really
+            # is standing on this tile right now
+            if tile.unit is not unit or not tile.prop:
+                return ""
+            parts = [_name(tile.prop)]
+            desc = _misc_prop_desc(tile.prop)
+            if desc:
+                parts.append(desc)
+            return ". ".join(parts)
+        except Exception:
+            return ""
+
     def _describe_target(view):
         """Get a spoken description of the current target."""
         target = view._examine_target
@@ -5319,7 +5371,11 @@ if _PyGameView is not None:
         hp = getattr(target, 'cur_hp', None)
         max_hp = getattr(target, 'max_hp', None)
         if hp is not None and max_hp is not None:
-            return _describe_unit_tier1(target)
+            text = _describe_unit_tier1(target)
+            prop_text = _prop_beneath_text(view, target)
+            if prop_text:
+                text = f"{text}. {prop_text}"
+            return text
         # If it's a portal/rift, describe its contents
         if hasattr(target, 'level_gen_params'):
             return _describe_portal(target, view)
@@ -5413,6 +5469,19 @@ if _PyGameView is not None:
             has_portal = tile and tile.prop and hasattr(tile.prop, 'level_gen_params')
             if has_portal:
                 chunks = _describe_portal_chunks(tile.prop, view)
+                # Unit standing on the portal — the portal branch used to
+                # fire before any unit clause and drop it entirely (the
+                # occlusion bug's reverse direction, filed 2026-07-06).
+                # Unit chunk first: threat before terrain-feature; the
+                # coordinate rides the first chunk, so it moves to the unit.
+                unit = tile.unit
+                if unit:
+                    if _is_player(unit):
+                        u_hp = getattr(unit, 'cur_hp', 0)
+                        u_max = getattr(unit, 'max_hp', 0)
+                        chunks.insert(0, f"Wizard. {u_hp} of {u_max} HP")
+                    else:
+                        chunks.insert(0, _describe_unit_tier1(unit))
                 if cfg.show_coordinates:
                     chunks[0] = f"{chunks[0]} ({point.x},{point.y})"
                 chunks.extend(_own_aura_clauses(view, point))
