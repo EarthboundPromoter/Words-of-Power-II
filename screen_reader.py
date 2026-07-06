@@ -7703,11 +7703,20 @@ if _PyGameView is not None:
                 elif (_KB_TAB is not None
                         and evt.key in self.key_binds[_KB_TAB]
                         and getattr(self, 'cur_spell', None) is not None
-                        and pygame.key.get_mods() & pygame.KMOD_SHIFT):
+                        and ((getattr(evt, 'mod', 0) | pygame.key.get_mods())
+                             & pygame.KMOD_SHIFT)):
                     # Shift+Tab: reverse target cycle (spell contexts only —
                     # the cur_spell gate covers targeting, walk, and look).
-                    # get_mods, not evt.mod: the game's synthesized repeat
-                    # events carry no mod attribute (RiftWizard3.py:10339).
+                    # Shift detection needs BOTH sources OR'd (field bug
+                    # 2026-07-06, telemetry-diagnosed): the game pumps events
+                    # once per 33ms frame, so a fast Shift+Tab flick puts
+                    # shift-down, tab-down, AND shift-up in one batch —
+                    # get_mods() reads post-batch state and misses it, while
+                    # evt.mod carries the state stamped at press time.
+                    # get_mods() stays as the fallback: the game's synthesized
+                    # repeat events carry no mod attribute
+                    # (RiftWizard3.py:10339), and a held shift is always in
+                    # the live state. getattr guards the missing attribute.
                     _cycle_tab_reverse(self)
                     # Consume the Tab keydown — the game's own dispatch
                     # (RiftWizard3.py:2797) ignores modifiers and would
