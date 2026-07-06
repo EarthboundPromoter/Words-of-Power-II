@@ -5660,33 +5660,6 @@ if _PyGameView is not None:
 
     _original_process_level_input = _PyGameView.process_level_input
 
-    # Shift state tracked from the raw event stream (KEYDOWN/KEYUP), for
-    # chord detection that can't trust evt.mod or get_mods (see the
-    # Shift+Tab branch and its [TabDiag] logging)
-    _shift_held_evt = [False]
-
-    def _tab_shift_check(view, evt):
-        """Was shift down when this Tab keydown was pressed? Three sources
-        OR'd, most reliable first (field bug 2026-07-06: on the owner's
-        machine, Shift+Tab chords arrived with no shift bit in evt.mod OR
-        get_mods — cause unresolved, so detection trusts the event stream
-        and the others ride as backup). Logs a [TabDiag] line per press —
-        called on every spell-context Tab regardless of shift, so plain
-        presses give the baseline; drop the logging once the field cause
-        is pinned."""
-        tracked = _shift_held_evt[0]
-        evt_mod = getattr(evt, 'mod', None)
-        live_mods = pygame.key.get_mods()
-        keys = pygame.key.get_pressed()
-        log(f"[TabDiag] tracked={tracked} evt_mod={evt_mod} "
-            f"get_mods={live_mods} "
-            f"lshift={bool(keys[pygame.K_LSHIFT])} "
-            f"rshift={bool(keys[pygame.K_RSHIFT])}")
-        return bool(tracked
-                    or ((evt_mod or 0) & pygame.KMOD_SHIFT)
-                    or (live_mods & pygame.KMOD_SHIFT)
-                    or keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT])
-
     def _query_vitals(view):
         """Speak player vitals: HP, shields, SP, active buffs/debuffs."""
         try:
@@ -7681,25 +7654,8 @@ if _PyGameView is not None:
             _deploy_reset_cycle()
             _announce_deploy_overview(self)
 
-        # Event-stream shift tracking (field bug 2026-07-06: the owner's
-        # Shift+Tab chords arrive with no shift bit in evt.mod OR get_mods —
-        # source unknown, so track shift from the raw events themselves).
-        # Reconcile against the live key array first: a shift KEYUP that
-        # landed while another screen's handler owned the events would
-        # otherwise leave the flag stuck on.
-        _keys_now = pygame.key.get_pressed()
-        if _shift_held_evt[0] and not (_keys_now[pygame.K_LSHIFT]
-                                       or _keys_now[pygame.K_RSHIFT]):
-            _shift_held_evt[0] = False
         try:
             for evt in self.events:
-                # Shift tracking must see KEYUP too, so it sits above the
-                # KEYDOWN filter. Batch order makes this press-time-accurate:
-                # a fast flick pumps shift-down, tab-down, shift-up in one
-                # frame, and we read the flag between the first two.
-                if (evt.type in (pygame.KEYDOWN, pygame.KEYUP)
-                        and evt.key in (pygame.K_LSHIFT, pygame.K_RSHIFT)):
-                    _shift_held_evt[0] = (evt.type == pygame.KEYDOWN)
                 if evt.type != pygame.KEYDOWN:
                     continue
                 # Skip modifier-only keys — Shift/Alt/Ctrl fire their own KEYDOWN
@@ -7748,12 +7704,19 @@ if _PyGameView is not None:
                         and evt.key in self.key_binds[_KB_TAB]
                         and getattr(self, 'cur_spell', None) is not None
                         and self.can_execute_inputs()
-                        and _tab_shift_check(self, evt)):
+                        and ((getattr(evt, 'mod', 0) | pygame.key.get_mods())
+                             & pygame.KMOD_SHIFT)):
                     # Shift+Tab: reverse target cycle (spell contexts only —
                     # the cur_spell gate covers targeting, walk, and look).
                     # can_execute_inputs mirrors the game's own Tab gate
                     # (RiftWizard3.py:2737): forward Tab is blocked during
                     # cast-fail frames and animations, so reverse must be too.
+                    # evt.mod is press-time state — it catches a flick whose
+                    # shift-up lands in the same 33ms event batch that
+                    # get_mods() reads post-batch. FIELD CONSTRAINT (resolved
+                    # 2026-07-06): the Steam overlay owns Shift+Tab and eats
+                    # the chord below SDL; users must disable the overlay for
+                    # RW3 (README setup step) or this branch can never fire.
                     _cycle_tab_reverse(self)
                     # Consume the Tab keydown — the game's own dispatch
                     # (RiftWizard3.py:2797) ignores modifiers and would

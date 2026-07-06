@@ -47,7 +47,7 @@ _SCAN_SURROUNDINGS = """
 
 _MOVEMENT_SPEECH = """
 [Right Ctrl + Arrow:shields]: Diagonal movement. Up is northwest, Right is northeast, Down is southeast, Left is southwest. Left Ctrl+Alt+Arrows also works, for AltGr keyboards
-[Shift + Tab:shields]: Previous target while targeting, walking, or looking. A fresh press starts from the far end of the list, so in walk mode it jumps straight to the rifts
+[Shift + Tab:shields]: Previous target while targeting, walking, or looking. A fresh press starts from the far end of the list, so in walk mode it jumps straight to the rifts. Needs the Steam overlay turned off for this game, or Steam swallows the keypress. Steps are in the read me
 [Left Ctrl:shields]: Cancel speech
 [Z:shields]: Repeat the current line
 [Left Bracket / Right Bracket:shields]: Speech history back and forward

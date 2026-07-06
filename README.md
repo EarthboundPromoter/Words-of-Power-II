@@ -77,6 +77,20 @@ any speech is running is a catch-22. A bundled program handles it:
 The very first screen on launch is **Language select** (voiced, English only) — just
 press **Enter** to pass it and reach the main menu.
 
+### Turn off the Steam overlay (required for Shift + Tab)
+
+Steam silently reserves **Shift + Tab** for its in-game overlay: the keypress is
+swallowed inside the game process and Rift Wizard 3 never receives it, even though
+the overlay itself never visibly opens in this game. The mod's reverse target
+cycling cannot work until the overlay is off for this game:
+
+1. In your Steam library, focus Rift Wizard 3 and open its context menu
+   (Applications key or Shift + F10), then choose **Properties**.
+2. On the **General** tab, uncheck **Enable the Steam Overlay while in-game**.
+
+This is per-game — the overlay keeps working in your other games, and every other
+Shift chord works regardless. Only Shift + Tab is affected.
+
 ## What's New in Rift Wizard 3 (vs. Rift Wizard 2)
 
 The biggest changes are in the game itself, not just the mod:
@@ -142,7 +156,7 @@ Two sets of keys: the ones the mod adds, and Rift Wizard 3's own. A few things f
 | **Alt + J / N / Q / Y** | Mark or unmark the last target from that scan. One mark at a time; clears when the unit dies or the landmark is collected. |
 | **P** | Path to the look-mode cursor — full route to whatever it's on. |
 | **Shift + P** | Re-announce the path to your marked target. |
-| **Shift + Tab** | Previous target while targeting, walking, or looking (reverse of the game's Tab cycle). A fresh press starts from the far end of the list — in walk mode that jumps straight to the rifts. |
+| **Shift + Tab** | Previous target while targeting, walking, or looking (reverse of the game's Tab cycle). A fresh press starts from the far end of the list — in walk mode that jumps straight to the rifts. Needs the Steam overlay turned off for this game (see setup above). |
 | **RCtrl + Arrow** | Diagonal movement (Up=NW, Right=NE, Down=SE, Left=SW), for keyboards without a numpad. |
 
 **In a level — speech control**

@@ -3,6 +3,32 @@
 All notable changes to **Words of Power II** are listed here, newest first. This is
 an early work-in-progress RW3 port — expect frequent changes.
 
+## Unreleased
+
+### Added
+- **Shift + Tab reverse target cycling** while targeting, walking, or looking —
+  the game's Tab cycle stepped backward, same voice and "N of M" counter. A fresh
+  press starts from the far end of the list, so in walk mode it jumps straight to
+  the rifts. Requested by Neurrone.
+- **Setup step required:** Steam silently reserves Shift + Tab for its in-game
+  overlay and the game never receives the chord — even though the overlay never
+  visibly opens in Rift Wizard 3. Disable the overlay for this game (Rift Wizard 3
+  Properties, General tab, uncheck "Enable the Steam Overlay while in-game") or
+  reverse cycling cannot work. Every other Shift chord is unaffected. Steps in
+  the README.
+- New setting `speak_pickup_effects` (default true): set false to trim Ruby Heart
+  and Memory Orb cursor reads to name-only. Walk-on shrines always speak their
+  effect.
+
+### Fixed
+- Walk-on props (Ruby Heart, Memory Orb, and the three walk-on shrines) now read
+  their description in Look mode and the targeting brief, matching the game's
+  examine panel, which shows it on mere cursor-over. Reported by Neurrone.
+- Units no longer hide the prop or cloud beneath them: the targeting brief, the
+  Tab-cycle read, and Look mode's portal branch all spoke the unit and dropped
+  what it stood on. All three now speak what's beneath, threat-first. Reported
+  by Neurrone.
+
 ## 2026-07-05 — 0.3.4
 
 ### Fixed
