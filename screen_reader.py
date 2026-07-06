@@ -3100,6 +3100,9 @@ if _main is not None:
     _KB_PREV = getattr(_main, 'KEY_BIND_PREV_EXAMINE_TARGET', None)
     _KB_NEXT = getattr(_main, 'KEY_BIND_NEXT_EXAMINE_TARGET', None)
     _KB_FF = getattr(_main, 'KEY_BIND_FF', None)
+    # Tab bind id — read (never rewritten) so the Shift+Tab reverse cycle
+    # follows a player's Tab rebind
+    _KB_TAB = getattr(_main, 'KEY_BIND_TAB', None)
 
     if _default_kb is not None and _KB_PREV is not None:
         # Always set screen-reader-friendly defaults (affects fresh installs
@@ -5384,9 +5387,11 @@ if _PyGameView is not None:
             return "No target"
         return _name(target)
 
-    def patched_cycle_tab(self):
-        """Announce target when TAB cycling, with position counter and AoE warning."""
-        _original_cycle_tab(self)
+    def _announce_tab_cycle(self):
+        """Speak the current tab target after a cycle step: position counter,
+        AoE warning, full target read. Shared by forward Tab
+        (patched_cycle_tab) and the mod's Shift+Tab reverse cycle so the two
+        directions can't drift apart in voice."""
         # Reset AoE and dedup state so subsequent cursor movement can re-trigger
         _aoe_announced_state[0] = False
         _last_examine_xy[0] = None
@@ -5419,6 +5424,37 @@ if _PyGameView is not None:
             log(f"[Target] {text}")
         except Exception as e:
             log(f"[Target] Error: {e}")
+
+    def _cycle_tab_reverse(self):
+        """Shift+Tab: cycle tab targets BACKWARD. The game has no reverse
+        cycle anywhere; this mirrors cycle_tab_targets
+        (RiftWizard3.py:2361-2379) with the index stepped -1 instead of +1.
+        Spell contexts only (owner scope 2026-07-06): targeting and walk,
+        with look riding along since all three are spells to the game;
+        deploy keeps plain forward Tab. Cold start (cursor not on a tab
+        target) lands at the END of the list (owner: most intuitive) —
+        walk's list is pickups nearest-first then portals
+        (RiftWizard3.py:856-862), so a cold Shift+Tab jumps straight to
+        the rifts. API-DRIFT WATCH: if a game update changes
+        cycle_tab_targets, re-mirror it here."""
+        if not self.tab_targets:
+            _announce_tab_cycle(self)  # same "No targets" voice as forward
+            return
+        target = self.cur_spell_target
+        if target in self.tab_targets:
+            index = self.tab_targets.index(target)
+            new_index = (index - 1) % len(self.tab_targets)
+        else:
+            new_index = len(self.tab_targets) - 1
+        target = self.tab_targets[new_index]
+        self.cur_spell_target = target
+        self.try_examine_tile(target)
+        _announce_tab_cycle(self)
+
+    def patched_cycle_tab(self):
+        """Announce target when TAB cycling, with position counter and AoE warning."""
+        _original_cycle_tab(self)
+        _announce_tab_cycle(self)
 
     _PyGameView.cycle_tab_targets = patched_cycle_tab
     log("  Target cycling hook installed")
@@ -7664,6 +7700,21 @@ if _PyGameView is not None:
                     _deploy_cycle(self, 4)
                 elif deploying and evt.key == pygame.K_5:
                     _deploy_cycle(self, 5)
+                elif (_KB_TAB is not None
+                        and evt.key in self.key_binds[_KB_TAB]
+                        and getattr(self, 'cur_spell', None) is not None
+                        and pygame.key.get_mods() & pygame.KMOD_SHIFT):
+                    # Shift+Tab: reverse target cycle (spell contexts only —
+                    # the cur_spell gate covers targeting, walk, and look).
+                    # get_mods, not evt.mod: the game's synthesized repeat
+                    # events carry no mod attribute (RiftWizard3.py:10339).
+                    _cycle_tab_reverse(self)
+                    # Consume the Tab keydown — the game's own dispatch
+                    # (RiftWizard3.py:2797) ignores modifiers and would
+                    # cycle forward on the same press, netting zero.
+                    self.events = [e for e in self.events
+                                   if not (e.type == pygame.KEYDOWN
+                                           and e.key == evt.key)]
                 elif evt.key == pygame.K_f:
                     mods = pygame.key.get_mods()
                     if mods & pygame.KMOD_SHIFT:

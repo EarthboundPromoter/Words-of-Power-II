@@ -142,6 +142,7 @@ Two sets of keys: the ones the mod adds, and Rift Wizard 3's own. A few things f
 | **Alt + J / N / Q / Y** | Mark or unmark the last target from that scan. One mark at a time; clears when the unit dies or the landmark is collected. |
 | **P** | Path to the look-mode cursor — full route to whatever it's on. |
 | **Shift + P** | Re-announce the path to your marked target. |
+| **Shift + Tab** | Previous target while targeting, walking, or looking (reverse of the game's Tab cycle). A fresh press starts from the far end of the list — in walk mode that jumps straight to the rifts. |
 | **RCtrl + Arrow** | Diagonal movement (Up=NW, Right=NE, Down=SE, Left=SW), for keyboards without a numpad. |
 
 **In a level — speech control**
