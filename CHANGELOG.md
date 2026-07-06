@@ -3,7 +3,7 @@
 All notable changes to **Words of Power II** are listed here, newest first. This is
 an early work-in-progress RW3 port — expect frequent changes.
 
-## Unreleased
+## 2026-07-05 — 0.3.4
 
 ### Fixed
 - Shrine tooltips at rift selection now read the shrine's description instead of

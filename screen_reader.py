@@ -1,5 +1,5 @@
 # Rift Wizard 2 Screen Reader Mod — Words of Power
-MOD_VERSION = "0.3.3"
+MOD_VERSION = "0.3.4"
 
 import sys
 import os
