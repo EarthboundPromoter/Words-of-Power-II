@@ -4560,6 +4560,25 @@ if _PyGameView is not None:
 
     _original_cycle_tab = _PyGameView.cycle_tab_targets
 
+    def _is_misc_prop(prop):
+        """Props the game examines through the plain name+description renderer
+        (draw_examine's final else -> draw_examine_misc, RiftWizard3.py:6966,
+        7207-7225): HeartDot, MemoryOrb, the walk-on shrines. Their whole
+        meaning is one description and stepping on the tile consumes them, so
+        cursor reads speak the description in full, exactly as the game's
+        panel does on cursor-over (owner ruling 2026-07-06, from Neurrone's
+        Ruby Heart report). Portals, shops, and components keep their own
+        gated treatments."""
+        return not isinstance(prop, (Level.Portal, Level.Shop,
+                                     getattr(Level, 'ComponentPickup', ()),
+                                     getattr(Level, 'Component', ())))
+
+    def _misc_prop_desc(prop):
+        """The spoken description for a misc-class prop, empty if none."""
+        if not _is_misc_prop(prop):
+            return ""
+        return _clean_desc(_desc_text(prop)).strip()
+
     def _describe_tile(view, point):
         """Describe the contents of a tile for Look mode cursor announcements.
         Returns a string like 'Fire Imp. HP 12 of 12. ...' or 'Wall' or 'Floor'."""
@@ -4591,6 +4610,12 @@ if _PyGameView is not None:
                     parts.append(_describe_portal(tile.prop, view))
                 else:
                     parts.append(_name(tile.prop))
+                    # Walk-on pickups/shrines: effect spoken inline — the
+                    # game's panel shows it on cursor-over, and walking on
+                    # commits it (irreversibly, for shrines)
+                    desc = _misc_prop_desc(tile.prop)
+                    if desc:
+                        parts.append(desc)
 
             # Cloud on tile (fire cloud, poison cloud, etc.)
             if tile.cloud:
@@ -4640,9 +4665,14 @@ if _PyGameView is not None:
                 if on_death:
                     parts.append(on_death)
                 return ". ".join(parts)
-            # Prop
+            # Prop — walk-on pickups/shrines speak their effect here too,
+            # same read as Look mode (owner 2026-07-06: both cursor paths)
             if tile.prop:
-                return _name(tile.prop)
+                text = _name(tile.prop)
+                desc = _misc_prop_desc(tile.prop)
+                if desc:
+                    text = f"{text}. {desc}"
+                return text
             # Cloud
             if tile.cloud:
                 return _name(tile.cloud, "Cloud")
