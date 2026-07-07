@@ -58,7 +58,33 @@ an early work-in-progress RW3 port — expect frequent changes.
   Shift+J bounces back to where the cursor was before the jump. J and Y had
   been freed by the scan-key move; J is now the bridge.
 
+- **Overlay latches: Alt+L and Alt+T.** The game's hold-to-see overlays,
+  pinned: latch line of sight or threat and it stays active — the overlay
+  keeps drawing (like holding the key), and every cursor step gains a short
+  tag: "in sight" / "out of sight", "threatened" / "clear". Latched from
+  normal play, line of sight follows you as you move; latched from Look,
+  aiming, or deploy, it watches from that tile — a deploy latch carries
+  into the level with you. Examine an enemy first and Alt+T latches just
+  that enemy's reach ("Latched: Night Hag's threat"). One latch at a time,
+  same chord releases, F reports what's latched, and holding the real key
+  still works and takes over while held. New setting `latch_visual_overlay`
+  (default on) controls the drawn half; the spoken tags work either way.
+
 ### Changed
+- **The global threat query now answers "Threatened" or "Safe" — nothing
+  more.** The old readout listed every threatening enemy with counts and
+  directions, but the game itself shows threat as an anonymous red zone and
+  gates *who threatens* behind examining each enemy one at a time. The old
+  report assembled a tactical summary no sighted player ever got in one
+  glance — you were overserved — and computing it was the freeze players
+  felt pressing T on crowded levels. The new answer reads the game's own
+  threat zone (built once per turn, shared with the held-T overlay), so it's
+  instant after the first press of a turn. Who-threatens is unchanged where
+  it always lived: examine an enemy and press T ("Threatens you" / "Can't
+  hit you") — with scans now parking the cursor, that loop is three
+  keypresses. The old readout survives verbatim under a new setting,
+  `threat_enumeration_legacy` (default off), as a time capsule: it will be
+  removed in a future release, so if you rely on it, say so.
 - **The "From destination" scan qualifier now follows the routing rule** —
   spoken only for teleports whose target is truly a destination. It used to
   key on the bare Translocation tag, which mislabeled Disperse's area aim as

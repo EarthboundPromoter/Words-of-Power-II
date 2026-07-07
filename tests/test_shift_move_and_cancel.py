@@ -136,7 +136,7 @@ _fns = {
     '_announce_deploy_tile': lambda v, p: _look_announced.append(p),
 }
 exec(_extract("    def _x4_finalize(view):",
-              "    def patched_try_examine_tile(self, point):"), _fns)
+              "    # ---- Overlay latches (cursor-tool pass, slice 7) ----"), _fns)
 _finalize = _fns['_x4_finalize']
 
 

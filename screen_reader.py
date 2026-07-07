@@ -242,6 +242,22 @@ _SETTINGS_SCHEMA = [
      "# and gone-landmark announcements always fire for every pin regardless\n"
      "# of this setting.\n"
      "# Default: false"),
+    ('words_of_power', 'latch_visual_overlay', 'true',
+     "# Draw the latched overlay (Alt+L line of sight, Alt+T threat) on\n"
+     "# screen every frame, like holding the key down. Speech tokens on\n"
+     "# cursor steps work either way; this is the sighted-aid half. Set\n"
+     "# false to keep latches speech-only.\n"
+     "# Default: true"),
+    ('words_of_power', 'threat_enumeration_legacy', 'false',
+     "# Restore the old global T readout verbatim: count, names, and\n"
+     "# directions of everything threatening the tile. The default answer is\n"
+     "# now just \"Threatened\" or \"Safe\" - the game shows threat as an\n"
+     "# anonymous red zone and gates who-threatens behind examining each\n"
+     "# enemy (examine + T speaks that here), so the old report assembled a\n"
+     "# tactical summary no sighted player ever got in one glance, at real\n"
+     "# CPU cost on crowded levels. This switch is a time capsule, not a\n"
+     "# supported third mode; expect it to be removed in a future release.\n"
+     "# Default: false"),
     ('words_of_power', 'digest_enabled', 'true',
      "# Enable the direct-action digest: a composed summary of one player\n"
      "# keypress's full effect chain (cast, damage, kills, procs, side-effects)\n"
@@ -413,6 +429,8 @@ class _Cfg:
     speak_pickup_effects = _settings.getboolean('words_of_power', 'speak_pickup_effects', fallback=True)
     jump_coalesce_units = _settings.getboolean('words_of_power', 'jump_coalesce_units', fallback=False)
     pin_speak_all = _settings.getboolean('words_of_power', 'pin_speak_all', fallback=False)
+    threat_enumeration_legacy = _settings.getboolean('words_of_power', 'threat_enumeration_legacy', fallback=False)
+    latch_visual_overlay = _settings.getboolean('words_of_power', 'latch_visual_overlay', fallback=True)
     digest_enabled = _settings.getboolean('words_of_power', 'digest_enabled', fallback=True)
     # [Composer] — pipeline flags. As of 0.3.2 the composer pipeline is the
     # shipped speech engine: producers on, legacy combat narration off.
@@ -451,6 +469,8 @@ log(f"[Settings] reactive_markers_enabled = {cfg.reactive_markers_enabled}")
 log(f"[Settings] aoe_group_names = {cfg.aoe_group_names}")
 log(f"[Settings] speak_pickup_effects = {cfg.speak_pickup_effects}")
 log(f"[Settings] pin_speak_all = {cfg.pin_speak_all}")
+log(f"[Settings] threat_enumeration_legacy = {cfg.threat_enumeration_legacy}")
+log(f"[Settings] latch_visual_overlay = {cfg.latch_visual_overlay}")
 log(f"[Settings] digest_enabled = {cfg.digest_enabled}")
 log(f"[Settings] crisis_enabled = {cfg.crisis_enabled}")
 log(f"[Settings] orphan_enabled = {cfg.orphan_enabled}")
@@ -5568,6 +5588,9 @@ if _PyGameView is not None:
                 if cfg.show_coordinates:
                     chunks[0] = f"{chunks[0]} ({point.x},{point.y})"
                 chunks.extend(_own_aura_clauses(view, point))
+                _lt = _latch_token(view, level, point.x, point.y)
+                if _lt:
+                    chunks.append(_lt.lstrip(', ').capitalize())
                 try:
                     _telemetry.emit('look', cx=point.x, cy=point.y, portal=True,
                                     msg=chunks[0] if chunks else "")
@@ -5582,6 +5605,7 @@ if _PyGameView is not None:
                 aura_clauses = _own_aura_clauses(view, point)
                 if aura_clauses:
                     text = f"{text} {' '.join(aura_clauses)}"
+                text = f"{text}{_latch_token(view, level, point.x, point.y)}"
                 try:
                     _telemetry.emit('look', cx=point.x, cy=point.y, msg=text)
                 except Exception:
@@ -5610,6 +5634,7 @@ if _PyGameView is not None:
             text = f"{_prefix} {tile_text}" if _prefix else tile_text
             if group_suffix:
                 text = f"{text}. {group_suffix}"
+            text = f"{text}{_latch_token(view, getattr(view.game, 'cur_level', None), point.x, point.y)}"
             try:
                 _telemetry.emit('target_tile', cx=point.x, cy=point.y,
                                 spell=_name(spell), msg=text)
@@ -5658,6 +5683,7 @@ if _PyGameView is not None:
 
             if cfg.show_coordinates:
                 text = f"{text} ({x},{y})"
+            text = f"{text}{_latch_token(view, level, x, y)}"
 
             try:
                 _telemetry.emit('deploy_tile', cx=x, cy=y, msg=text)
@@ -6059,6 +6085,355 @@ if _PyGameView is not None:
             log(f"[Cursor] {text}")
             async_tts.speak(text)
 
+    # ---- Overlay latches (cursor-tool pass, slice 7) ----
+    # Alt+L / Alt+T latch the game's held-key overlays: the pinned form of
+    # holding the key. ONE latch at a time (mirrors the game's exclusive
+    # elif chain, RiftWizard3.py:5948-5965). The origin pins to the
+    # ATTENTION OBJECT — latched from normal play it FOLLOWS the wizard,
+    # from Look/targeting/deploy it freezes that tile; data stays LIVE
+    # (membership recomputed per read). Lifetime: the latch lives while its
+    # level is the displayed level — a deploy latch attaches to next_level
+    # and survives into the realm (try_deploy assigns the SAME object to
+    # cur_level, Game.py:827). PICKLE INVARIANT: latch state is module-side
+    # only and must NEVER be attached to a game object — that is the only
+    # bridge into the save's dill graph (event-manager closures are severed
+    # by Level.__getstate__).
+    # Gate provenance: this slice ran the pass's full adversarial gate
+    # (2026-07-07, two skeptics: render path + lifetime/identity); the
+    # findings are cited inline as (render #N) / (lifetime #N) and recorded
+    # in docs/CURSOR_TOOL_UX_PASS.md.
+
+    _SPRITE_SIZE = getattr(_main, 'SPRITE_SIZE', 32)
+    _latch = [None]                     # {'overlay','origin_unit','origin_point','narrow_unit','level'}
+    _latch_overlay_drawn = [False]      # a held overlay key drew this frame (preempt)
+    _latch_suppress_targeting = [False] # mute the chain's targeting draw; we reassert above the tint
+    _latch_in_screenshot = [False]      # keep latch pixels out of saved PNGs (render #6)
+
+    def _speak_latch(text):
+        async_tts.speak(text)
+        log(f"[Latch] {text}")
+
+    def _latch_origin_xy(latch):
+        unit = latch['origin_unit']
+        if unit is not None:
+            return unit.x, unit.y
+        point = latch['origin_point']
+        if point is not None:
+            return point.x, point.y
+        return None
+
+    def _latch_expiry_reason(view, latch):
+        # ORDER LOAD-BEARING (lifetime #3): level identity BEFORE origin
+        # liveness — try_deploy pulls the wizard out of the old level
+        # (Game.py:819) before the swap (:827), so an unordered check
+        # misannounces every realm transition as origin death.
+        level = latch['level']()
+        if level is None or level is not view.get_display_level():
+            return 'level'
+        # Liveness is LIST MEMBERSHIP (identity — Unit defines no __eq__),
+        # never the unit's removal flag: remove_obj sets it (Level.py:3957)
+        # and nothing in the game ever resets it, so the wizard carries it
+        # forever after the first realm (lifetime #2).
+        unit = latch['origin_unit'] if latch['origin_unit'] is not None else latch['narrow_unit']
+        if unit is not None and unit not in level.units:
+            return 'origin'
+        return None
+
+    def _latch_service(view):
+        """ACTIVE expiry at the top of every draw_level call, independent of
+        the visual config (lifetime #1): a stateless valid-iff predicate
+        would let deploy-abort -> re-enter resurrect a latch (the portal
+        CACHES its generated level, Game.py:799-801, and re-entry restores
+        the same object), keep a dead narrow_unit's whole old level alive
+        through unit.level backrefs, and never announce. Clearing state at
+        the first mismatched frame closes all of it. Returns the live latch
+        or None."""
+        latch = _latch[0]
+        if latch is None:
+            return None
+        reason = _latch_expiry_reason(view, latch)
+        if reason is None:
+            return latch
+        _latch[0] = None
+        if reason == 'origin':
+            name = _name(latch['origin_unit'] if latch['origin_unit'] is not None
+                         else latch['narrow_unit'])
+            _speak_latch(f"Latch released, {name} gone")
+        else:
+            _speak_latch("Latch released")
+        return None
+
+    def _toggle_latch(view, overlay):
+        """Alt+L ('los') / Alt+T ('threat'): toggle the latch. Same chord
+        unlatches; latching one overlay replaces the other (EXCLUSIVE).
+        LoS origin = the attention object (normal play: the wizard,
+        FOLLOWS; Look/targeting/deploy: that tile, FROZEN — deploy pins on
+        next_level and carries into the realm). Threat is origin-free;
+        examining a hostile at latch time pins THAT unit's narrowed
+        overlay. Announce wording provisional (⟨DESIGN⟩, ear)."""
+        try:
+            game = view.game
+            level = view.get_display_level()
+            if level is None:
+                return
+            current = _latch[0]
+            if current is not None and current['overlay'] == overlay:
+                _latch[0] = None
+                _speak_latch("Unlatched")
+                return
+            latch = {'overlay': overlay, 'origin_unit': None,
+                     'origin_point': None, 'narrow_unit': None,
+                     'level': weakref.ref(level)}
+            if overlay == 'los':
+                if getattr(game, 'deploying', False) and getattr(view, 'deploy_target', None):
+                    latch['origin_point'] = Level.Point(view.deploy_target.x, view.deploy_target.y)
+                    announce = "Latched: line of sight from this tile"
+                elif getattr(view, 'cur_spell', None) is not None and getattr(view, 'cur_spell_target', None) is not None:
+                    latch['origin_point'] = Level.Point(view.cur_spell_target.x, view.cur_spell_target.y)
+                    announce = "Latched: line of sight from this tile"
+                else:
+                    if game.p1 is None:
+                        return
+                    latch['origin_unit'] = game.p1
+                    announce = "Latched: line of sight, following you"
+            else:
+                examine = getattr(view, 'examine_target', None)
+                if examine is None:
+                    examine = getattr(view, '_examine_target', None)
+                if (examine is not None and hasattr(examine, 'cur_hp')
+                        and not _is_player(examine)
+                        and Level.are_hostile(game.p1, examine)
+                        and examine in level.units):
+                    latch['narrow_unit'] = examine
+                    announce = f"Latched: {_name(examine)}'s threat"
+                else:
+                    announce = "Latched: threat"
+            _latch[0] = latch
+            _speak_latch(announce)
+        except Exception as e:
+            log(f"[Latch] Toggle error: {e}")
+
+    def _latch_token(view, level, x, y):
+        """Membership token for cursor-step announcements while latched
+        (latch-only by ruling: held keys never token; routed scans suppress
+        the tile announce, so scan lines never token by construction). LoS
+        answers from the origin's CURRENT position; per-unit threat answers
+        the pinned unit's reach with LIVE hostility wording — a charmed
+        narrow_unit's reach is not a 'threat', so the words shift to
+        in-reach while the pixels keep drawing it (lifetime #4; provisional,
+        ear); global threat rides slice 6's membership machinery."""
+        try:
+            latch = _latch[0]
+            if latch is None:
+                return ""
+            if latch['level']() is not level:
+                return ""
+            if latch['overlay'] == 'los':
+                origin = _latch_origin_xy(latch)
+                if origin is None:
+                    return ""
+                visible = level.can_see(origin[0], origin[1], x, y)
+                return ", in sight" if visible else ", out of sight"
+            player = view.game.p1
+            narrow = latch['narrow_unit']
+            if narrow is not None:
+                # The narrowed zone contains the unit's OWN position too
+                # (RiftWizard3.py:5662) — without the position clause the
+                # pinned unit's tile spoke "clear" under red pixels (field
+                # find 2026-07-07, the per-unit sibling of the global fix).
+                reach = ((narrow.x, narrow.y) == (x, y)
+                         or _unit_threatens_point(narrow, x, y))
+                if Level.are_hostile(player, narrow):
+                    return ", threatened" if reach else ", clear"
+                return ", in reach" if reach else ", out of reach"
+            threatened = _threat_membership(view, level, player, x, y)
+            return ", threatened" if threatened else ", clear"
+        except Exception:
+            return ""
+
+    def _latch_vitals_line():
+        """Latch state for the F vitals readout (discoverability ruling:
+        no periodic reminders; F carries the state)."""
+        latch = _latch[0]
+        if latch is None:
+            return ""
+        if latch['overlay'] == 'los':
+            if latch['origin_unit'] is not None:
+                return "Line of sight latched, following you"
+            return "Line of sight latched from a tile"
+        if latch['narrow_unit'] is not None:
+            return f"{_name(latch['narrow_unit'])}'s threat latched"
+        return "Threat latched"
+
+    def _draw_los_from(view, ox, oy):
+        """Parameterized re-render of the game's draw_los loop
+        (RiftWizard3.py:5697-5710) with the origin swapped — the original's
+        origin is an inline expression with no seam (:5702). DIVERGENCE
+        REGISTRY: re-verify against draw_los on game updates. Blits are
+        batched (the original's aren't; same pixels, fewer calls —
+        render #7); los_tiles is still assigned for parity (its only
+        consumer, draw_los_borders, is dead code — render #4)."""
+        blit_area = (0, 0, _SPRITE_SIZE, _SPRITE_SIZE)
+        image = view.tile_visible_image
+        level = view.get_display_level()
+        los_tiles = []
+        to_blit = []
+        for x in range(level.width):
+            for y in range(level.height):
+                if level.can_see(ox, oy, x, y):
+                    to_blit.append((image, (_SPRITE_SIZE * x, _SPRITE_SIZE * y), blit_area))
+                    los_tiles.append(Level.Point(x, y))
+        view.level_display.blits(to_blit)
+        view.los_tiles = los_tiles
+
+    def _draw_threat_pinned(view, latch):
+        """Invoke the game's draw_threat with its narrowing pinned to the
+        latch's variant. examine_target is a PROPERTY — its getter rotates
+        through _examine_extras and its setter rebuilds them with unit
+        mutations (RiftWizard3.py:2627-2669) — so the swap works the three
+        private fields directly and restores them exactly (render #1);
+        draw_threat never re-enters draw_level and no event processing
+        runs inside a draw call, so try/finally is airtight."""
+        saved = (view._examine_target, view._examine_index, view._examine_extras)
+        try:
+            view._examine_target = latch['narrow_unit']
+            view._examine_index = 0
+            view._examine_extras = []
+            view.draw_threat()
+        finally:
+            view._examine_target, view._examine_index, view._examine_extras = saved
+
+    def _redraw_deploy_cursor(view):
+        """Mirror of the game's deploy-cursor draw (RiftWizard3.py:
+        5942-5946), re-blitted after the latch tint — the game draws the
+        animated cursor BEFORE the overlay stratum, so the tint would bury
+        it in exactly the deploy case the latch design advertises
+        (render #5). DIVERGENCE REGISTRY entry beside the LoS loop."""
+        level = view.get_display_level()
+        target = view.deploy_target
+        ok = level.can_stand(target.x, target.y, view.game.p1)
+        image = _main.get_image(["UI", "deploy_ok_animated" if ok else "deploy_no_animated"])
+        frames = max(image.get_width() // _SPRITE_SIZE, 1)
+        frame = (getattr(_main, 'cloud_frame_clock', 0) // 3) % frames
+        view.level_display.blit(
+            image, (target.x * _SPRITE_SIZE, target.y * _SPRITE_SIZE),
+            (frame * _SPRITE_SIZE, 0, _SPRITE_SIZE, _SPRITE_SIZE))
+
+    def _latch_post_draw(view, latch):
+        """The latch overlay + blit-order recovery, after the original
+        draw_level returned un-preempted."""
+        try:
+            if latch['overlay'] == 'threat':
+                # Mirror the game's own gate for the threat draw (:5952);
+                # the invalidation at Game.advance shares the condition, so
+                # the latch never draws against a nulled zone (render #8).
+                if view.game.is_awaiting_input():
+                    _draw_threat_pinned(view, latch)
+            else:
+                view.draw_los()   # patched: draws from the latched origin
+        except Exception as e:
+            log(f"[Latch] Draw error: {e}")
+        # Reassert the strata the game draws above overlays: the targeting
+        # render (which IS the Look reticle) and the deploy cursor.
+        try:
+            if getattr(view, 'cur_spell', None) is not None and getattr(view, 'cur_spell_target', None) is not None:
+                view.draw_targeting()
+            elif getattr(view.game, 'deploying', False) and getattr(view, 'deploy_target', None):
+                _redraw_deploy_cursor(view)
+        except Exception as e:
+            log(f"[Latch] Reassert error: {e}")
+
+    _original_draw_level = _PyGameView.draw_level
+
+    def patched_draw_level(self):
+        _latch_overlay_drawn[0] = False
+        latch = _latch_service(self)
+        show = (latch is not None and cfg.latch_visual_overlay
+                and not getattr(self, 'gameover_frames', 0)   # render #3: the
+                # early-returning gameover freeze would accumulate tint into
+                # the death dissolve and its screenshots
+                and not _latch_in_screenshot[0])
+        # Suppress the chain's own targeting draw for this frame so the
+        # reassert below is the frame's ONLY targeting render — drawing it
+        # twice reads more opaque and doubles the AoE compute (render #2).
+        _latch_suppress_targeting[0] = show
+        try:
+            _original_draw_level(self)
+        finally:
+            _latch_suppress_targeting[0] = False
+        if not show:
+            return
+        if _latch_overlay_drawn[0]:
+            # A physically held overlay key drew this frame: preempt. The
+            # game's native held-key frames draw no targeting either, so
+            # there is nothing to reassert (render #4 covers all five
+            # chain branches via the flag wraps below).
+            return
+        _latch_post_draw(self, latch)
+
+    _original_draw_targeting = _PyGameView.draw_targeting
+
+    def patched_draw_targeting(self):
+        if _latch_suppress_targeting[0]:
+            return
+        _original_draw_targeting(self)
+
+    _original_draw_los = _PyGameView.draw_los
+
+    def patched_draw_los(self):
+        _latch_overlay_drawn[0] = True
+        latch = _latch[0]
+        if latch is not None and latch['overlay'] == 'los':
+            origin = _latch_origin_xy(latch)
+            if origin is not None:
+                # Ruled origin unification (§5.1): a held L while latched
+                # draws from the PINNED origin, so pixels and speech never
+                # answer from different origins (render #9, accepted — the
+                # latch announce names the origin so the reroute is
+                # audible).
+                _draw_los_from(self, origin[0], origin[1])
+                return
+        _original_draw_los(self)
+
+    _original_draw_threat = _PyGameView.draw_threat
+
+    def patched_draw_threat(self):
+        _latch_overlay_drawn[0] = True
+        _original_draw_threat(self)
+
+    _original_highlight_units = _PyGameView.highlight_units
+
+    def patched_highlight_units(self, allied=True):
+        _latch_overlay_drawn[0] = True
+        _original_highlight_units(self, allied=allied)
+
+    _original_highlight_objects = _PyGameView.highlight_objects
+
+    def patched_highlight_objects(self):
+        _latch_overlay_drawn[0] = True
+        _original_highlight_objects(self)
+
+    def _make_screenshot_wrap(original):
+        def patched_screenshot(self, *args, **kwargs):
+            _latch_in_screenshot[0] = True
+            try:
+                return original(self, *args, **kwargs)
+            finally:
+                _latch_in_screenshot[0] = False
+        return patched_screenshot
+
+    _PyGameView.draw_level = patched_draw_level
+    _PyGameView.draw_targeting = patched_draw_targeting
+    _PyGameView.draw_los = patched_draw_los
+    _PyGameView.draw_threat = patched_draw_threat
+    _PyGameView.highlight_units = patched_highlight_units
+    _PyGameView.highlight_objects = patched_highlight_objects
+    for _shot_name in ('make_level_screenshot', 'make_level_end_screenshot'):
+        _shot_orig = getattr(_PyGameView, _shot_name, None)
+        if _shot_orig is not None:
+            setattr(_PyGameView, _shot_name, _make_screenshot_wrap(_shot_orig))
+    log("  Latch draw hooks installed (draw_level wrap, overlay preempt flags, targeting reassert)")
+
     def patched_try_examine_tile(self, point):
         """Hook cursor movement for Look mode, spell targeting, deploy tile feedback.
         Uses point deduplication instead of timer threads — the game calls this
@@ -6172,6 +6547,10 @@ if _PyGameView is not None:
                 status_parts.append(entry)
             if status_parts:
                 parts.append("Status: " + ", ".join(status_parts))
+
+            latch_line = _latch_vitals_line()
+            if latch_line:
+                parts.append(latch_line)
 
             text = ". ".join(parts)
             log(f"[Vitals] {text}")
@@ -7139,10 +7518,47 @@ if _PyGameView is not None:
         except Exception as e:
             log(f"[LoS] Error: {e}")
 
+    def _threat_enumeration_legacy(level, player, ref_x, ref_y, _qp):
+        """The retired global threat readout, restored VERBATIM by the
+        threat_enumeration_legacy setting — a time capsule, not a third
+        behavior (cursor-tool pass §5.2, owner-ruled: the aggregate report
+        assembled what the game gates behind per-unit examines, and its
+        no-early-exit sweep was Neurrone's RW2 lag). Expect removal."""
+        threatening = []
+        for unit in level.units:
+            if not Level.are_hostile(player, unit):
+                continue
+            if _unit_threatens_point(unit, ref_x, ref_y):
+                dist = max(abs(unit.x - ref_x), abs(unit.y - ref_y))
+                threatening.append((unit, dist))
+
+        if not threatening:
+            text = f"{_qp}Safe"
+            log(f"[Threat] {_qp}Safe")
+            async_tts.speak(text)
+            return
+
+        threatening.sort(key=lambda x: x[1])
+        parts = [f"Threatened, {len(threatening)}"]
+        for unit, dist in threatening[:8]:
+            dx = unit.x - ref_x
+            dy = unit.y - ref_y
+            offset = _direction_offset(dx, dy)
+            parts.append(f"{_name(unit)}, {offset}")
+        if len(threatening) > 8:
+            parts.append(f"and {len(threatening) - 8} more")
+
+        text = f"{_qp}{'. '.join(parts)}"
+        log(f"[Threat] {_qp}{'. '.join(parts)}")
+        async_tts.speak(text)
+
     def _query_threat(view, scan_level=None, ref_point=None, qualifier=None):
-        """T key: Threat vocalization.
-        No unit highlighted: 'Safe' or 'Threatened, N. Enemy, direction.'
-        Enemy unit highlighted: 'Threatens you' or 'Can't hit you.'"""
+        """T key: Threat vocalization (redesigned, cursor-tool pass slice 6).
+        No unit highlighted: 'Threatened' or 'Safe' — membership in the
+        game's own threat_zone at the attention tile. Who-threatens stays
+        behind examine + T ('Threatens you' / 'Can't hit you'), the same
+        gate the game puts attribution behind (the overlay is an anonymous
+        tile set; per-unit reach shows only while examining that unit)."""
         try:
             game = view.game
             if game is None:
@@ -7174,36 +7590,60 @@ if _PyGameView is not None:
                 async_tts.speak(text)
                 return
 
-            # Global threat summary
-            threatening = []
-            for unit in level.units:
-                if not Level.are_hostile(player, unit):
-                    continue
-                if _unit_threatens_point(unit, ref_x, ref_y):
-                    dist = max(abs(unit.x - ref_x), abs(unit.y - ref_y))
-                    threatening.append((unit, dist))
-
-            if not threatening:
-                text = f"{_qp}Safe"
-                log(f"[Threat] {_qp}Safe")
-                async_tts.speak(text)
+            if cfg.threat_enumeration_legacy:
+                _threat_enumeration_legacy(level, player, ref_x, ref_y, _qp)
                 return
 
-            threatening.sort(key=lambda x: x[1])
-            parts = [f"Threatened, {len(threatening)}"]
-            for unit, dist in threatening[:8]:
-                dx = unit.x - ref_x
-                dy = unit.y - ref_y
-                offset = _direction_offset(dx, dy)
-                parts.append(f"{_name(unit)}, {offset}")
-            if len(threatening) > 8:
-                parts.append(f"and {len(threatening) - 8} more")
-
-            text = f"{_qp}{'. '.join(parts)}"
-            log(f"[Threat] {_qp}{'. '.join(parts)}")
+            threatened = _threat_membership(view, level, player, ref_x, ref_y)
+            text = f"{_qp}Threatened" if threatened else f"{_qp}Safe"
+            log(f"[Threat] {text}")
             async_tts.speak(text)
         except Exception as e:
             log(f"[Threat] Error: {e}")
+
+    def _threat_membership(view, level, player, ref_x, ref_y):
+        """Global threat membership at a tile — the T query's answer (slice
+        6) and the threat latch's cursor-step token (slice 7): one
+        machinery, one answer. Membership comes from the game's threat_zone
+        — built once per turn (invalidated at Game.advance,
+        RiftWizard3.py:10511) and rebuilt by draw_threat only when stale
+        (:5644), so invoking the game's own builder shares the cache with
+        the held-T overlay: zero mirrored logic, and the first read per
+        turn pays the same hitch a sighted player pays holding T. The
+        stray blit lands on the previous frame's buffer and is repainted
+        next frame (#250). CARE: draw_threat narrows its zone to ANY
+        examined unit, allies included (:5638-5642 clears only the wizard)
+        — invoke it only when the pixels' variant is the global one; with
+        an ally examined, answer the one-point question directly. The
+        invoke also self-corrects a cache left NARROWED by a per-unit
+        threat latch's per-frame draws (variant change forces a rebuild)."""
+        threatened = None
+        game_examine = getattr(view, 'examine_target', None)
+        pixels_narrowed = (isinstance(game_examine, Level.Unit)
+                           and not getattr(game_examine, 'is_player_controlled', False))
+        if not pixels_narrowed:
+            try:
+                view.draw_threat()
+                zone = getattr(view, 'threat_zone', None)
+                if zone is not None:
+                    threatened = (ref_x, ref_y) in zone
+            except Exception as ze:
+                log(f"[Threat] Zone unavailable, falling back: {ze}")
+        if threatened is None:
+            # One-point membership with early exit (the legacy sweep's
+            # cost came from no-early-exit x every unit; membership can
+            # stop at the first threatener). MIRRORS THE ZONE'S OWN
+            # CONSTRUCTION: hostile POSITIONS are in the zone too
+            # (RiftWizard3.py:5654), and the cursor resting on an enemy
+            # always narrows examine onto it — so without the position
+            # clause every enemy-occupied tile answered "clear" while the
+            # pixels paint it red (field find, 2026-07-07 log).
+            threatened = any(
+                Level.are_hostile(player, u)
+                and ((u.x, u.y) == (ref_x, ref_y)
+                     or _unit_threatens_point(u, ref_x, ref_y))
+                for u in level.units)
+        return threatened
 
     def _query_space(view, scan_level=None, ref_point=None, qualifier=None):
         """B key: Spatial raycast query.
@@ -8768,8 +9208,11 @@ if _PyGameView is not None:
                     else:
                         _jump_to_last_spoken(self)
                 elif _is_bind(self, _KB_LOS, evt.key, pygame.K_l):  # LoS summary (rides Show Line of Sight)
-                    ref, lvl, qual = _get_scan_reference(self)
-                    _query_los_summary(self, scan_level=lvl, ref_point=ref, qualifier=qual)
+                    if pygame.key.get_mods() & pygame.KMOD_ALT:
+                        _toggle_latch(self, 'los')   # Alt+L: LoS latch (slice 7)
+                    else:
+                        ref, lvl, qual = _get_scan_reference(self)
+                        _query_los_summary(self, scan_level=lvl, ref_point=ref, qualifier=qual)
                 elif evt.key == pygame.K_z:
                     # Repeat at current cursor position (don't add to history)
                     idx = async_tts._cursor
@@ -8800,8 +9243,11 @@ if _PyGameView is not None:
                     self.events = [e for e in self.events
                                    if not (e.type == pygame.KEYDOWN and e.key == pygame.K_p)]
                 elif _is_bind(self, _KB_THREAT, evt.key, pygame.K_t):  # threat query (rides Show Threat Zone)
-                    ref, lvl, qual = _get_scan_reference(self)
-                    _query_threat(self, scan_level=lvl, ref_point=ref, qualifier=qual)
+                    if pygame.key.get_mods() & pygame.KMOD_ALT:
+                        _toggle_latch(self, 'threat')   # Alt+T: threat latch (slice 7)
+                    else:
+                        ref, lvl, qual = _get_scan_reference(self)
+                        _query_threat(self, scan_level=lvl, ref_point=ref, qualifier=qual)
                 elif evt.key == pygame.K_b:
                     ref, lvl, qual = _get_scan_reference(self)
                     _query_space(self, scan_level=lvl, ref_point=ref, qualifier=qual)

@@ -141,7 +141,9 @@ Two sets of keys: the ones the mod adds, and Rift Wizard 3's own. A few things f
 | **N** | Spawner/nest scan. Cycle nests; Shift+N reverses. |
 | **O** | Landmark scan — rifts, shops, shrines, orbs, pickups. Cycle; Shift+O reverses. Rides the game's Highlight Objects key. |
 | **L** | Line of sight — enemy count by type and direction. Adds speech to the game's line-of-sight overlay. |
-| **T** | Threat — whether your current square is threatened, and by what. Adds speech to the game's threat-zone overlay. |
+| **T** | Threat — "Threatened" or "Safe" for your current square (the look cursor's square in Look mode). To hear *who*: examine an enemy and press T — "Threatens you" / "Can't hit you". Setting `threat_enumeration_legacy` restores the old count-and-names readout for now. |
+| **Alt + L** | Latch the line-of-sight overlay: it stays drawn without holding the key, and every cursor step appends "in sight" / "out of sight". Latched from normal play it follows you; from Look, aiming, or deploy it watches from that frozen tile. Same chord releases; latching the other overlay replaces it. |
+| **Alt + T** | Latch the threat overlay: every cursor step appends "threatened" / "clear". Examine an enemy first and Alt+T latches just that enemy's reach. F reports the current latch; `latch_visual_overlay` (default on) controls the drawn half — speech works either way. |
 | **B** | Spatial scan — walkable distance in all 8 directions. |
 | **X** | Hazard scan — clouds, webs, and other hazards. |
 | **D** | Detail — full description of whatever is under the cursor. |
