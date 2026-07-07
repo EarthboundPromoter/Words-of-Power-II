@@ -33,7 +33,9 @@ The scan keys are the game's own highlight keys: the key that lights a category 
 [N:shields]: Spawner scan. Repeat to cycle, nearest first; Shift reverses
 [U:shields]: Ally scan. Repeat to cycle, nearest first; Shift reverses
 [O:shields]: Landmark scan. Rifts, shops, shrines, crafting components, memory orbs, and ruby hearts. Repeat to cycle, nearest first; Shift reverses
-[Alt + I/N/O/U:shields]: Mark or unmark the last scanned target, so Shift+P can report the path to it
+[K:shields]: Pin cycle. Your pinned targets in blocks: enemies, allies, landmarks, bookmarks; nearest first within each block. Repeat to cycle; Shift reverses; Ctrl+K jumps block to block
+[Alt + K:shields]: Pin or unpin the last spoken target. With nothing spoken it bookmarks the tile you're on or looking at. The newest pin is the focused one: it speaks a step toward it each turn, and every pin announces when it dies or disappears
+[Alt + I/N/O/U:shields]: The same pin toggle, straight off a scan
 """
 
 _SCAN_SURROUNDINGS = """
@@ -43,7 +45,7 @@ _SCAN_SURROUNDINGS = """
 [B:shields]: Spatial scan. Walkable distance in eight directions
 [G:shields]: Charges. The active spell if you're targeting, otherwise all your spells
 [D:shields]: Full detail of whatever is under the cursor
-[P:shields]: Reports the path to the cursor in look mode. Shift+P reports the path to the marked target
+[P:shields]: Reports the path to the cursor in look mode. Shift+P reports the path to the focused pin
 """
 
 _MOVEMENT_SPEECH = """
@@ -79,7 +81,7 @@ _TIPS = """
 Scans always measure from the cursor, not just your wizard. So in look mode or while deploying, threat and line of sight tell you what would threaten you, and what you'd see, from that tile. They scout, not just report.
 Spatial scan (B) reports how far you can walk in each of the eight directions. A fast way to feel out corridors and rooms.
 Examine an enemy, then press T to hear whether that one can hit you.
-Be creative with what you mark. Depending on the moment, an opportune pickup can matter as much as a spawner or a memory orb.
+Be creative with what you pin. Depending on the moment, an opportune pickup can matter as much as a spawner or a memory orb.
 The path report ignores threat entirely. It can and will route you through danger, so think before you follow it.
 Mind your spell charges. Charge economy can end a run as fast as bad positioning.
 Use chokepoints. Every adjacent enemy gets an attack each turn.

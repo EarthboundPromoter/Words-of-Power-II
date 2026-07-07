@@ -146,16 +146,18 @@ Two sets of keys: the ones the mod adds, and Rift Wizard 3's own. A few things f
 | **X** | Hazard scan — clouds, webs, and other hazards. |
 | **D** | Detail — full description of whatever is under the cursor. |
 
-**In a level — status, marking, movement**
+**In a level — status, pins, movement**
 
 | Key | Function |
 |-----|----------|
 | **F** | Vitals — HP, shields, and active status effects with durations. |
 | **Shift + F** | Ally overview — all allies with HP. |
 | **G** | Charges — selected spell's charges, or all spells if none is selected. |
-| **Alt + I / N / O / U** | Mark or unmark the last target from that scan. One mark at a time; clears when the unit dies or the landmark is collected. |
+| **K** | Pin cycle — walk your pinned targets in category blocks (enemies, allies, landmarks, bookmarks), nearest first within each block. Shift+K reverses; **Ctrl+K** jumps block to block. |
+| **Alt + K** | Pin or unpin the last spoken target; with nothing spoken, bookmark the tile you're on or looking at (works from the deploy cursor too — the pin carries into the level). The newest pin is the *focused* pin: it speaks a step toward it each turn, and every pin announces when it dies or is collected. Setting `pin_speak_all` (default off) speaks every pin's update each turn. |
+| **Alt + I / N / O / U** | The same pin toggle, straight off a scan. |
 | **P** | Path to the look-mode cursor — full route to whatever it's on. |
-| **Shift + P** | Re-announce the path to your marked target. |
+| **Shift + P** | Re-announce the path to the focused pin. |
 | **Shift + Tab** | Previous target while targeting, walking, or looking (reverse of the game's Tab cycle). A fresh press starts from the far end of the list — in walk mode that jumps straight to the rifts. Needs the Steam overlay turned off for this game (see setup above). |
 | **Two arrows together** | Diagonal movement: Up+Right = NE, Down+Left = SW, and so on. Press the pair as one gesture; a lone press still steps normally. |
 | **Ctrl + direction** | Axis jump: skim the cursor along that line until what you'd hear changes — past open floor to the next unit, item, wall, or cloud. Speaks the landing tile, then the distance ("6 east"; "Edge" when the map ends the run). Either Ctrl; arrows, pairs, and numpad all work. Setting `jump_coalesce_units` (default off) strides same-name unit clusters instead of stopping at each. |

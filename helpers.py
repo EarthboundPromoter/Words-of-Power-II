@@ -842,3 +842,77 @@ def _compress_crossed(labels):
         n = counts[label]
         parts.append(label if n == 1 else f"{n} {_pluralize(label)}")
     return ", ".join(parts)
+
+
+# ---- Unified pin system (cursor-tool pass, slice 4) ----
+# Pure ordering/focus logic for the K pin cycle. The cycle walks category
+# BLOCKS with no interleaving (owner ruling), proximity-ordered within each
+# block from the attention reference. Category labels here are list-internal;
+# spoken forms come from PIN_BLOCK_LABELS.
+
+PIN_BLOCK_ORDER = ('enemy', 'ally', 'landmark', 'bookmark')
+
+PIN_BLOCK_LABELS = {
+    'enemy': ('enemy', 'enemies'),
+    'ally': ('ally', 'allies'),
+    'landmark': ('landmark', 'landmarks'),
+    'bookmark': ('bookmark', 'bookmarks'),
+}
+
+
+def pin_block_label(category, count):
+    """Spoken label for a block: singular at 1, plural otherwise."""
+    singular, plural = PIN_BLOCK_LABELS[category]
+    return singular if count == 1 else plural
+
+
+def order_pins_in_blocks(tagged):
+    """Order tagged pins into category blocks for the K cycle.
+
+    tagged: list of (category, distance, pin) where category is one of
+    PIN_BLOCK_ORDER and distance is from the attention reference.
+    Returns (ordered, block_starts): ordered is a list of (pin, category)
+    in block order (PIN_BLOCK_ORDER), proximity-sorted within each block;
+    block_starts is the set of indices where a new block begins (the cycle
+    speaks the block label at those entries)."""
+    ordered = []
+    block_starts = set()
+    for category in PIN_BLOCK_ORDER:
+        members = [(dist, i, pin) for i, (cat, dist, pin) in enumerate(tagged)
+                   if cat == category]
+        if not members:
+            continue
+        members.sort(key=lambda m: (m[0], m[1]))
+        block_starts.add(len(ordered))
+        ordered.extend((pin, category) for _dist, _i, pin in members)
+    return ordered, block_starts
+
+
+def pin_count_header(ordered):
+    """Fresh-cycle count header from order_pins_in_blocks output:
+    '5 pinned. 2 enemies, 1 ally, 2 bookmarks'."""
+    total = len(ordered)
+    counts = {}
+    for _pin, category in ordered:
+        counts[category] = counts.get(category, 0) + 1
+    parts = [f"{counts[c]} {pin_block_label(c, counts[c])}"
+             for c in PIN_BLOCK_ORDER if c in counts]
+    return f"{total} pinned. {', '.join(parts)}"
+
+
+def focus_handoff(pins):
+    """Next focused pin after the current one died/unpinned: the most
+    recently pinned survivor (highest 'seq'), or None if the list is empty."""
+    if not pins:
+        return None
+    return max(pins, key=lambda p: p.get('seq', 0))
+
+
+def pin_matches(pin, kind, unit=None, x=None, y=None):
+    """Toggle-identity predicate: unit pins match by object identity, tile
+    pins (landmarks and bookmarks alike) by coordinates."""
+    if pin['kind'] != kind:
+        return False
+    if kind == 'unit':
+        return pin['unit'] is unit
+    return pin['x'] == x and pin['y'] == y

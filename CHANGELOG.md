@@ -32,8 +32,23 @@ an early work-in-progress RW3 port — expect frequent changes.
   By default the jump stops at every unit; the new `jump_coalesce_units`
   setting (default off) strides same-name clusters instead. Cursor modes only
   — your wizard never jumps.
+- **Pins: the mark grows into a pin list on K.** Alt+K pins or unpins the
+  last spoken target — or, with nothing spoken, bookmarks the tile you're on
+  or looking at (the deploy cursor works too, and the pin carries into the
+  level). K cycles your pins in category blocks — enemies, allies, landmarks,
+  bookmarks — nearest first within each block, with a count header on a fresh
+  cycle; Shift+K reverses and Ctrl+K jumps block to block. Alt+K on a
+  just-cycled pin unpins it. Pins live per level, follow their unit, and
+  announce deaths and collected landmarks. The newest or last-cycled pin is
+  the *focused* pin: it carries the per-turn guidance line ("North to Wolf,
+  12 HP."), and Shift+P re-announces its full path. New setting
+  `pin_speak_all` (default off) speaks every pin's update line each turn.
 
 ### Changed
+- **Alt+scan marking is now the pin toggle.** The one-mark-at-a-time limit is
+  gone; Alt + I / N / O / U pin without replacing what you marked before, and
+  scan lines say "pinned" where they said "marked". If you relied on marking
+  to auto-replace, unpin with a second Alt+K on the old target.
 - **Right Ctrl no longer means diagonal — Ctrl now means one thing, either
   side.** The RCtrl+arrow diagonal and its AltGr synonym are retired, replaced
   by two-arrow chording; the mod never distinguishes left from right Ctrl
@@ -52,7 +67,7 @@ an early work-in-progress RW3 port — expect frequent changes.
   Landmark scan: Q is now **O** (Highlight Objects). Tap to scan, hold to show
   the tiles; the pairing follows your rebinds — rebind Highlight Enemies and
   the enemy scan moves with it. N (spawners) and X (hazards) are unchanged;
-  they have no game highlight. Alt+key marking moved with the scans
+  they have no game highlight. The Alt+key toggle moved with the scans
   (Alt + I / N / O / U). J, Q, and Y are now unbound, reserved for upcoming
   features. This is a hard switch with no legacy-keys setting — the old
   letters simply stop answering.

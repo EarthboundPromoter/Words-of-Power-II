@@ -3,6 +3,7 @@ MOD_VERSION = "0.3.4"
 
 import sys
 import os
+import weakref
 
 import datetime
 import ctypes
@@ -145,10 +146,11 @@ _SETTINGS_SCHEMA = [
      "# Coordinates appear after direction info: \"Wolf, 3 east (12,8)\"\n"
      "# Default: true"),
     ('words_of_power', 'pathfind_marked', 'true',
-     "# Announce pathfinding for the marked target. On marking, speaks the full\n"
-     "# compressed path. Each subsequent turn, prepends the next single step\n"
-     "# (\"Move north.\") to the regular mark readout. Set false to silence the\n"
-     "# navigation channel without losing the rest of the mark info.\n"
+     "# Announce pathfinding for pins. On pinning, speaks the full compressed\n"
+     "# path; each subsequent turn the focused pin's update line is the next\n"
+     "# single step (\"North to Wolf, 12 HP.\"). Set false for a plain\n"
+     "# name-and-direction update line instead. (Key name predates the pin\n"
+     "# system — kept so existing settings files keep working.)\n"
      "# Default: true"),
     ('words_of_power', 'debug_log', 'standard',
      "# How much the mod writes to screen_reader_debug.log. 'standard'\n"
@@ -233,6 +235,12 @@ _SETTINGS_SCHEMA = [
      "# the SAME name in a row, stride the whole cluster as one block\n"
      "# instead of stopping at each one. Default false: the jump stops at\n"
      "# every unit, so nothing with agency is skimmed past unheard.\n"
+     "# Default: false"),
+    ('words_of_power', 'pin_speak_all', 'false',
+     "# Pins (K cycle): speak a per-turn update line for EVERY pin, not just\n"
+     "# the focused one (the pin most recently pinned or cycled to). Deaths\n"
+     "# and gone-landmark announcements always fire for every pin regardless\n"
+     "# of this setting.\n"
      "# Default: false"),
     ('words_of_power', 'digest_enabled', 'true',
      "# Enable the direct-action digest: a composed summary of one player\n"
@@ -404,6 +412,7 @@ class _Cfg:
     aoe_group_names = _settings.getboolean('words_of_power', 'aoe_group_names', fallback=True)
     speak_pickup_effects = _settings.getboolean('words_of_power', 'speak_pickup_effects', fallback=True)
     jump_coalesce_units = _settings.getboolean('words_of_power', 'jump_coalesce_units', fallback=False)
+    pin_speak_all = _settings.getboolean('words_of_power', 'pin_speak_all', fallback=False)
     digest_enabled = _settings.getboolean('words_of_power', 'digest_enabled', fallback=True)
     # [Composer] — pipeline flags. As of 0.3.2 the composer pipeline is the
     # shipped speech engine: producers on, legacy combat narration off.
@@ -441,6 +450,7 @@ log(f"[Settings] cause_markers_enabled = {cfg.cause_markers_enabled}")
 log(f"[Settings] reactive_markers_enabled = {cfg.reactive_markers_enabled}")
 log(f"[Settings] aoe_group_names = {cfg.aoe_group_names}")
 log(f"[Settings] speak_pickup_effects = {cfg.speak_pickup_effects}")
+log(f"[Settings] pin_speak_all = {cfg.pin_speak_all}")
 log(f"[Settings] digest_enabled = {cfg.digest_enabled}")
 log(f"[Settings] crisis_enabled = {cfg.crisis_enabled}")
 log(f"[Settings] orphan_enabled = {cfg.orphan_enabled}")
@@ -1272,7 +1282,9 @@ from helpers import (_cardinal_direction, _bearing_index, _direction_offset, _pl
                      _quadrant_label, _number_deploy_dupes,
                      _merge_same_shape_groups,
                      _compress_path, _classify_unreachable, _walkable_neighbors,
-                     _key_matches_bind, _bound_keys, _compress_crossed)
+                     _key_matches_bind, _bound_keys, _compress_crossed,
+                     order_pins_in_blocks, pin_count_header, pin_block_label,
+                     focus_handoff, pin_matches)
 
 # ---- Pathfinding Via Hints ----
 _VIA_HINT_CAP = 3  # Max blocked entries per scan that get pathfinding computation
@@ -6268,11 +6280,11 @@ if _PyGameView is not None:
                 via_tag = _via_hint(level, ref_point,
                                     Level.Point(unit.x, unit.y), player)
             soul_tag = ", soulbound" if _has_soulbound(unit) else ""
-            mark_tag = ", marked" if _is_marked(unit) else ""
+            pin_tag = ", pinned" if _is_pinned(level, unit) else ""
             coord_tag = f" ({unit.x},{unit.y})" if cfg.show_coordinates else ""
-            entry = f"{_name(unit)}, {offset}{los_tag}{via_tag}{soul_tag}{mark_tag}{coord_tag}"
+            entry = f"{_name(unit)}, {offset}{los_tag}{via_tag}{soul_tag}{pin_tag}{coord_tag}"
             position = f"{idx + 1} of {total}"
-            log_entry = f"{_name(unit)} @({unit.x},{unit.y}), {offset}{los_tag}{via_tag}{soul_tag}{mark_tag}"
+            log_entry = f"{_name(unit)} @({unit.x},{unit.y}), {offset}{los_tag}{via_tag}{soul_tag}{pin_tag}"
 
             if show_count:
                 text = f"{_qp}{count_str}. {entry}. {position}"
@@ -6347,11 +6359,11 @@ if _PyGameView is not None:
             if los_tag:
                 via_tag = _via_hint(level, ref_point,
                                     Level.Point(unit.x, unit.y), player)
-            mark_tag = ", marked" if _is_marked(unit) else ""
+            pin_tag = ", pinned" if _is_pinned(level, unit) else ""
             coord_tag = f" ({unit.x},{unit.y})" if cfg.show_coordinates else ""
-            entry = f"{_name(unit)}, {offset}{los_tag}{via_tag}{mark_tag}{coord_tag}"
+            entry = f"{_name(unit)}, {offset}{los_tag}{via_tag}{pin_tag}{coord_tag}"
             position = f"{idx + 1} of {total}"
-            log_entry = f"{_name(unit)} @({unit.x},{unit.y}), {offset}{los_tag}{via_tag}{mark_tag}"
+            log_entry = f"{_name(unit)} @({unit.x},{unit.y}), {offset}{los_tag}{via_tag}{pin_tag}"
 
             if show_count:
                 text = f"{_qp}{count_str}. {entry}. {position}"
@@ -6416,11 +6428,11 @@ if _PyGameView is not None:
             if los_tag:
                 via_tag = _via_hint(level, ref_point,
                                     Level.Point(unit.x, unit.y), player)
-            mark_tag = ", marked" if _is_marked(unit) else ""
+            pin_tag = ", pinned" if _is_pinned(level, unit) else ""
             coord_tag = f" ({unit.x},{unit.y})" if cfg.show_coordinates else ""
-            entry = f"{_name(unit)}, {offset}{los_tag}{via_tag}{mark_tag}{coord_tag}"
+            entry = f"{_name(unit)}, {offset}{los_tag}{via_tag}{pin_tag}{coord_tag}"
             position = f"{idx + 1} of {total}"
-            log_entry = f"{_name(unit)} @({unit.x},{unit.y}), {offset}{los_tag}{via_tag}{mark_tag}"
+            log_entry = f"{_name(unit)} @({unit.x},{unit.y}), {offset}{los_tag}{via_tag}{pin_tag}"
 
             if show_count:
                 text = f"{_qp}{count_str}. {entry}. {position}"
@@ -6554,11 +6566,11 @@ if _PyGameView is not None:
             if los_tag:
                 via_tag = _via_hint(level, ref_point,
                                     Level.Point(tx, ty), player)
-            mark_tag = ", marked" if _is_marked((name, tx, ty)) else ""
+            pin_tag = ", pinned" if _is_pinned(level, (name, tx, ty)) else ""
             coord_tag = f" ({tx},{ty})" if cfg.show_coordinates else ""
-            entry = f"{name}, {offset}{los_tag}{via_tag}{mark_tag}{coord_tag}"
+            entry = f"{name}, {offset}{los_tag}{via_tag}{pin_tag}{coord_tag}"
             position = f"{idx + 1} of {total}"
-            log_entry = f"{name} @({tx},{ty}), {offset}{los_tag}{via_tag}{mark_tag}"
+            log_entry = f"{name} @({tx},{ty}), {offset}{los_tag}{via_tag}{pin_tag}"
 
             if show_count:
                 text = f"{_qp}{count_str}. {entry}. {position}"
@@ -6910,24 +6922,25 @@ if _PyGameView is not None:
         except Exception as e:
             log(f"[Path] Error: {e}")
 
-    def _query_path_to_marked_target(view):
-        """Shift+P: re-announce the full compressed path to the current marked
-        target. Useful for refreshing path orientation during a long approach
-        without having to unmark + remark. Speaks 'No mark' when nothing is
-        marked, with no other side effects."""
+    def _query_path_to_focused_pin(view):
+        """Shift+P: re-announce the full compressed path to the FOCUSED pin
+        (most recently pinned or cycled-to). Useful for refreshing path
+        orientation during a long approach without having to unpin + repin.
+        Speaks 'No pins' when nothing is focused, with no other side
+        effects."""
         try:
-            target = _marked_target[0]
-            if target is None:
-                async_tts.speak("No mark")
-                log("[Path] Shift+P with no mark")
+            game = getattr(view, 'game', None)
+            pin = _focused_pin(game.cur_level) if game is not None else None
+            if pin is None:
+                async_tts.speak("No pins")
+                log("[Path] Shift+P with no focused pin")
                 return
-            msg = _announce_mark_full_path(view, target)
+            msg = _announce_mark_full_path(view, _pin_target(pin))
             if msg is None:
                 async_tts.speak("Path unavailable")
-                log("[Path] Shift+P unavailable for marked target")
+                log("[Path] Shift+P unavailable for focused pin")
                 return
-            name = _mark_target_name(target)
-            line = f"{name}. {msg}"
+            line = f"{_pin_name(pin)}. {msg}"
             async_tts.speak(line)
             log(f"[Path] Shift+P: {line}")
         except Exception as e:
@@ -6989,7 +7002,7 @@ if _PyGameView is not None:
                 return
 
             total = len(visible)
-            has_marked_visible = any(_is_marked(u) for _, _, u in visible)
+            has_pinned_visible = any(_is_pinned(level, u) for _, _, u in visible)
             # Group by (name, direction), preserving order of first appearance
             groups = {}
             group_order = []
@@ -7011,8 +7024,8 @@ if _PyGameView is not None:
                     parts.append(f"{name}{dir_suffix}")
 
             count_str = f"{total} in sight"
-            mark_note = ". Marked target visible" if has_marked_visible else ""
-            text = f"{_qp}{count_str}. {', '.join(parts)}{mark_note}"
+            pin_note = ". Pinned target visible" if has_pinned_visible else ""
+            text = f"{_qp}{count_str}. {', '.join(parts)}{pin_note}"
             log(f"[LoS] {_log_ctx()} {text}")
             async_tts.speak(text)
         except Exception as e:
@@ -7188,127 +7201,351 @@ if _PyGameView is not None:
     _spawner_scanner = CycleScanner("spawners")
     _landmark_scanner = CycleScanner("landmarks")
     _ally_scanner = CycleScanner("allies")
+    _pin_scanner = CycleScanner("pins")
+    _pin_block_starts = [set()]     # Block-start indices for the live pin cycle
 
-    # ---- Mark/tracking system (Alt+scan key to mark, passive updates) ----
-    # Supports both units and landmarks. One mark at a time.
-    # Unit mark: stores unit object directly.
-    # Landmark mark: stores (name, x, y) tuple.
+    # ---- Unified pin system (cursor-tool pass, slice 4) ----
+    # ONE pin list per level object, cycled on K in category blocks (helpers.
+    # order_pins_in_blocks: enemies, allies, landmarks, bookmarks — no
+    # interleaving, proximity-ordered within each block). A pin is an ENTITY
+    # (unit object — follows the unit, announces death) or a TILE (name +
+    # coords; a pinned landmark is a named tile pin, a bare bookmark is named
+    # from its tile content at set time). Alt+K toggles the last-spoken
+    # target, else the attention tile; Alt+scan is a synonym chord. The store
+    # is weak-keyed by level: per-realm lifetime falls out (deploy pins attach
+    # to next_level and carry into the realm — same object becomes cur_level),
+    # nothing enters the pickle, and pins do not survive save/load (level
+    # objects rebuild on unpickle — the same practical lifetime the old single
+    # mark had; its unit ref went stale across unpickle anyway).
 
     _last_scanned_target = [None]   # Most recently announced target (unit or (name, x, y))
-    _marked_target = [None]         # Player-marked target for persistent tracking
-    _mark_last_visible = [None]     # LoS state: True/False/None (unset). Only speak "blocked" on transition.
-    _mark_tier_immediate = [True]   # Config: True = immediate tier, False = turn-end
+    _pin_store = weakref.WeakKeyDictionary()   # level -> [pin dicts]
+    _pin_focus = weakref.WeakKeyDictionary()   # level -> focused pin dict
+    _pin_seq = [0]                  # Monotonic pin recency, drives focus handoff
+    _bookmark_n = [0]               # Numbered fallback for bare-floor bookmarks
+    _pin_tier_immediate = [True]    # True = update line before flush, False = after turn signal
 
-    def _mark_target_name(target):
-        """Get display name for a mark target (unit or landmark tuple)."""
-        if isinstance(target, tuple):
-            return target[0]
-        return _name(target)
+    def _pins_for(level, create=False):
+        if level is None:
+            return []
+        pins = _pin_store.get(level)
+        if pins is None:
+            if not create:
+                return []
+            pins = []
+            _pin_store[level] = pins
+        return pins
 
-    def _mark_scanned_target(view):
-        """Mark the last scanned target. Toggle off if already marked.
-        On a fresh mark, also announces the full compressed path when
-        cfg.pathfind_marked is on."""
-        target = _last_scanned_target[0]
-        if target is None:
-            async_tts.speak("Nothing to mark")
-            log("[Mark] Nothing to mark")
-            return
-        current = _marked_target[0]
-        if current is not None and _same_mark(current, target):
-            _marked_target[0] = None
-            _mark_last_visible[0] = None
-            async_tts.speak(f"Unmarked {_mark_target_name(target)}")
-            log(f"[Mark] Unmarked {_mark_target_name(target)}")
-            return
-        _marked_target[0] = target
-        _mark_last_visible[0] = None  # Force first update to report LoS status
-        name = _mark_target_name(target)
-        path_msg = _announce_mark_full_path(view, target) if cfg.pathfind_marked else None
-        if path_msg:
-            async_tts.speak(f"Marked {name}. {path_msg}")
-            log(f"[Mark] Marked {name}. {path_msg}")
-        else:
-            async_tts.speak(f"Marked {name}")
-            log(f"[Mark] Marked {name}")
+    def _make_pin(kind, unit=None, name=None, x=None, y=None, cat_hint=None):
+        _pin_seq[0] += 1
+        if kind == 'unit':
+            x, y = unit.x, unit.y
+        return {'kind': kind, 'unit': unit, 'name': name, 'x': x, 'y': y,
+                'cat_hint': cat_hint, 'seq': _pin_seq[0], 'los': None}
 
-    def _same_mark(a, b):
-        """Check if two mark targets refer to the same thing."""
-        a_is_landmark = isinstance(a, tuple)
-        b_is_landmark = isinstance(b, tuple)
-        if a_is_landmark != b_is_landmark:
-            return False
-        if a_is_landmark:
-            return a[1] == b[1] and a[2] == b[2]  # same position
-        return a is b  # unit identity
+    def _pin_name(pin):
+        if pin['kind'] == 'unit':
+            return _name(pin['unit'])
+        return pin['name']
 
-    def _is_marked(target):
-        """Check if a target (unit or landmark tuple) is the current mark."""
-        current = _marked_target[0]
-        if current is None:
-            return False
-        return _same_mark(current, target)
+    def _pin_target(pin):
+        """Legacy target form for the path helpers: unit object, or (name, x, y)."""
+        if pin['kind'] == 'unit':
+            return pin['unit']
+        return (pin['name'], pin['x'], pin['y'])
 
-    def _get_mark_update(level, ref_point):
-        """Get status string for the marked target, or None if no mark/gone.
-        Reports 'blocked' only on first update or when LoS status changes."""
-        target = _marked_target[0]
-        if target is None:
-            return None
-        if isinstance(target, tuple):
-            # Landmark mark — check if prop still exists at position
-            name, tx, ty = target
+    def _pin_xy(pin):
+        if pin['kind'] == 'unit':
+            return (pin['unit'].x, pin['unit'].y)
+        return (pin['x'], pin['y'])
+
+    def _pin_category(pin, player):
+        """Live category for block ordering. Unit pins recompute per read —
+        a charmed enemy migrates blocks; tile pins keep their set-time hint."""
+        if pin['kind'] == 'unit':
             try:
-                tile = level.tiles[tx][ty]
+                return 'enemy' if Level.are_hostile(player, pin['unit']) else 'ally'
+            except Exception:
+                return 'enemy'
+        return pin['cat_hint']
+
+    def _pin_alive(level, pin):
+        """Validity: unit pins die with the unit; landmark pins expire when
+        the prop leaves the tile; bookmarks never expire."""
+        if pin['kind'] == 'unit':
+            return pin['unit'] in level.units
+        if pin['cat_hint'] == 'landmark':
+            try:
+                tile = level.tiles[pin['x']][pin['y']]
             except (IndexError, TypeError):
-                tile = None
-            if tile is None or tile.prop is None:
-                _marked_target[0] = None
-                _mark_last_visible[0] = None
-                return f"Marked landmark gone: {name}"
-            dx = tx - ref_point.x
-            dy = ty - ref_point.y
-            direction = _direction_offset(dx, dy)
-            # LoS check for landmarks
-            try:
-                visible = level.can_see(ref_point.x, ref_point.y, tx, ty)
-            except Exception:
-                visible = True
-            los_tag = _mark_los_tag(visible)
-            return f"Marked: {name}, {direction}{los_tag}"
+                return False
+            return tile is not None and tile.prop is not None
+        return True
+
+    def _find_pin(pins, kind, unit=None, x=None, y=None):
+        for pin in pins:
+            if pin_matches(pin, kind, unit=unit, x=x, y=y):
+                return pin
+        return None
+
+    def _is_pinned(level, target):
+        """Scan-formatter tag: is this scan target pinned on its level?
+        target is the scan form — unit object or (name, x, y) tuple."""
+        pins = _pins_for(level)
+        if isinstance(target, tuple):
+            return _find_pin(pins, 'tile', x=target[1], y=target[2]) is not None
+        return _find_pin(pins, 'unit', unit=target) is not None
+
+    def _focused_pin(level):
+        pins = _pins_for(level)
+        pin = _pin_focus.get(level)
+        if pin is not None and any(p is pin for p in pins):
+            return pin
+        return None
+
+    def _set_focus(level, pin):
+        if pin is None:
+            _pin_focus.pop(level, None)
         else:
-            # Unit mark
-            if target not in level.units:
-                _marked_target[0] = None
-                _mark_last_visible[0] = None
-                return "Marked unit dead"
-            dx = target.x - ref_point.x
-            dy = target.y - ref_point.y
-            direction = _direction_offset(dx, dy)
-            # LoS check for units
+            _pin_focus[level] = pin
+
+    def _remove_pin(level, pin):
+        """Remove a pin; on focused-pin removal hand focus to the most
+        recently pinned survivor. Returns the spoken handoff clause ('' when
+        focus didn't move or nothing remains) — explicit-line form is
+        provisional (⟨DESIGN⟩, ear-check item)."""
+        pins = _pins_for(level)
+        was_focused = (_focused_pin(level) is pin)
+        for i, p in enumerate(pins):
+            if p is pin:
+                del pins[i]
+                break
+        if not was_focused:
+            return ""
+        heir = focus_handoff(pins)
+        _set_focus(level, heir)
+        if heir is None:
+            return ""
+        return f" Focus: {_pin_name(heir)}."
+
+    def _bookmark_name(level, x, y):
+        """Bookmark auto-name from tile content at set time (provisional
+        naming, ⟨DESIGN⟩ ear-check item): prop > cloud > terrain class;
+        bare floor falls back to a numbered bookmark."""
+        try:
+            tile = level.tiles[x][y]
+            label = None
+            if tile.prop is not None:
+                label = _name(tile.prop)
+            elif getattr(tile, 'cloud', None) is not None:
+                label = _name(tile.cloud)
+            elif tile.is_wall():
+                label = "wall"
+            elif getattr(tile, 'is_chasm', False):
+                label = "chasm"
+            if label:
+                return f"Bookmark, {label}"
+        except Exception:
+            pass
+        _bookmark_n[0] += 1
+        return f"Bookmark {_bookmark_n[0]}"
+
+    def _speak_pin(text):
+        async_tts.speak(text)
+        log(f"[Pin] {text}")
+
+    def _toggle_pin(view):
+        """Alt+K / Alt+scan: universal pin toggle. Toggles the last-spoken
+        target when one exists (and is still on the level), else the attention
+        tile as a bookmark (Look cursor / player tile; the deploy cursor pins
+        onto next_level and carries into the realm). Fresh pins auto-focus;
+        a fresh pin on the current level announces its path when
+        pathfind_marked is on (the setting keeps its shipped key name)."""
+        try:
+            ref, level, _qual = _get_scan_reference(view)
+            if level is None:
+                return
+            pins = _pins_for(level, create=True)
+            target = _last_scanned_target[0]
+            # A last-scanned target that has left this level can't be toggled
+            # meaningfully — a dead/departed unit, or a landmark tuple whose
+            # prop is gone (collected, or scanned on a previous level). Fall
+            # through to the attention tile.
+            if target is not None and not isinstance(target, tuple):
+                if target not in level.units:
+                    target = None
+            elif target is not None:
+                try:
+                    if level.tiles[target[1]][target[2]].prop is None:
+                        target = None
+                except Exception:
+                    target = None
+            if target is not None and isinstance(target, tuple):
+                name, tx, ty = target
+                existing = _find_pin(pins, 'tile', x=tx, y=ty)
+                pin = None if existing else _make_pin(
+                    'tile', name=name, x=tx, y=ty, cat_hint='landmark')
+            elif target is not None:
+                existing = _find_pin(pins, 'unit', unit=target)
+                pin = None if existing else _make_pin('unit', unit=target)
+            else:
+                tx, ty = ref.x, ref.y
+                existing = _find_pin(pins, 'tile', x=tx, y=ty)
+                pin = None if existing else _make_pin(
+                    'tile', name=_bookmark_name(level, tx, ty),
+                    x=tx, y=ty, cat_hint='bookmark')
+            if existing is not None:
+                handoff = _remove_pin(level, existing)
+                _pin_cycle_drop(existing)
+                _speak_pin(f"Unpinned {_pin_name(existing)}.{handoff}")
+                return
+            pins.append(pin)
+            _set_focus(level, pin)
+            name = _pin_name(pin)
+            path_msg = None
+            if cfg.pathfind_marked and level is view.game.cur_level:
+                path_msg = _announce_mark_full_path(view, _pin_target(pin))
+            if path_msg:
+                _speak_pin(f"Pinned {name}. {path_msg}")
+            else:
+                _speak_pin(f"Pinned {name}")
+        except Exception as e:
+            log(f"[Pin] Toggle error: {e}")
+
+    def _pin_cycle_drop(pin):
+        """Cull-while-cycling: Alt+K on the just-spoken entry removes it from
+        the live cycle list too, so continuing K proceeds to the next entry
+        instead of re-speaking a ghost. Block starts recompute from the
+        surviving order. No-op when the pin isn't in the live cycle. (A
+        mid-cycle Alt+K is always a cull, never an add: an add needs a fresh
+        scan target, and the scan press already reset this cycle.)"""
+        items = _pin_scanner._list
+        for i, (p, _cat) in enumerate(items):
+            if p is pin:
+                del items[i]
+                if i < _pin_scanner._idx:
+                    _pin_scanner._idx -= 1
+                starts = set()
+                prev_cat = None
+                for j, (_p2, cat) in enumerate(items):
+                    if cat != prev_cat:
+                        starts.add(j)
+                        prev_cat = cat
+                _pin_block_starts[0] = starts
+                break
+
+    def _pin_block_advance(reverse, rebuilt):
+        """Ctrl+K / Shift+Ctrl+K: jump the cycle to the next/previous block
+        start. Mirrors CycleScanner.advance's contract: (idx, total,
+        show_count). Reverse from mid-block lands on the current block's
+        start first (word-nav semantics); both directions wrap."""
+        total = len(_pin_scanner.items)
+        if total == 0:
+            return None
+        starts = sorted(_pin_block_starts[0]) or [0]
+        if rebuilt or _pin_scanner._idx == 0:
+            idx = starts[-1] if reverse else starts[0]
+        else:
+            last_spoken = (_pin_scanner._idx - 1) % total
+            if reverse:
+                candidates = [s for s in starts if s < last_spoken]
+                idx = candidates[-1] if candidates else starts[-1]
+            else:
+                candidates = [s for s in starts if s > last_spoken]
+                idx = candidates[0] if candidates else starts[0]
+        _pin_scanner._idx = idx + 1
+        return idx, total, False
+
+    def _query_pins(view, reverse=False, block_skip=False):
+        """K: cycle the unified pin list in category blocks (enemies, allies,
+        landmarks, bookmarks), proximity-ordered within each block from the
+        attention reference. Shift+K reverse, Ctrl+K next block,
+        Shift+Ctrl+K previous block. A fresh cycle speaks the count header;
+        each block's first entry carries its block label; every spoken entry
+        becomes the FOCUS and the last-spoken target (so Alt+K culls
+        mid-cycle and Shift+P retargets without extra steps)."""
+        try:
+            game = getattr(view, 'game', None)
+            if game is None:
+                return
+            player = game.p1
+            if player is None:
+                return
+            ref, level, qualifier = _get_scan_reference(view)
+            if level is None:
+                return
+            _qp = f"From {qualifier}. " if qualifier else ""
+
+            rebuilt = _pin_scanner.needs_rebuild(ref)
+            if rebuilt:
+                tagged = []
+                for pin in _pins_for(level):
+                    # Expiry announcements belong to the turn sweep; the
+                    # cycle just skips the dead without removing them.
+                    if not _pin_alive(level, pin):
+                        continue
+                    px, py = _pin_xy(pin)
+                    dist = Level.distance(ref, Level.Point(px, py), diag=True)
+                    tagged.append((_pin_category(pin, player), dist, pin))
+                ordered, block_starts = order_pins_in_blocks(tagged)
+                _pin_scanner.set_list(ordered, ref)
+                _pin_block_starts[0] = block_starts
+
+            if not _pin_scanner.items:
+                text = f"{_qp}No pins"
+                log(f"[Pin] {_log_ctx()} {text}")
+                async_tts.speak(text)
+                return
+
+            if block_skip:
+                result = _pin_block_advance(reverse, rebuilt)
+            else:
+                result = _pin_scanner.advance(reverse, rebuilt)
+            if result is None:
+                return
+            idx, total, show_count = result
+
+            pin, category = _pin_scanner.items[idx]
+            _set_focus(level, pin)
+            _last_scanned_target[0] = _pin_target(pin)
+            px, py = _pin_xy(pin)
             try:
-                visible = level.can_see(ref_point.x, ref_point.y, target.x, target.y)
+                visible = level.can_see(ref.x, ref.y, px, py)
             except Exception:
                 visible = True
-            los_tag = _mark_los_tag(visible)
-            return f"Marked: {_name(target)}, {direction}{los_tag}"
+            los_tag = "" if visible else ", blocked"
+            offset = _direction_offset(px - ref.x, py - ref.y)
+            via_tag = ""
+            if los_tag:
+                via_tag = _via_hint(level, ref, Level.Point(px, py), player)
+            coord_tag = f" ({px},{py})" if cfg.show_coordinates else ""
 
-    def _mark_los_tag(visible):
-        """Return LoS tag for mark update. Only speaks on first check or transition."""
-        prev = _mark_last_visible[0]
-        _mark_last_visible[0] = visible
-        if prev is None:
-            # First update after marking — always report
-            return "" if visible else ", blocked"
-        if visible != prev:
-            # Transition — report the change
-            return ", in sight" if visible else ", blocked"
-        # No change — stay quiet
-        return ""
+            block_count = sum(1 for _p, c in _pin_scanner.items if c == category)
+            if block_skip:
+                block_tag = f"{pin_block_label(category, block_count).capitalize()}, {block_count}: "
+            elif idx in _pin_block_starts[0]:
+                block_tag = f"{pin_block_label(category, block_count).capitalize()}: "
+            else:
+                block_tag = ""
+            entry = f"{block_tag}{_pin_name(pin)}, {offset}{los_tag}{via_tag}{coord_tag}"
+            position = f"{idx + 1} of {total}"
 
-    # ---- Mark pathfinding ----
-    # On Alt+key: announce full compressed path. Each turn while marked, prepend
-    # next step to the regular mark readout. Gated on cfg.pathfind_marked.
+            if show_count:
+                header = pin_count_header(_pin_scanner.items)
+                text = f"{_qp}{header}. {entry}. {position}"
+            else:
+                text = f"{_qp}{entry}. {position}"
+            log(f"[Pin] {_log_ctx()} {text}")
+            async_tts.speak(text)
+        except Exception as e:
+            log(f"[Pin] Cycle error: {e}")
+
+    # ---- Pin pathfinding ----
+    # On a fresh pin: announce the full compressed path. Each turn, the
+    # focused pin's update line is the next single step. Gated on
+    # cfg.pathfind_marked (key name predates the pin system). These helpers
+    # take the legacy target form — a unit object or a (name, x, y) tuple —
+    # which _pin_target() produces from a pin.
 
     def _mark_target_xy(target):
         """(x, y) tuple from a mark target, or None if unresolvable."""
@@ -7331,7 +7568,7 @@ if _PyGameView is not None:
             return False
 
     def _compute_mark_path(level, player, target):
-        """Path from player to marked target. Returns (full_seq, target_kind):
+        """Path from player to a pin target (legacy form). Returns (full_seq, target_kind):
         - full_seq: list of Point objects starting at the player's tile and ending at
           the destination (or its walkable adjacent for hostile units), or None if no
           path exists. A single-point list means the player is already on the target.
@@ -7376,9 +7613,9 @@ if _PyGameView is not None:
         return f", {cur_hp} HP"
 
     def _announce_mark_full_path(view, target):
-        """Speak full compressed path to a freshly-marked target. Returns the spoken
-        string for logging, or None if pathing wasn't applicable. Call site composes
-        this with the 'Marked X' confirmation."""
+        """Full compressed path to a freshly-pinned target (legacy target
+        form). Returns the string to speak, or None if pathing wasn't
+        applicable. Call site composes this with the 'Pinned X' confirmation."""
         try:
             game = view.game
             if game is None or game.p1 is None:
@@ -7414,72 +7651,86 @@ if _PyGameView is not None:
             log(f"[Mark Path] Error: {e}")
             return None
 
-    def _speak_mark_turn_update(view):
-        """Per-turn mark readout. With pathfind_marked on, the line is
-        '{direction} to {name}, {hp} HP.' — single next-step direction (diagonal-aware,
-        matching the game's pathfinding), target name, target HP. HP omitted for
-        non-living targets (landmarks/props). LoS transitions append ', in sight' or
-        ', blocked' before the period. Adjacent / on-tile cases stay silent: the
-        on-mark announcement and the melee threat tracker already cover those.
-        Terminal messages (death/disappearance) pass through unchanged. With
-        pathfind_marked off, original full-readout behavior."""
-        target_before = _marked_target[0]
-        if target_before is None or view.game is None or view.game.p1 is None:
-            return
+    def _pin_update_line(level, player, pin):
+        """One pin's per-turn line, or None for silence. With pathfind_marked
+        on (setting keeps its shipped key name): '{Direction} to {name},
+        {hp} HP.' — single next-step direction, diagonal-aware; adjacent /
+        on-tile stays silent (the on-pin announcement and the melee threat
+        tracker cover those). With it off: 'Pinned: {name}, {direction}'.
+        LoS speaks blocked on first report and both ways on transitions,
+        tracked per pin."""
+        tx, ty = _pin_xy(pin)
         try:
-            level = view.game.cur_level
-            player = view.game.p1
-            ref = Level.Point(player.x, player.y)
-            los_before = _mark_last_visible[0]
-            update = _get_mark_update(level, ref)
-            if not update:
-                return
-            target_cleared = (_marked_target[0] is None)
-            los_changed = (_mark_last_visible[0] != los_before)
+            visible = level.can_see(player.x, player.y, tx, ty)
+        except Exception:
+            visible = True
+        prev = pin['los']
+        pin['los'] = visible
+        if prev is None:
+            los_tag = "" if visible else ", blocked"
+        elif visible != prev:
+            los_tag = ", in sight" if visible else ", blocked"
+        else:
+            los_tag = ""
 
-            if not cfg.pathfind_marked:
-                async_tts.speak(update)
-                log(f"[Mark] Turn update: {update}")
-                return
+        if not cfg.pathfind_marked:
+            direction = _direction_offset(tx - player.x, ty - player.y)
+            return f"Pinned: {_pin_name(pin)}, {direction}{los_tag}"
 
-            if target_cleared:
-                async_tts.speak(update)
-                log(f"[Mark] Turn update: {update}")
-                return
+        dx, dy = tx - player.x, ty - player.y
+        if abs(dx) <= 1 and abs(dy) <= 1:
+            return None
+        full_seq, _kind = _compute_mark_path(level, player, _pin_target(pin))
+        if full_seq is None:
+            return f"No path to {_pin_name(pin)}."
+        if len(full_seq) < 2:
+            return None
+        head, nxt = full_seq[0], full_seq[1]
+        direction = _cardinal_direction(nxt.x - head.x, nxt.y - head.y)
+        if not direction:
+            return None
+        body = f"{direction.capitalize()} to {_pin_name(pin)}{_mark_hp_clause(_pin_target(pin))}"
+        if los_tag:
+            body = f"{body}{los_tag}"
+        return f"{body}."
 
-            # Adjacent / on-tile: silent. Melee threat tracker handles hostile
-            # adjacency; on-mark announcement covered terrain/landmark adjacency.
-            target_xy = _mark_target_xy(target_before)
-            if target_xy is None:
-                return
-            if (player.x, player.y) == target_xy:
-                return
-            dx, dy = target_xy[0] - player.x, target_xy[1] - player.y
-            if abs(dx) <= 1 and abs(dy) <= 1:
-                return
-
-            full_seq, _kind = _compute_mark_path(level, player, target_before)
-            if full_seq is None:
-                async_tts.speak("No path.")
-                log("[Mark] Turn update: No path.")
-                return
-            if len(full_seq) < 2:
-                return
-            p0, p1 = full_seq[0], full_seq[1]
-            direction = _cardinal_direction(p1.x - p0.x, p1.y - p0.y)
-            if not direction:
-                return
-
-            name = _mark_target_name(target_before)
-            body = f"{direction.capitalize()} to {name}{_mark_hp_clause(target_before)}"
-            if los_changed:
-                tag = ", in sight" if _mark_last_visible[0] else ", blocked"
-                body = f"{body}{tag}"
-            line = f"{body}."
-            async_tts.speak(line)
-            log(f"[Mark] Turn update: {line}")
+    def _speak_pin_turn_updates(view):
+        """Per-turn pin service: (1) expiry sweep — every dead unit pin and
+        gone landmark pin announces and removes itself, with focus handoff
+        when the focused pin expires; (2) the update line — the FOCUSED pin
+        only by default, every pin (focused first, then recency order) with
+        pin_speak_all."""
+        game = view.game
+        if game is None or game.p1 is None:
+            return
+        level = game.cur_level
+        if not _pins_for(level):
+            return
+        player = game.p1
+        try:
+            for pin in list(_pins_for(level)):
+                if _pin_alive(level, pin):
+                    continue
+                handoff = _remove_pin(level, pin)
+                _pin_cycle_drop(pin)
+                if pin['kind'] == 'unit':
+                    _speak_pin(f"Pinned {_pin_name(pin)} dead.{handoff}")
+                else:
+                    _speak_pin(f"Pinned landmark gone: {_pin_name(pin)}.{handoff}")
+            focused = _focused_pin(level)
+            if cfg.pin_speak_all:
+                rest = sorted((p for p in _pins_for(level) if p is not focused),
+                              key=lambda p: -p['seq'])
+                targets = ([focused] if focused is not None else []) + rest
+            else:
+                targets = [focused] if focused is not None else []
+            for pin in targets:
+                line = _pin_update_line(level, player, pin)
+                if line:
+                    async_tts.speak(line)
+                    log(f"[Pin] Turn update: {line}")
         except Exception as e:
-            log(f"[Mark] Turn update error: {e}")
+            log(f"[Pin] Turn update error: {e}")
 
     # Cycling state for deploy category navigation (keys 2-5)
     _deploy_cycle_cat = [None]     # Current category (2-5) or None
@@ -7721,17 +7972,18 @@ if _PyGameView is not None:
             "L, line of sight. Enemy count by type and direction.",
             "N, spawner scan. Press repeatedly to cycle nests. Shift reverses.",
             "U, ally scan. Press repeatedly to cycle allies. Shift reverses.",
-            "Alt plus I, N, O, or U, mark or unmark the last scanned target.",
+            "Alt plus K, pin or unpin the last spoken target, else this tile.",
+            "K, pin cycle. Category blocks, nearest first. Shift reverses. Control K skips a block.",
             "O, landmark scan. Cycle nearest first. Shift O reverses.",
             "G, charges. Selected spell or all spells.",
             "T, threat. Adjacent enemy count and positions.",
             "D, detail. Full description of whatever is under the cursor.",
             "B, spatial scan. Walkable distances in 8 directions.",
             "X, hazard scan. Clouds and webs.",
-            "P, path to cursor in look mode. Shift P, full path to marked target.",
+            "P, path to cursor in look mode. Shift P, full path to the focused pin.",
             "V, look mode. Cursor to examine tiles.",
             "C, character sheet.",
-            "Left control, cancel speech.",
+            "Control, cancel speech.",
             "Z, repeat last speech.",
             "Left bracket, speech history back. Right bracket, forward.",
             "Slash, game help. Shift slash, this reference.",
@@ -7885,12 +8137,12 @@ if _PyGameView is not None:
                                             minions=_minions)
                 except Exception:
                     pass
-                # Marked target update — immediate tier fires FIRST in the post-turn
+                # Pin updates — immediate tier fires FIRST in the post-turn
                 # sequence so the navigation step lands at the head of NVDA's speech
                 # queue. Combat-heavy turns produced enough flush content to bury the
                 # prefix under damage/cast/death events when this fired after flush.
-                if _mark_tier_immediate[0] and _marked_target[0] is not None and _turn_count[0] > 1:
-                    _speak_mark_turn_update(self)
+                if _pin_tier_immediate[0] and _turn_count[0] > 1 and _pins_for(getattr(self.game, 'cur_level', None)):
+                    _speak_pin_turn_updates(self)
 
                 # Composer pipeline fires before the batcher flush so its
                 # composed utterance precedes the batcher's flat enemy-turn
@@ -8033,6 +8285,7 @@ if _PyGameView is not None:
                 _spawner_scanner.turn_reset()
                 _landmark_scanner.turn_reset()
                 _ally_scanner.turn_reset()
+                _pin_scanner.turn_reset()
 
                 if _turn_count[0] == 1:
                     # Auto-announce enemy/spawner count on level start
@@ -8057,9 +8310,9 @@ if _PyGameView is not None:
                     log(f"[Turn] {text}")
                     async_tts.speak(text)
 
-                # Marked target update — turn-end tier: after turn signal
-                if not _mark_tier_immediate[0] and _marked_target[0] is not None and _turn_count[0] > 1:
-                    _speak_mark_turn_update(self)
+                # Pin updates — turn-end tier: after turn signal
+                if not _pin_tier_immediate[0] and _turn_count[0] > 1 and _pins_for(getattr(self.game, 'cur_level', None)):
+                    _speak_pin_turn_updates(self)
 
         elif not deploying:
             # Post-clear turn boundaries. The old guard skipped this path
@@ -8108,6 +8361,7 @@ if _PyGameView is not None:
                 _spawner_scanner.turn_reset()
                 _landmark_scanner.turn_reset()
                 _ally_scanner.turn_reset()
+                _pin_scanner.turn_reset()
 
         # Deploy start detection
         if deploying and not _was_deploying[0]:
@@ -8174,6 +8428,8 @@ if _PyGameView is not None:
                     _landmark_scanner.reset()
                 if not _is_bind(self, _KB_HL_ALLIES, evt.key, pygame.K_u):
                     _ally_scanner.reset()
+                if evt.key != pygame.K_k:
+                    _pin_scanner.reset()
                 # Deploy-only number keys: overview (1) and category cycling (2-5)
                 if deploying and evt.key == pygame.K_1:
                     _announce_deploy_overview(self)
@@ -8218,7 +8474,7 @@ if _PyGameView is not None:
                 elif _is_bind(self, _KB_HL_ENEMIES, evt.key, pygame.K_i):  # enemy scan (rides Highlight Enemies)
                     mods = pygame.key.get_mods()
                     if mods & pygame.KMOD_ALT:
-                        _mark_scanned_target(self)
+                        _toggle_pin(self)
                     else:
                         ref, lvl, qual = _get_scan_reference(self)
                         rev = bool(mods & pygame.KMOD_SHIFT)
@@ -8226,7 +8482,7 @@ if _PyGameView is not None:
                 elif evt.key == pygame.K_n:
                     mods = pygame.key.get_mods()
                     if mods & pygame.KMOD_ALT:
-                        _mark_scanned_target(self)
+                        _toggle_pin(self)
                     else:
                         ref, lvl, qual = _get_scan_reference(self)
                         rev = bool(mods & pygame.KMOD_SHIFT)
@@ -8234,7 +8490,7 @@ if _PyGameView is not None:
                 elif _is_bind(self, _KB_HL_ALLIES, evt.key, pygame.K_u):  # ally scan (rides Highlight Allies)
                     mods = pygame.key.get_mods()
                     if mods & pygame.KMOD_ALT:
-                        _mark_scanned_target(self)
+                        _toggle_pin(self)
                     else:
                         ref, lvl, qual = _get_scan_reference(self)
                         rev = bool(mods & pygame.KMOD_SHIFT)
@@ -8244,7 +8500,7 @@ if _PyGameView is not None:
                 elif _is_bind(self, _KB_HL_OBJECTS, evt.key, pygame.K_o):  # landmark scan (rides Highlight Objects)
                     mods = pygame.key.get_mods()
                     if mods & pygame.KMOD_ALT:
-                        _mark_scanned_target(self)
+                        _toggle_pin(self)
                     else:
                         ref, lvl, qual = _get_scan_reference(self)
                         rev = bool(mods & pygame.KMOD_SHIFT)
@@ -8252,6 +8508,20 @@ if _PyGameView is not None:
                 elif evt.key == pygame.K_x:
                     ref, lvl, qual = _get_scan_reference(self)
                     _query_hazards(self, scan_level=lvl, ref_point=ref, qualifier=qual)
+                elif evt.key == pygame.K_k:
+                    # Pin cycle (cursor-tool pass, slice 4). Alt+K universal
+                    # toggle, Ctrl+K block skip (Ctrl = chunk-jump; the bare-
+                    # Ctrl cancel already fired on the Ctrl press itself),
+                    # Shift reverses either gesture. The game's K in level
+                    # state is the cheats-only convert — accepted overlap,
+                    # same call as slice 1's O scan vs the orb-spawn cheat.
+                    mods = pygame.key.get_mods()
+                    if mods & pygame.KMOD_ALT:
+                        _toggle_pin(self)
+                    else:
+                        _query_pins(self,
+                                    reverse=bool(mods & pygame.KMOD_SHIFT),
+                                    block_skip=bool(mods & pygame.KMOD_CTRL))
                 elif _is_bind(self, _KB_LOS, evt.key, pygame.K_l):  # LoS summary (rides Show Line of Sight)
                     ref, lvl, qual = _get_scan_reference(self)
                     _query_los_summary(self, scan_level=lvl, ref_point=ref, qualifier=qual)
@@ -8278,7 +8548,7 @@ if _PyGameView is not None:
                     _query_detail(self)
                 elif evt.key == pygame.K_p:
                     if pygame.key.get_mods() & pygame.KMOD_SHIFT:
-                        _query_path_to_marked_target(self)
+                        _query_path_to_focused_pin(self)
                     else:
                         _query_path_to_cursor(self)
                     # Consume so the game's K_p (pdb.set_trace dev cheat) doesn't fire.
