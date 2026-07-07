@@ -1,4 +1,4 @@
-# Words of Power II
+# Words of Power: RW3
 
 **Version 0.5.0 — beta**
 
@@ -14,8 +14,6 @@ silent when it shouldn't.
 Update transition guide — covers what moved, what changed, and what's new, with a
 five-minute quick start. Useful to anyone, but written primarily for returning
 players.
-
-(*Words of Power II* is a working title.)
 
 ## About Rift Wizard 3
 
