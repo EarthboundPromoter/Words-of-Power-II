@@ -274,15 +274,26 @@ _KB_DIRS_TEST = (
     (5, pygame.K_KP9, (1, -1)),
 )
 
+_jump_tts = _FakeTTS()
+_jump_cfg = types.SimpleNamespace(jump_coalesce_units=False)
+
 _fk = {
     '_pg_keybind': pygame,
     '_KB_DIRS': _KB_DIRS_TEST,
     '_bound_keys': _bound_keys,
+    # call-time deps for _jump_step
+    'cfg': _jump_cfg,
+    'Level': types.SimpleNamespace(
+        Point=lambda x, y: types.SimpleNamespace(x=x, y=y)),
+    'async_tts': _jump_tts,
+    'log': lambda *a, **k: None,
+    '_name': lambda obj, fallback="something": getattr(obj, 'name', fallback) or fallback,
 }
 exec(_extract("    _NUMPAD_DIR_KEYS = frozenset((",
               "    def _crossed_tile_label(level, point):"), _fk)
 _detect = _fk['_fake_shift_numpad_dirs']
 _vec_for = _fk['_chord_vec_for']
+_jump = _fk['_jump_step']
 
 _VIEW = types.SimpleNamespace(key_binds={
     0: [pygame.K_UP, pygame.K_KP8],
@@ -355,3 +366,96 @@ def test_chord_eligibility_survives_a_rebind():
     })
     assert _vec_for(rebound, 60) == (0, -1)
     assert _vec_for(rebound, pygame.K_UP) is None
+
+
+# ---- axis jump (slice 3): word-jump stop rule ----
+# Reference = the first stepped tile's headline; a first tile that already
+# differs from the origin AND carries content lands in one step. Landing
+# speaks via the normal announcer plus "N direction" (". Edge" on clamp);
+# pinned at the edge speaks "Edge" alone.
+
+class _JumpLevel:
+    def __init__(self, row):
+        self.tiles = [[t] for t in row]  # tiles[x][y], single row at y=0
+        self._w = len(row)
+
+    def is_point_in_bounds(self, p):
+        return 0 <= p.x < self._w and p.y == 0
+
+
+def _jump_view(level, x):
+    game = types.SimpleNamespace(deploying=False, cur_level=level,
+                                 next_level=None)
+    v = types.SimpleNamespace(game=game, cur_spell=object(),
+                              deploy_target=None,
+                              cur_spell_target=_P(x=x, y=0), examined=[])
+    v.try_examine_tile = v.examined.append
+    return v
+
+
+def _jrun(row, start, coalesce=False):
+    _jump_tts.spoken.clear()
+    _jump_cfg.jump_coalesce_units = coalesce
+    view = _jump_view(_JumpLevel(row), start)
+    _jump(view, False, (1, 0))
+    return view
+
+
+def test_jump_runs_floors_and_lands_on_the_unit():
+    row = [_Tile(), _Tile(), _Tile(), _Tile(), _Tile(unit=_named("Imp"))]
+    view = _jrun(row, 0)
+    assert view.cur_spell_target.x == 4
+    assert [p.x for p in view.examined] == [4]
+    assert _jump_tts.spoken == ["4 east"]
+
+
+def test_jump_from_a_unit_runs_the_floors_to_the_wall():
+    row = [_Tile(unit=_named("Imp")), _Tile(), _Tile(), _Tile(wall=True)]
+    view = _jrun(row, 0)
+    assert view.cur_spell_target.x == 3
+    assert _jump_tts.spoken == ["3 east"]
+
+
+def test_adjacent_content_lands_in_one_step():
+    row = [_Tile(), _Tile(unit=_named("Imp")), _Tile(), _Tile()]
+    view = _jrun(row, 0)
+    assert view.cur_spell_target.x == 1
+    assert _jump_tts.spoken == ["1 east"]
+
+
+def test_prop_breaks_a_floor_run():
+    row = [_Tile(), _Tile(), _Tile(prop=_named("Rift")), _Tile()]
+    view = _jrun(row, 0)
+    assert view.cur_spell_target.x == 2
+    assert _jump_tts.spoken == ["2 east"]
+
+
+def test_uniform_run_to_the_edge_appends_edge():
+    row = [_Tile(), _Tile(), _Tile(), _Tile()]
+    view = _jrun(row, 0)
+    assert view.cur_spell_target.x == 3
+    assert _jump_tts.spoken == ["3 east. Edge"]
+
+
+def test_pinned_at_edge_speaks_edge_and_stays_put():
+    row = [_Tile(), _Tile()]
+    view = _jrun(row, 1)
+    assert view.cur_spell_target.x == 1
+    assert view.examined == []
+    assert _jump_tts.spoken == ["Edge"]
+
+
+def test_default_stops_at_every_unit_coalesce_strides_the_cluster():
+    def row():
+        return [_Tile(unit=_named("Imp")), _Tile(unit=_named("Imp")),
+                _Tile(unit=_named("Imp")), _Tile()]
+    view = _jrun(row(), 0)                 # default: next imp is content
+    assert view.cur_spell_target.x == 1
+    view = _jrun(row(), 0, coalesce=True)  # stride the same-name cluster
+    assert view.cur_spell_target.x == 3
+
+
+def test_jump_wiring_pins():
+    assert "if jumping and evt.key in _NUMPAD_DIR_KEYS:" in _src
+    assert "_jump_step(view, deploying, pair)" in _src
+    assert _src.count("_jump_step(view, deploying, b['vec'])") == 1

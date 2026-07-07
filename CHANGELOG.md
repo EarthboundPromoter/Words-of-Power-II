@@ -24,6 +24,14 @@ an early work-in-progress RW3 port — expect frequent changes.
   diagonal. No modifier, both hands or one, and it follows your movement
   rebinds. A lone press still steps normally (it waits one imperceptible frame
   for a partner). Held arrows keep the game's native auto-walk untouched.
+- **Ctrl + direction: the axis jump.** Skim the cursor along a line until what
+  you'd hear changes — across open floor to the next unit, item, wall, or
+  cloud, in one keypress. Speaks the landing tile, then the distance
+  ("6 east"; "Edge" when the map ends the run). Either Ctrl, and it composes
+  with everything: Ctrl+arrow straight, Ctrl+pair diagonal, Ctrl+numpad free.
+  By default the jump stops at every unit; the new `jump_coalesce_units`
+  setting (default off) strides same-name clusters instead. Cursor modes only
+  — your wizard never jumps.
 
 ### Changed
 - **Right Ctrl no longer means diagonal — Ctrl now means one thing, either

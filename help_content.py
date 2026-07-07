@@ -50,6 +50,7 @@ _MOVEMENT_SPEECH = """
 [Two arrows together:shields]: Diagonal movement. Up and Right together is northeast, Down and Left is southwest, and so on. Press the pair as one gesture
 [Shift + Arrow:shields]: Move the cursor 4 tiles. Speaks the landing tile, then a short summary of everything crossed, floor included. Says Edge when the map edge cuts the move short
 [Shift + two arrows:shields]: The 4 tile move, diagonal. Same landing and crossed summary
+[Ctrl + direction:shields]: Jump the cursor along that line until what you would hear changes: past open floor to the next unit, item, or wall. Speaks the landing, then the distance, like 6 east. Says Edge when the map ends the run. Either Ctrl; works with arrows, arrow pairs, and the numpad
 [Numpad:shields]: Keep NumLock on. Bare numpad moves and diagonals work; with NumLock off the numpad belongs to your screen reader's review keys, which return when you leave the game. Shift+numpad 4 tile moves only work without NVDA running, because NVDA swallows that chord below the game; use the arrow gestures instead, which always work
 [Shift + Tab:shields]: Previous target while targeting, walking, or looking. A fresh press starts from the far end of the list, so in walk mode it jumps straight to the rifts. Needs the Steam overlay turned off for this game, or Steam swallows the keypress. Steps are in the read me
 [Ctrl:shields]: Cancel speech. Either control key

@@ -228,6 +228,12 @@ _SETTINGS_SCHEMA = [
      "# their full effect: rare, and stepping on one alters your build\n"
      "# permanently.\n"
      "# Default: true"),
+    ('words_of_power', 'jump_coalesce_units', 'false',
+     "# Axis jump (Ctrl+direction): when the run crosses several units with\n"
+     "# the SAME name in a row, stride the whole cluster as one block\n"
+     "# instead of stopping at each one. Default false: the jump stops at\n"
+     "# every unit, so nothing with agency is skimmed past unheard.\n"
+     "# Default: false"),
     ('words_of_power', 'digest_enabled', 'true',
      "# Enable the direct-action digest: a composed summary of one player\n"
      "# keypress's full effect chain (cast, damage, kills, procs, side-effects)\n"
@@ -397,6 +403,7 @@ class _Cfg:
     reactive_markers_enabled = _settings.getboolean('words_of_power', 'reactive_markers_enabled', fallback=False)
     aoe_group_names = _settings.getboolean('words_of_power', 'aoe_group_names', fallback=True)
     speak_pickup_effects = _settings.getboolean('words_of_power', 'speak_pickup_effects', fallback=True)
+    jump_coalesce_units = _settings.getboolean('words_of_power', 'jump_coalesce_units', fallback=False)
     digest_enabled = _settings.getboolean('words_of_power', 'digest_enabled', fallback=True)
     # [Composer] — pipeline flags. As of 0.3.2 the composer pipeline is the
     # shipped speech engine: producers on, legacy combat narration off.
@@ -5746,6 +5753,98 @@ if _PyGameView is not None:
         if _x4_move[0] is not None:
             _x4_finalize(view)
 
+    # ---- Axis jump (slice 3): Ctrl+direction, either Ctrl ----
+    # Skim the cursor along an axis until the announcement would change —
+    # "skip repeats of what you'd hear." Word-jump semantics resolve the
+    # from-vs-toward asymmetry: the run's reference is the FIRST STEPPED
+    # tile's headline, except that a first tile which already differs from
+    # the origin AND carries content (unit/prop/cloud/wall/chasm) lands the
+    # jump in one step. So: from floor across floors, land on the imp; from
+    # the imp across floors, land on the wall; from floor with the imp
+    # adjacent, land on the imp immediately. Landing speaks through the
+    # normal announcer plus a distance line ("7 east"; ". Edge" when the
+    # map edge stopped the run). jump_coalesce_units (default false) strides
+    # same-name unit clusters; default stops at every unit. Cursor contexts
+    # only — the wizard never jumps (the wizard four-jump is a separate
+    # queued feature with its own turn-cost design).
+    _JUMP_DIR_NAMES = {
+        (0, -1): "north", (0, 1): "south", (-1, 0): "west", (1, 0): "east",
+        (-1, -1): "northwest", (1, -1): "northeast",
+        (-1, 1): "southwest", (1, 1): "southeast",
+    }
+
+    def _jump_sig(level, point, coalesce):
+        """Headline signature for the stop rule. Mirrors the tile describer's
+        priority (unit > prop > cloud > terrain); excludes volatile detail
+        (HP, durations) so identical-sounding tiles compare equal."""
+        tile = level.tiles[point.x][point.y]
+        unit = getattr(tile, 'unit', None)
+        if unit is not None:
+            return ('unit', _name(unit) if coalesce else id(unit))
+        prop = getattr(tile, 'prop', None)
+        if prop is not None:
+            return ('prop', _name(prop))
+        terrain = 'floor'
+        try:
+            if tile.is_wall():
+                terrain = 'wall'
+            elif tile.is_chasm:
+                terrain = 'chasm'
+        except Exception:
+            pass
+        cloud = getattr(tile, 'cloud', None)
+        if cloud is not None:
+            return ('cloud', _name(cloud), terrain)
+        return (terrain,)
+
+    def _jump_step(view, deploying, vec):
+        """Perform one axis jump from the current cursor position."""
+        try:
+            level = view.game.next_level if deploying else view.game.cur_level
+            origin = view.deploy_target if deploying else view.cur_spell_target
+            if level is None or origin is None:
+                return
+            coalesce = cfg.jump_coalesce_units
+
+            def step(p):
+                return Level.Point(p.x + vec[0], p.y + vec[1])
+
+            first = step(origin)
+            if not level.is_point_in_bounds(first):
+                # Pinned against the edge: say why nothing happened
+                # (slice 2 ruling — silence is a bad state).
+                log("[Jump] Edge")
+                async_tts.speak("Edge")
+                return
+            ref = _jump_sig(level, first, coalesce)
+            edged = False
+            if (ref != _jump_sig(level, origin, coalesce)
+                    and ref[0] != 'floor'):
+                landing = first  # adjacent content: speech changes in one step
+            else:
+                landing = first
+                while True:
+                    nxt = step(landing)
+                    if not level.is_point_in_bounds(nxt):
+                        edged = True
+                        break
+                    landing = nxt
+                    if _jump_sig(level, nxt, coalesce) != ref:
+                        break
+            if deploying:
+                view.deploy_target = landing
+            else:
+                view.cur_spell_target = landing
+            view.try_examine_tile(landing)
+            n = max(abs(landing.x - origin.x), abs(landing.y - origin.y))
+            text = f"{n} {_JUMP_DIR_NAMES.get(vec, '')}".strip()
+            if edged:
+                text = f"{text}. Edge"
+            log(f"[Jump] {text}")
+            async_tts.speak(text)
+        except Exception as e:
+            log(f"[Jump] error: {e}")
+
     def _chord_process(view, deploying):
         """Classify this frame's direction-key traffic; steal chord pairs."""
         import time as _t
@@ -5764,6 +5863,10 @@ if _PyGameView is not None:
                 _arrow_buffer[0] = None
             return
         shift_held = keys_now[pygame.K_LSHIFT] or keys_now[pygame.K_RSHIFT]
+        ctrl_held = keys_now[pygame.K_LCTRL] or keys_now[pygame.K_RCTRL]
+        cursor_ctx = (view.cur_spell is not None
+                      or (deploying and getattr(view, 'deploy_target', None)))
+        jumping = bool(ctrl_held and cursor_ctx)
         consumed = []
         for evt in list(events):
             if evt.type == pygame.KEYUP:
@@ -5772,6 +5875,19 @@ if _PyGameView is not None:
                 continue
             if evt.type != pygame.KEYDOWN:
                 continue
+            # Ctrl+numpad: jump along the numpad direction, diagonals free.
+            # Numpad keys never chord, so they resolve immediately.
+            if jumping and evt.key in _NUMPAD_DIR_KEYS:
+                is_repeat = _arrow_down.get(evt.key, False)
+                _arrow_down[evt.key] = True
+                consumed.append(evt)  # discrete gesture: repeats swallowed
+                if not is_repeat:
+                    kb = getattr(view, 'key_binds', None)
+                    for bind_id, fallback, jvec in _KB_DIRS:
+                        if evt.key in _bound_keys(kb, bind_id, fallback):
+                            _jump_step(view, deploying, jvec)
+                            break
+                continue
             vec = _chord_vec_for(view, evt.key)
             if vec is None:
                 continue
@@ -5779,21 +5895,29 @@ if _PyGameView is not None:
             _arrow_down[evt.key] = True
             if is_repeat:
                 # Game-synthesized autowalk repeat — pass through untouched
-                # (held arrows keep the game's native behavior).
+                # (held arrows keep the game's native behavior), EXCEPT while
+                # Ctrl is held in a cursor context: the jump is a discrete
+                # gesture, so autowalk repeats are swallowed rather than
+                # letting the game single-step under the chord.
+                if jumping:
+                    consumed.append(evt)
                 continue
             # Real press.
             b = _arrow_buffer[0]
             if b is not None:
                 dot = (b['vec'][0] * vec[0] + b['vec'][1] * vec[1])
                 if dot == 0:
-                    # Orthogonal partner inside the window: CHORD.
+                    # Orthogonal partner inside the window: CHORD —
+                    # diagonal step, or diagonal jump under Ctrl.
                     consumed.append(evt)
                     _arrow_buffer[0] = None
-                    _chord_step(view, deploying,
-                                (b['vec'][0] + vec[0], b['vec'][1] + vec[1]),
-                                shift_held)
-                    log(f"[Chord] diagonal "
-                        f"dt={(_t.time() - b['t']) * 1000:.0f}ms")
+                    pair = (b['vec'][0] + vec[0], b['vec'][1] + vec[1])
+                    if jumping:
+                        _jump_step(view, deploying, pair)
+                    else:
+                        _chord_step(view, deploying, pair, shift_held)
+                        log(f"[Chord] diagonal "
+                            f"dt={(_t.time() - b['t']) * 1000:.0f}ms")
                     continue
                 # Same-axis second press: flush the old, buffer the new.
                 events.insert(0, b['evt'])
@@ -5804,12 +5928,16 @@ if _PyGameView is not None:
         if consumed:
             view.events = [e for e in view.events if e not in consumed]
         # Age the buffer AFTER the scan: a press that saw one full batch
-        # with no partner releases to the game (single step, a frame late).
+        # with no partner resolves — an orthogonal jump under Ctrl, else
+        # released to the game (single step, a frame late).
         b = _arrow_buffer[0]
         if b is not None:
             if b['aged']:
-                view.events.insert(0, b['evt'])
                 _arrow_buffer[0] = None
+                if jumping:
+                    _jump_step(view, deploying, b['vec'])
+                else:
+                    view.events.insert(0, b['evt'])
             else:
                 b['aged'] = True
 
