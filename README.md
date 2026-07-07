@@ -1,6 +1,6 @@
 # Words of Power: RW3
 
-**Version 0.5.0 — beta**
+**Version 0.5.1 — beta**
 
 A screen-reader mod for **Rift Wizard 3**: it speaks the game's state and events
 through NVDA or JAWS (via Tolk) so the game can be played without sight. It's the Rift
@@ -74,7 +74,7 @@ any speech is running is a catch-22. A bundled program handles it:
 2. Run `screen_reader/bin/enable_screen_reader.exe` (or `python enable_screen_reader.py`
    from the folder). Windows may warn the program is unsigned — choose *Run anyway*.
    `--disable` turns the mod back off.
-3. Launch the game. You'll hear "Words of Power version 0.5.0" if it's working. A debug
+3. Launch the game. You'll hear "Words of Power version 0.5.1" if it's working. A debug
    log is written to `screen_reader_debug.log` in the mod folder.
 
 The very first screen on launch is **Language select** (voiced, English only) — just

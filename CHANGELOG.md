@@ -3,7 +3,7 @@
 All notable changes to **Words of Power II** are listed here, newest first. This is
 an early work-in-progress RW3 port — expect frequent changes.
 
-## Unreleased
+## 2026-07-07 — 0.5.1 — Hotfix: the mouse yields to the keyboard
 
 ### Fixed
 - **The mouse no longer hijacks overlays and examine during keyboard play.** The
