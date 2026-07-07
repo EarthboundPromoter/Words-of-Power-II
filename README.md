@@ -1,6 +1,6 @@
 # Words of Power II
 
-**Version 0.3.4 — beta**
+**Version 0.5.0 — beta**
 
 A screen-reader mod for **Rift Wizard 3**: it speaks the game's state and events
 through NVDA or JAWS (via Tolk) so the game can be played without sight. It's the Rift
@@ -9,6 +9,11 @@ Wizard 3 successor to *Words of Power*, the Rift Wizard 2 mod.
 Early beta — core play, combat narration, and the crafting interface all work, but
 some features are lightly tested. Please report anything that sounds wrong or stays
 silent when it shouldn't.
+
+**Coming from an earlier version?** [TRANSITION.md](TRANSITION.md) — the Cursor
+Update transition guide — covers what moved, what changed, and what's new, with a
+five-minute quick start. Useful to anyone, but written primarily for returning
+players.
 
 (*Words of Power II* is a working title.)
 
@@ -71,7 +76,7 @@ any speech is running is a catch-22. A bundled program handles it:
 2. Run `screen_reader/bin/enable_screen_reader.exe` (or `python enable_screen_reader.py`
    from the folder). Windows may warn the program is unsigned — choose *Run anyway*.
    `--disable` turns the mod back off.
-3. Launch the game. You'll hear "Words of Power version 0.3.4" if it's working. A debug
+3. Launch the game. You'll hear "Words of Power version 0.5.0" if it's working. A debug
    log is written to `screen_reader_debug.log` in the mod folder.
 
 The very first screen on launch is **Language select** (voiced, English only) — just
@@ -141,12 +146,15 @@ Two sets of keys: the ones the mod adds, and Rift Wizard 3's own. A few things f
 | **N** | Spawner/nest scan. Cycle nests; Shift+N reverses. |
 | **O** | Landmark scan — rifts, shops, shrines, orbs, pickups. Cycle; Shift+O reverses. Rides the game's Highlight Objects key. |
 | **L** | Line of sight — enemy count by type and direction. Adds speech to the game's line-of-sight overlay. |
-| **T** | Threat — "Threatened" or "Safe" for your current square (the look cursor's square in Look mode). To hear *who*: examine an enemy and press T — "Threatens you" / "Can't hit you". Setting `threat_enumeration_legacy` restores the old count-and-names readout for now. |
+| **T** | Threat — "Threatened" or "Safe" for the square your attention is on. To hear *who*: examine an enemy and press T — "Threatens you" / "Can't hit you". Setting `threat_enumeration_legacy` restores the old count-and-names readout for now. |
 | **Alt + L** | Latch the line-of-sight overlay: it stays drawn without holding the key, and every cursor step appends "in sight" / "out of sight". Latched from normal play it follows you; from Look, aiming, or deploy it watches from that frozen tile. Same chord releases; latching the other overlay replaces it. |
 | **Alt + T** | Latch the threat overlay: every cursor step appends "threatened" / "clear". Examine an enemy first and Alt+T latches just that enemy's reach. F reports the current latch; `latch_visual_overlay` (default on) controls the drawn half — speech works either way. |
 | **B** | Spatial scan — walkable distance in all 8 directions. |
-| **X** | Hazard scan — clouds, webs, and other hazards. |
+| **X** | Hazard scan — clouds and webs. |
 | **D** | Detail — full description of whatever is under the cursor. |
+
+Every scan and query measures from wherever your attention is: you in normal play,
+the cursor in Look mode, your aim while targeting, the deploy cursor while placing.
 
 In Look mode, deploy, and pure-teleport targeting (Blink and kin — spells with no
 area to aim), every scan or pin press also **parks the cursor on the result it
@@ -157,10 +165,10 @@ else the cursor is your aim and scans leave it alone — J is the deliberate jum
 
 | Key | Function |
 |-----|----------|
-| **F** | Vitals — HP, shields, and active status effects with durations. |
+| **F** | Vitals — HP, shields, SP, and active buffs and debuffs with durations. |
 | **Shift + F** | Ally overview — all allies with HP. |
 | **G** | Charges — selected spell's charges, or all spells if none is selected. |
-| **K** | Pin cycle — walk your pinned targets in category blocks (enemies, allies, landmarks, bookmarks), nearest first within each block. Shift+K reverses; **Ctrl+K** jumps block to block. |
+| **K** | Pin cycle — walk your pinned targets in category blocks (enemies, allies, landmarks, bookmarks), nearest first within each block. Shift+K reverses; **Ctrl+K** jumps block to block (Shift+Ctrl+K jumps back). |
 | **Alt + K** | Pin or unpin the last spoken target; with nothing spoken, bookmark the tile you're on or looking at (works from the deploy cursor too — the pin carries into the level). The newest pin is the *focused* pin: it speaks a step toward it each turn, and every pin announces when it dies or is collected. Setting `pin_speak_all` (default off) speaks every pin's update each turn. |
 | **Alt + I / N / O / U** | The same pin toggle, straight off a scan. |
 | **P** | Path to the look-mode cursor — full route to whatever it's on. |
@@ -178,7 +186,7 @@ else the cursor is your aim and scans leave it alone — J is the deliberate jum
 | Key | Function |
 |-----|----------|
 | **Ctrl** | Cancel speech — either control key. |
-| **Z** | Repeat the last message. |
+| **Z** | Repeat the current line — the last message, or the history line the brackets moved to. |
 | **[** / **]** | Speech history back / forward. |
 | **F1** | Open the Words of Power reference (mod keybinds and tips) from any screen — level, menus, shops. |
 | **Shift + /** | Open the Words of Power reference (same as F1). |
@@ -188,13 +196,14 @@ else the cursor is your aim and scans leave it alone — J is the deliberate jum
 | Key | Function |
 |-----|----------|
 | **1** | Quadrant overview — enemies, spawners, loot by area. |
-| **2 / 3 / 4 / 5** | Cycle memory orbs / pickups / spawners / shops, shrines, and circles. |
+| **2 / 3 / 4 / 5** | Cycle memory orbs / pickups / spawners / shops and shrines. |
+| **L / T** | Work while placing, measured from the deploy cursor. |
 
 **Shops (spell shop and crafting)**
 
 | Key | Function |
 |-----|----------|
-| **Comma** | Read the active filters and available filter keys aloud. |
+| **Comma** | Read the active filter page — each value, its hotkey, and whether it's on, plus the Shift-held companion category where one exists (crafting's Recipe / Bonus filters). |
 | **I** | (Crafting, component selection) Re-read the item you're building. |
 | **R** | (Crafting, component selection) Read recipe progress. |
 

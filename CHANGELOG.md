@@ -3,7 +3,10 @@
 All notable changes to **Words of Power II** are listed here, newest first. This is
 an early work-in-progress RW3 port — expect frequent changes.
 
-## Unreleased
+## 2026-07-07 — 0.5.0 — The Cursor Update
+
+Returning players: [TRANSITION.md](TRANSITION.md) walks these changes in
+learning order, quick start first.
 
 ### Added
 - **Shift + Tab reverse target cycling** while targeting, walking, or looking —
@@ -96,8 +99,8 @@ an early work-in-progress RW3 port — expect frequent changes.
 - **Right Ctrl no longer means diagonal — Ctrl now means one thing, either
   side.** The RCtrl+arrow diagonal and its AltGr synonym are retired, replaced
   by two-arrow chording; the mod never distinguishes left from right Ctrl
-  again. Bare Ctrl (either one) cancels speech; Ctrl chords are reserved for
-  the coming cursor jump. Hard switch, no legacy setting.
+  again. Bare Ctrl (either one) cancels speech; Ctrl chords are the axis jump
+  (see Added). Hard switch, no legacy setting.
 - **Shift + arrow now speaks the landing tile plus a short "Crossed:" summary**
   of everything the cursor skimmed past — units, props, clouds, walls, chasms,
   and floor, grouped with counts ("Crossed: 2 floors, web") — instead of
@@ -112,9 +115,10 @@ an early work-in-progress RW3 port — expect frequent changes.
   the tiles; the pairing follows your rebinds — rebind Highlight Enemies and
   the enemy scan moves with it. N (spawners) and X (hazards) are unchanged;
   they have no game highlight. The Alt+key toggle moved with the scans
-  (Alt + I / N / O / U). J, Q, and Y are now unbound, reserved for upcoming
-  features. This is a hard switch with no legacy-keys setting — the old
-  letters simply stop answering.
+  (Alt + I / N / O / U). Q and Y are now unbound, reserved for upcoming
+  features; J was given its new job as the cursor jump (see Added). This is
+  a hard switch with no legacy-keys setting — the old letters simply stop
+  answering.
 
 ### Fixed
 - **Shift + numpad now actually moves 4 tiles — when NVDA isn't running.** A
