@@ -158,6 +158,8 @@ Two sets of keys: the ones the mod adds, and Rift Wizard 3's own. A few things f
 | **Shift + P** | Re-announce the path to your marked target. |
 | **Shift + Tab** | Previous target while targeting, walking, or looking (reverse of the game's Tab cycle). A fresh press starts from the far end of the list — in walk mode that jumps straight to the rifts. Needs the Steam overlay turned off for this game (see setup above). |
 | **RCtrl + Arrow** | Diagonal movement (Up=NW, Right=NE, Down=SE, Left=SW), for keyboards without a numpad. |
+| **Shift + Arrow** | Move the cursor 4 tiles. Speaks the landing tile plus a short "Crossed:" summary of everything skimmed past, floor included. Says "Edge" when the map edge cuts the move short. Add RCtrl for a 4-tile diagonal. |
+| **Numpad** | Keep NumLock on: bare numpad moves and diagonals work. Shift+numpad 4-tile moves work only **without** NVDA running — the mod repairs a Windows keyboard legacy ("fake shift") that broke the chord for everyone including sighted players, but NVDA's keyboard hook swallows the keypress before any application can see it. Under NVDA, use Shift+Arrow and Shift+RCtrl+Arrow, which are immune. NumLock off leaves the numpad to NVDA review, as usual. |
 
 **In a level — speech control**
 

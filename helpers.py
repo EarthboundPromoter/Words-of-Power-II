@@ -823,3 +823,22 @@ def _bound_keys(key_binds, bind_id, fallback):
 def _key_matches_bind(key_binds, bind_id, key, fallback):
     """True if a pressed keycode is bound to bind_id (see _bound_keys)."""
     return key in _bound_keys(key_binds, bind_id, fallback)
+
+
+def _compress_crossed(labels):
+    """Compress crossed-tile labels into one short spoken clause for the
+    Shift-move landing summary (cursor-tool pass, slice 2). Duplicates group
+    with digit counts in first-appearance order; plain-floor tiles were
+    already dropped by the caller. ['web', 'web', 'Imp'] -> '2 webs, Imp'."""
+    counts = {}
+    order = []
+    for label in labels:
+        if label not in counts:
+            order.append(label)
+            counts[label] = 0
+        counts[label] += 1
+    parts = []
+    for label in order:
+        n = counts[label]
+        parts.append(label if n == 1 else f"{n} {_pluralize(label)}")
+    return ", ".join(parts)

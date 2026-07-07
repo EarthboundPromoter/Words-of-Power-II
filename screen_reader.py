@@ -1265,7 +1265,7 @@ from helpers import (_cardinal_direction, _bearing_index, _direction_offset, _pl
                      _quadrant_label, _number_deploy_dupes,
                      _merge_same_shape_groups,
                      _compress_path, _classify_unreachable, _walkable_neighbors,
-                     _key_matches_bind)
+                     _key_matches_bind, _bound_keys, _compress_crossed)
 
 # ---- Pathfinding Via Hints ----
 _VIA_HINT_CAP = 3  # Max blocked entries per scan that get pathfinding computation
@@ -3111,6 +3111,21 @@ if _main is not None:
     _KB_HL_ALLIES = getattr(_main, 'KEY_BIND_HIGHLIGHT_ALLIES', None)
     _KB_HL_ENEMIES = getattr(_main, 'KEY_BIND_HIGHLIGHT_ENEMIES', None)
     _KB_HL_OBJECTS = getattr(_main, 'KEY_BIND_HIGHLIGHT_OBJECTS', None)
+    # Directional bind ids (slice 2): Shift-move detection reads the same
+    # binds the game's cursor movement does (arrows + numpad by default,
+    # RiftWizard3.py:2738-2753). Fallback keycodes only matter when the bind
+    # table is unavailable. The (dx, dy) vector lets the fake-shift repair
+    # reproduce the move the game would have made.
+    _KB_DIRS = (
+        (getattr(_main, 'KEY_BIND_UP', None), _pg_keybind.K_UP, (0, -1)),
+        (getattr(_main, 'KEY_BIND_DOWN', None), _pg_keybind.K_DOWN, (0, 1)),
+        (getattr(_main, 'KEY_BIND_LEFT', None), _pg_keybind.K_LEFT, (-1, 0)),
+        (getattr(_main, 'KEY_BIND_RIGHT', None), _pg_keybind.K_RIGHT, (1, 0)),
+        (getattr(_main, 'KEY_BIND_UP_LEFT', None), _pg_keybind.K_KP7, (-1, -1)),
+        (getattr(_main, 'KEY_BIND_UP_RIGHT', None), _pg_keybind.K_KP9, (1, -1)),
+        (getattr(_main, 'KEY_BIND_DOWN_LEFT', None), _pg_keybind.K_KP1, (-1, 1)),
+        (getattr(_main, 'KEY_BIND_DOWN_RIGHT', None), _pg_keybind.K_KP3, (1, 1)),
+    )
 
     if _default_kb is not None and _KB_PREV is not None:
         # Always set screen-reader-friendly defaults (affects fresh installs
@@ -5626,6 +5641,267 @@ if _PyGameView is not None:
         except Exception as e:
             log(f"[Deploy] Tile error: {e}")
 
+    # ---- Shift-move landing summary (cursor-tool pass, slice 2) ----
+    # The game's Shift+move steps the cursor 4 tiles, calling try_examine_tile
+    # per step (RiftWizard3.py:2986-3001) — which used to speak all four tiles
+    # in sequence. A sighted player perceives the crossed tiles as a glimpse,
+    # not four reads (owner ruling): speak the LANDING through the normal
+    # announcer, then one compressed "Crossed:" summary of what the cursor
+    # skimmed past. Armed per press in patched_process_level_input; collection
+    # happens in patched_try_examine_tile; finalized after the game's handler
+    # (landing = last collected point, so edge-of-map clamping is free).
+    _x4_move = [None]  # None | {'points': [Point, ...]} while collecting
+
+    # ---- Fake-shift repair: Shift+numpad x4 (slice 2 addendum) ----
+    # With NumLock on, the keyboard driver emulates the AT-keyboard
+    # convention: holding Shift while pressing a numpad key emits a fake
+    # Shift-RELEASE before the key make (Shift is restored only on the key
+    # break). The game polls live shift state (RiftWizard3.py:2988), reads
+    # Shift as up, and steps once — the game's own Shift+numpad x4 is broken
+    # for every NumLock-on player, sighted included. Found 2026-07-06 when
+    # the owner's NVDA troubleshooting isolated the regimes: NumLock off
+    # passed the chord (NVDA leaves unbound Shift+numpad gestures alone) and
+    # NumLock on stripped it — i.e. the driver, not the screen reader.
+    #
+    # Signature: Shift down entering the frame (per our event-stream
+    # tracker, which follows the DRIVER-reported state), a Shift KEYUP
+    # earlier in this same batch, then a numpad direction KEYDOWN. On match,
+    # the wrapper consumes the event and performs the four steps itself.
+    # Named trade-offs (owner-accepted): a genuine release-Shift-then-press-
+    # numpad inside one 33ms batch reads as fake (unintended x4, benign);
+    # rolling a second numpad key while the first is held lacks the KEYUP
+    # marker and steps once.
+    # SCOPE (field-verified 2026-07-06, event captures with and without
+    # NVDA): this repair works only when no NVDA is running. NVDA's keyboard
+    # hook consumes the numpad key make outright — only the fake shift churn
+    # reaches the game (its input help reports a bare "shift" stream), so
+    # there is nothing here to detect. Unfixable mod-side; NVDA users get
+    # the same gaits via Shift+arrow and Shift+RCtrl+arrow. Documented in
+    # help/README.
+    _phys_shift = [False]  # driver-reported shift state as of last frame
+
+    _NUMPAD_DIR_KEYS = frozenset((
+        _pg_keybind.K_KP1, _pg_keybind.K_KP2, _pg_keybind.K_KP3,
+        _pg_keybind.K_KP4, _pg_keybind.K_KP6, _pg_keybind.K_KP7,
+        _pg_keybind.K_KP8, _pg_keybind.K_KP9))
+
+    # ---- [ChordProbe] two-arrow diagonal chording (Ctrl-rethink probe) ----
+    # PROBE (2026-07-06): the owner is evaluating Scheme two of the Ctrl
+    # rethink — Ctrl means jump only, side-agnostic, and diagonals become
+    # modifier-free two-arrow chords (Up+Right = NE). A real arrow press is
+    # withheld for ~one frame awaiting an orthogonal partner: pair -> one
+    # diagonal step (Shift on the pair -> diagonal x4 via the collector); no
+    # partner -> the press releases to the game a frame late (~33ms,
+    # sub-perceptual). The game's own hand-rolled 20Hz autowalk repeats
+    # (RiftWizard3.py:10336-10343) are classified out by edge-tracking and
+    # pass through unbuffered — except when BOTH arrows of an orthogonal pair
+    # are held, where their repeats collapse into true diagonal autowalk
+    # (the game's accidental two-arrow zigzag, upgraded). Every decision logs
+    # [ChordProbe] so the feel test reads back. Known probe warts: hardcoded
+    # arrow keycodes (bind-following comes with the real build); a press
+    # buffered at a state transition can release one frame stale.
+    _ARROW_VECS = {
+        _pg_keybind.K_UP: (0, -1), _pg_keybind.K_DOWN: (0, 1),
+        _pg_keybind.K_LEFT: (-1, 0), _pg_keybind.K_RIGHT: (1, 0),
+    }
+    _arrow_down = {}        # keycode -> physically down (edge-tracked)
+    _arrow_buffer = [None]  # {'evt','key','vec','t','aged'} | None
+
+    def _chord_step(view, deploying, vec, x4):
+        """Perform one chord-synthesized move (the diag-block pattern)."""
+        movedir = Level.Point(vec[0], vec[1])
+        steps = 4 if x4 else 1
+        if x4 and (view.cur_spell or (deploying and view.deploy_target)):
+            _x4_move[0] = {'points': [], 'expected': steps}
+        if view.cur_spell:
+            for _ in range(steps):
+                nt = Level.Point(view.cur_spell_target.x + movedir.x,
+                                 view.cur_spell_target.y + movedir.y)
+                if view.game.cur_level.is_point_in_bounds(nt):
+                    view.cur_spell_target = nt
+                    view.try_examine_tile(nt)
+        elif deploying and view.deploy_target:
+            for _ in range(steps):
+                np = Level.Point(view.deploy_target.x + movedir.x,
+                                 view.deploy_target.y + movedir.y)
+                if view.game.next_level.is_point_in_bounds(np):
+                    view.deploy_target = np
+                    view.try_examine_tile(np)
+        else:
+            # Normal play: single diagonal player move (the game never
+            # repeats player movement under Shift — parity kept).
+            view.try_move(movedir)
+            view.cur_spell_target = None
+        if _x4_move[0] is not None:
+            _x4_finalize(view)
+
+    def _chord_probe_process(view, deploying):
+        """Classify this frame's arrow traffic; steal chord pairs."""
+        import time as _t
+        events = view.events
+        keys_now = pygame.key.get_pressed()
+        # Self-heal the edge tracker against missed KEYUPs (focus loss).
+        for k in _ARROW_VECS:
+            if _arrow_down.get(k) and not keys_now[k]:
+                _arrow_down[k] = False
+        if not view.can_execute_inputs():
+            # Never withhold input the game wouldn't act on; flush any
+            # held-over press so nothing goes stale across a transition.
+            b = _arrow_buffer[0]
+            if b is not None:
+                events.insert(0, b['evt'])
+                _arrow_buffer[0] = None
+            return
+        shift_held = keys_now[pygame.K_LSHIFT] or keys_now[pygame.K_RSHIFT]
+        consumed = []
+        for evt in list(events):
+            if evt.type == pygame.KEYUP and evt.key in _ARROW_VECS:
+                _arrow_down[evt.key] = False
+                continue
+            if evt.type != pygame.KEYDOWN or evt.key not in _ARROW_VECS:
+                continue
+            vec = _ARROW_VECS[evt.key]
+            is_repeat = _arrow_down.get(evt.key, False)
+            _arrow_down[evt.key] = True
+            if is_repeat:
+                # Game-synthesized autowalk repeat — pass through untouched.
+                # (A held-pair diagonal-autowalk diversion was probed and CUT
+                # by owner ruling 2026-07-06: held arrows keep the game's
+                # native behavior; chording is for real presses only.)
+                continue
+            # Real press.
+            b = _arrow_buffer[0]
+            if b is not None:
+                dot = (b['vec'][0] * vec[0] + b['vec'][1] * vec[1])
+                if dot == 0:
+                    # Orthogonal partner inside the window: CHORD.
+                    consumed.append(evt)
+                    _arrow_buffer[0] = None
+                    _chord_step(view, deploying,
+                                (b['vec'][0] + vec[0], b['vec'][1] + vec[1]),
+                                shift_held)
+                    log(f"[ChordProbe] chord "
+                        f"dt={(_t.time() - b['t']) * 1000:.0f}ms")
+                    continue
+                # Same-axis second press: flush the old, buffer the new.
+                events.insert(0, b['evt'])
+                log("[ChordProbe] same-axis flush")
+                _arrow_buffer[0] = None
+            consumed.append(evt)
+            _arrow_buffer[0] = {'evt': evt, 'key': evt.key, 'vec': vec,
+                                't': _t.time(), 'aged': False}
+        if consumed:
+            view.events = [e for e in view.events if e not in consumed]
+        # Age the buffer AFTER the scan: a press that saw one full batch
+        # with no partner releases to the game (single step, a frame late).
+        b = _arrow_buffer[0]
+        if b is not None:
+            if b['aged']:
+                view.events.insert(0, b['evt'])
+                log(f"[ChordProbe] single {b['key']} released after "
+                    f"{(_t.time() - b['t']) * 1000:.0f}ms")
+                _arrow_buffer[0] = None
+            else:
+                b['aged'] = True
+
+    def _fake_shift_numpad_dirs(view, events, shift_entry):
+        """Return [(evt, (dx, dy)), ...] for numpad direction KEYDOWNs whose
+        Shift the driver stripped (fake-shift). Order matters: the fake
+        Shift KEYUP precedes the key make within the batch."""
+        if not shift_entry:
+            return []
+        found = []
+        kb = getattr(view, 'key_binds', None)
+        shift_up_seen = False
+        for evt in events:
+            if (evt.type == _pg_keybind.KEYUP
+                    and evt.key in (_pg_keybind.K_LSHIFT, _pg_keybind.K_RSHIFT)):
+                shift_up_seen = True
+            elif (shift_up_seen and evt.type == _pg_keybind.KEYDOWN
+                    and evt.key in _NUMPAD_DIR_KEYS):
+                for d, fb, vec in _KB_DIRS:
+                    if evt.key in _bound_keys(kb, d, fb):
+                        found.append((evt, vec))
+                        break
+        return found
+
+    def _crossed_tile_label(level, point):
+        """Short label for a crossed tile — unit, prop, or cloud name, wall,
+        chasm, or floor. Floor COUNTS (owner ruling: dropping it makes the
+        player do arithmetic to recover the distance)."""
+        try:
+            tile = level.tiles[point.x][point.y]
+        except Exception:
+            return None
+        unit = getattr(tile, 'unit', None)
+        if unit is not None:
+            return _name(unit)
+        prop = getattr(tile, 'prop', None)
+        if prop is not None:
+            return _name(prop)
+        cloud = getattr(tile, 'cloud', None)
+        if cloud is not None:
+            return _name(cloud)
+        try:
+            if tile.is_wall():
+                return "wall"
+            if tile.is_chasm:
+                return "chasm"
+        except Exception:
+            pass
+        return "floor"
+
+    def _x4_finalize(view):
+        """Speak landing + crossed summary for a completed Shift-move."""
+        state = _x4_move[0]
+        _x4_move[0] = None
+        if not state:
+            return
+        points = state['points']
+        expected = state.get('expected', 4)
+        if not points:
+            # Pinned against the map edge — the cursor never moved. Silence
+            # reads as breakage (framework: silence is a bad state), so say
+            # why nothing happened.
+            log("[Cursor] Edge")
+            async_tts.speak("Edge")
+            return
+        clamped = len(points) < expected
+        landing = points[-1]
+        deploying = getattr(view.game, 'deploying', False)
+        level = view.game.next_level if deploying else view.game.cur_level
+        # The landing speaks through the normal announcer — identical voice
+        # to a single step that lands on this tile.
+        if deploying:
+            dt = getattr(view, 'deploy_target', None)
+            if dt is None or (landing.x, landing.y) == (dt.x, dt.y):
+                _announce_deploy_tile(view, landing)
+        else:
+            spell = getattr(view, 'cur_spell', None)
+            if spell is not None and type(spell).__name__ == 'LookSpell':
+                _announce_look_tile(view, landing)
+            elif spell is not None:
+                _announce_target_tile(view, landing)
+        labels = []
+        for p in points[:-1]:
+            label = _crossed_tile_label(level, p)
+            if label:
+                labels.append(label)
+        summary = _compress_crossed(labels)
+        # A clamped move stopped short at the map edge — announce it so the
+        # shortfall never has to be inferred (owner ruling).
+        if summary and clamped:
+            text = f"Crossed: {summary}. Edge"
+        elif summary:
+            text = f"Crossed: {summary}"
+        elif clamped:
+            text = "Edge"
+        else:
+            text = ""
+        if text:
+            log(f"[Cursor] {text}")
+            async_tts.speak(text)
+
     def patched_try_examine_tile(self, point):
         """Hook cursor movement for Look mode, spell targeting, deploy tile feedback.
         Uses point deduplication instead of timer threads — the game calls this
@@ -5636,6 +5912,12 @@ if _PyGameView is not None:
             if xy == _last_examine_xy[0]:
                 return  # Same tile as last call — skip duplicate
             _last_examine_xy[0] = xy
+
+            # Shift-move in progress: collect the step instead of announcing;
+            # _x4_finalize speaks landing + crossed summary once the move ends.
+            if _x4_move[0] is not None:
+                _x4_move[0]['points'].append(Level.Point(point.x, point.y))
+                return
 
             if getattr(self.game, 'deploying', False):
                 # Only announce the actual deploy cursor. The game also
@@ -7343,6 +7625,19 @@ if _PyGameView is not None:
         deploying = getattr(self.game, 'deploying', False)
         _game_ref[0] = self.game
 
+        # Fake-shift tracker: read the driver-reported shift state as of the
+        # PREVIOUS frame, then fold this frame's shift events into the
+        # tracker. The entry state + this batch's KEYUP ordering is the
+        # fake-shift signature (see _fake_shift_numpad_dirs).
+        _shift_entry = _phys_shift[0]
+        for _sevt in self.events:
+            if getattr(_sevt, 'key', None) in (pygame.K_LSHIFT, pygame.K_RSHIFT):
+                if _sevt.type == pygame.KEYDOWN:
+                    _phys_shift[0] = True
+                elif _sevt.type == pygame.KEYUP:
+                    _phys_shift[0] = False
+
+
         # Telemetry: lazy init_run on first entry; rotate realm file on level change.
         try:
             if _telemetry.ENABLED:
@@ -7687,6 +7982,23 @@ if _PyGameView is not None:
             for evt in self.events:
                 if evt.type != pygame.KEYDOWN:
                     continue
+                # LCtrl = speech cancel (control-means-silence, the deepest
+                # screen-reader convention). Handled ABOVE the modifier skip:
+                # the guard below continues on K_LCTRL, which made the old
+                # cancel branch in the dispatch chain unreachable dead code —
+                # masked by NVDA's native control-interrupt (the synth went
+                # quiet, but the mod-side HP cancel and batcher.clear never
+                # ran, so queued batch lines kept arriving). Early branch +
+                # continue: speech dies, scanner state survives (cancel
+                # mid-cycle must not break cycling), and the press composes
+                # with chord prefixes — cancel on press, chord on the letter,
+                # one cancel per physical press (no key repeat exists).
+                if evt.key == pygame.K_LCTRL:
+                    async_tts.cancel()
+                    _cancel_hp_announcement()
+                    batcher.clear()
+                    log("[Speech] Cancelled")
+                    continue
                 # Skip modifier-only keys — Shift/Alt/Ctrl fire their own KEYDOWN
                 # before the letter key.  Without this guard, pressing Shift+J would
                 # reset the enemy scanner on the Shift event, then rebuild from
@@ -7804,11 +8116,6 @@ if _PyGameView is not None:
                 elif _is_bind(self, _KB_LOS, evt.key, pygame.K_l):  # LoS summary (rides Show Line of Sight)
                     ref, lvl, qual = _get_scan_reference(self)
                     _query_los_summary(self, scan_level=lvl, ref_point=ref, qualifier=qual)
-                elif evt.key == pygame.K_LCTRL:
-                    async_tts.cancel()
-                    _cancel_hp_announcement()
-                    batcher.clear()
-                    log("[Speech] Cancelled")
                 elif evt.key == pygame.K_z:
                     # Repeat at current cursor position (don't add to history)
                     idx = async_tts._cursor
@@ -7875,29 +8182,112 @@ if _PyGameView is not None:
             _diag_trigger = keys[pygame.K_RCTRL] or (
                 keys[pygame.K_LCTRL] and (keys[pygame.K_LALT] or keys[pygame.K_RALT]))
             if _diag_trigger:
+                # Shift = 4-tile diagonal move (slice 2 parity fix: the game's
+                # own Shift handling covers numpad diagonals, but these arrow
+                # diagonals consume their events before the game sees them, so
+                # arrow-dependent players had a slower diagonal cursor).
+                _diag_x4 = bool(keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT])
                 for evt in self.events:
                     if evt.type == pygame.KEYDOWN and evt.key in _RCTRL_DIAG_MAP:
                         movedir = _RCTRL_DIAG_MAP[evt.key]
+                        _steps = 4 if _diag_x4 else 1
+                        if _diag_x4 and (self.cur_spell or (deploying and self.deploy_target)):
+                            _x4_move[0] = {'points': [], 'expected': _steps}
                         if self.cur_spell:
-                            new_target = Level.Point(
-                                self.cur_spell_target.x + movedir.x,
-                                self.cur_spell_target.y + movedir.y)
-                            if self.game.cur_level.is_point_in_bounds(new_target):
-                                self.cur_spell_target = new_target
-                                self.try_examine_tile(new_target)
+                            for _ in range(_steps):
+                                new_target = Level.Point(
+                                    self.cur_spell_target.x + movedir.x,
+                                    self.cur_spell_target.y + movedir.y)
+                                if self.game.cur_level.is_point_in_bounds(new_target):
+                                    self.cur_spell_target = new_target
+                                    self.try_examine_tile(new_target)
                         elif deploying and self.deploy_target:
-                            new_point = Level.Point(
-                                self.deploy_target.x + movedir.x,
-                                self.deploy_target.y + movedir.y)
-                            if self.game.next_level.is_point_in_bounds(new_point):
-                                self.deploy_target = new_point
-                                self.try_examine_tile(new_point)
+                            for _ in range(_steps):
+                                new_point = Level.Point(
+                                    self.deploy_target.x + movedir.x,
+                                    self.deploy_target.y + movedir.y)
+                                if self.game.next_level.is_point_in_bounds(new_point):
+                                    self.deploy_target = new_point
+                                    self.try_examine_tile(new_point)
                         else:
                             self.try_move(movedir)
                             self.cur_spell_target = None
+                        if _x4_move[0] is not None:
+                            _x4_finalize(self)
                         _diag_consumed.append(evt)
                 if _diag_consumed:
                     self.events = [e for e in self.events if e not in _diag_consumed]
+
+        # Fake-shift repair (slice 2 addendum): the driver strips Shift from
+        # NumLock-on numpad presses, so the game's own x4 check can never see
+        # the chord. Detect the stripped presses, consume them, and perform
+        # the four steps ourselves — same pattern and same landing+crossed
+        # voice as the RCtrl diagonals. Cursor contexts only: in normal play
+        # the game ignores Shift for player movement, so a stripped Shift
+        # changes nothing there.
+        if (self.can_execute_inputs()
+                and (self.cur_spell is not None
+                     or (deploying and getattr(self, 'deploy_target', None)))):
+            _fake_presses = _fake_shift_numpad_dirs(self, self.events, _shift_entry)
+            if _fake_presses:
+                log(f"[FakeShift] repaired {len(_fake_presses)} Shift+numpad press(es)")
+            _fake_consumed = []
+            for _fevt, _vec in _fake_presses:
+                movedir = Level.Point(_vec[0], _vec[1])
+                _x4_move[0] = {'points': [], 'expected': 4}
+                if self.cur_spell:
+                    for _ in range(4):
+                        new_target = Level.Point(
+                            self.cur_spell_target.x + movedir.x,
+                            self.cur_spell_target.y + movedir.y)
+                        if self.game.cur_level.is_point_in_bounds(new_target):
+                            self.cur_spell_target = new_target
+                            self.try_examine_tile(new_target)
+                elif deploying and self.deploy_target:
+                    for _ in range(4):
+                        new_point = Level.Point(
+                            self.deploy_target.x + movedir.x,
+                            self.deploy_target.y + movedir.y)
+                        if self.game.next_level.is_point_in_bounds(new_point):
+                            self.deploy_target = new_point
+                            self.try_examine_tile(new_point)
+                _x4_finalize(self)
+                _fake_consumed.append(_fevt)
+            if _fake_consumed:
+                self.events = [e for e in self.events if e not in _fake_consumed]
+
+        # [ChordProbe] two-arrow diagonal chording feel test (Ctrl rethink).
+        # Runs after the RCtrl diag block (RCtrl gestures keep priority while
+        # both idioms coexist for the probe) and before the x4 arming, so a
+        # released single press still arms the Shift collector this frame.
+        try:
+            _chord_probe_process(self, deploying)
+        except Exception as _ce:
+            log(f"[ChordProbe] error: {_ce}")
+
+        # Shift-move (x4) landing summary: arm the collector when this frame
+        # carries Shift + a directional press in a cursor context. The game's
+        # handler steps the cursor per repeat (RiftWizard3.py:2986-3001,
+        # movedir is per-KEYDOWN through the directional binds, arrows and
+        # numpad alike); patched_try_examine_tile collects the steps instead
+        # of announcing them, and _x4_finalize below speaks landing + crossed
+        # summary once the handler has run.
+        if (_x4_move[0] is None
+                and (self.cur_spell is not None
+                     or (deploying and getattr(self, 'deploy_target', None)))
+                and self.can_execute_inputs()):
+            _keys_now = pygame.key.get_pressed()
+            if _keys_now[pygame.K_LSHIFT] or _keys_now[pygame.K_RSHIFT]:
+                _kb_now = getattr(self, 'key_binds', None)
+                _dir_presses = sum(
+                    1 for evt in self.events
+                    if evt.type == pygame.KEYDOWN and any(
+                        evt.key in _bound_keys(_kb_now, d, fb)
+                        for d, fb, _v in _KB_DIRS))
+                if _dir_presses:
+                    # expected steps: 4 per press (two presses can share one
+                    # 33ms event batch) — shortfall means the map edge.
+                    _x4_move[0] = {'points': [], 'expected': 4 * _dir_presses}
 
         # Capture cursor AFTER our hotkeys, BEFORE game's native input (arrows/mouse)
         _pre_native_pos = None
@@ -7917,7 +8307,16 @@ if _PyGameView is not None:
         # Guard: enter_reminisce() sets self.game = None during gameover transition.
         # All post-processing below requires a valid game reference.
         if self.game is None:
+            _x4_move[0] = None  # never leak an armed collector across frames
             return
+
+        # Shift-move finalize: the game's handler has stepped the cursor and
+        # our examine hook collected the tiles — speak landing + summary now.
+        # (Armed-but-empty happens when the press couldn't move the cursor at
+        # all, e.g. hard against the map edge: finalize stays silent, matching
+        # the game's own silence there.)
+        if _x4_move[0] is not None:
+            _x4_finalize(self)
 
         # Deploy: reset cycle if cursor moved via arrows/mouse (detected by
         # position change during _original_process_level_input, not our cycle jump)
@@ -8000,8 +8399,9 @@ if _PyGameView is not None:
             log(f"[AutoPickup] arm error: {e}")
     _PyGameView.autopickup = patched_autopickup
 
-    log("  Custom hotkeys installed (F=Vitals, E=Enemies, Q=Landmarks, G=Charges, "
-        "D=Detail, T=Threat, B=Space, LCtrl=Cancel, Z=Repeat, [/]=History, Deploy:1-5)")
+    log("  Custom hotkeys installed (F=Vitals, I=Enemies, U=Allies, O=Landmarks, "
+        "N=Spawners, X=Hazards, G=Charges, D=Detail, T=Threat, L=LoS, B=Space, "
+        "LCtrl=Cancel, Z=Repeat, [/]=History, Deploy:1-5)")
 
     # ---- Deploy Confirm Hook ----
 

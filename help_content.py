@@ -48,6 +48,8 @@ _SCAN_SURROUNDINGS = """
 
 _MOVEMENT_SPEECH = """
 [Right Ctrl + Arrow:shields]: Diagonal movement. Up is northwest, Right is northeast, Down is southeast, Left is southwest. Left Ctrl+Alt+Arrows also works, for AltGr keyboards
+[Shift + Arrow:shields]: Move the cursor 4 tiles. Speaks the landing tile, then a short summary of everything crossed, floor included. Says Edge when the map edge cuts the move short. Works with Right Ctrl for a 4 tile diagonal
+[Numpad:shields]: Keep NumLock on. Bare numpad moves and diagonals work; with NumLock off the numpad belongs to your screen reader's review keys, which return when you leave the game. Shift+numpad 4 tile moves only work without NVDA running, because NVDA swallows that chord below the game; use Shift+Arrow and Shift+Right Ctrl+Arrow instead, which always work
 [Shift + Tab:shields]: Previous target while targeting, walking, or looking. A fresh press starts from the far end of the list, so in walk mode it jumps straight to the rifts. Needs the Steam overlay turned off for this game, or Steam swallows the keypress. Steps are in the read me
 [Left Ctrl:shields]: Cancel speech
 [Z:shields]: Repeat the current line
