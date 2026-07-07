@@ -5514,6 +5514,8 @@ if _PyGameView is not None:
     _original_try_examine_tile = _PyGameView.try_examine_tile
     _aoe_announced_state = [False]  # what we last told the user about AoE
     _last_examine_xy = [None]  # (x, y) of last announced tile — for dedup
+    _route_tile_suppress = [False]  # Suppress Look/targeting tile announce during a routed jump
+                                    # (the scan line is the utterance; deploy has its own flag)
 
     def _own_aura_clauses(view, point):
         """Look-mode: name the player's own auras covering this tile (owner
@@ -5541,6 +5543,9 @@ if _PyGameView is not None:
     def _announce_look_tile(view, point):
         """Announce full tile contents in Look mode (V key). Main thread only.
         Portal tiles use speak_batched so each segment is navigable via [/]."""
+        if _route_tile_suppress[0]:
+            _route_tile_suppress[0] = False
+            return
         try:
             level = view.game.cur_level
             tile = level.tiles[point.x][point.y] if level else None
@@ -5588,6 +5593,9 @@ if _PyGameView is not None:
 
     def _announce_target_tile(view, point):
         """Announce brief tile + AoE warning during spell targeting. Main thread only."""
+        if _route_tile_suppress[0]:
+            _route_tile_suppress[0] = False
+            return
         try:
             spell = getattr(view, 'cur_spell', None)
             if spell is None:
@@ -6203,10 +6211,100 @@ if _PyGameView is not None:
         except Exception as e:
             log(f"[Allies] Overview error: {e}")
 
+    # ---- Cursor routing (cursor-tool pass, slice 5) ----
+    # Scan and pin-cycle presses ROUTE the cursor onto each result wherever
+    # the cursor means A PLACE: Look mode, deploy, and routing-eligible
+    # spell targeting. Everywhere else the cursor means AN AIM and scans
+    # stay informational (J is the deliberate jump there).
+
+    # Per-spell routing overrides: convention breakers by class name.
+    # True = always route, False = never route. The predicate below covers
+    # the spell zoo; entries here are the named exceptions the design chose
+    # over a cleverer rule (CURSOR_TOOL_UX_PASS.md Layer 5; entries from the
+    # 2026-07-06 skeptic pass, source-verified).
+    _ROUTING_OVERRIDES = {
+        'BlackHoleSpell': False,   # target is a gravity center enemies get pulled
+                                   # toward (Spells.py:16939) — the caster never
+                                   # moves; no radius attr, so the extent test
+                                   # can't catch it
+        'SummonLeghead': False,    # Translocation-tagged Conjuration summon —
+                                   # the target is tuned minion placement
+        'SummonWolfSpell': False,  # Fleet Footed upgrade grafts Translocation
+                                   # onto the live tags (Level.py:1398) — still
+                                   # a summon placement
+        'HeavenlyIdol': False,     # Lonely Idol upgrade, same tag-graft shape
+    }
+
+    def _routes_targeting(spell):
+        """The routing predicate AND the 'From destination' qualifier's gate
+        — one predicate, so they can never disagree about what the cursor
+        means. Route iff Translocation-tagged with no placement extent and a
+        real destination cursor. Extent = the radius ATTRIBUTE — the game's
+        own gate (get_impacted_tiles, Level.py:724): get_stat('radius') is
+        contaminated by equipment/buff radius bonuses (Geometer's Staff adds
+        global radius 2 while the game still draws no AoE ring for Blink),
+        and upgrade-purchased radius setattrs the attribute (Level.py:1622),
+        so hasattr tracks purchases and stays clean under gear. Range-0 /
+        self-target spells (Lightning Form, Word spells) have no destination
+        cursor at all."""
+        if spell is None:
+            return False
+        override = _ROUTING_OVERRIDES.get(type(spell).__name__)
+        if override is not None:
+            return override
+        if Level.Tags.Translocation not in getattr(spell, 'tags', []):
+            return False
+        if hasattr(spell, 'radius'):
+            return False
+        if getattr(spell, 'self_target', False) or not getattr(spell, 'range', 0):
+            return False
+        return True
+
+    def _route_cursor_to(view, tx, ty):
+        """Park the cursor on the spoken result in a routed context. The scan
+        line is the utterance: the routed tile announce is suppressed, but
+        try_examine_tile still runs so examine_target lands on the result —
+        T and D answer for it immediately. Returns True when the cursor
+        moved."""
+        try:
+            game = view.game
+            point = Level.Point(tx, ty)
+            if getattr(game, 'deploying', False) and getattr(view, 'deploy_target', None):
+                level = game.next_level
+                if level is None or not level.is_point_in_bounds(point):
+                    return False
+                view.deploy_target = point
+                _last_examine_xy[0] = None
+                _deploy_tile_suppress[0] = True
+                view.try_examine_tile(point)
+                log(f"[Route] Deploy cursor to ({tx},{ty})")
+                return True
+            spell = getattr(view, 'cur_spell', None)
+            if spell is None:
+                return False
+            if type(spell).__name__ == 'LookSpell' or _routes_targeting(spell):
+                level = game.cur_level
+                if level is None or not level.is_point_in_bounds(point):
+                    return False
+                view.cur_spell_target = point
+                _last_examine_xy[0] = None
+                _route_tile_suppress[0] = True
+                view.try_examine_tile(point)
+                log(f"[Route] Cursor to ({tx},{ty})")
+                return True
+            return False
+        except Exception as e:
+            # Disarm the suppress flag: a failed jump must not eat the next
+            # legitimate tile announce.
+            _route_tile_suppress[0] = False
+            _deploy_tile_suppress[0] = False
+            log(f"[Route] Error: {e}")
+            return False
+
     def _get_scan_reference(view):
         """Return (ref_point, scan_level, qualifier) for the current game state.
-        qualifier is None (normal/deploy), "destination" (teleport),
-        "target" (non-teleport spell), or "cursor" (look mode).
+        qualifier is None (normal/deploy), "destination" (routing-eligible
+        teleport), "target" (other spell), or "cursor" (look mode).
         """
         game = view.game
         # Deploy: cursor-relative on next level, no qualifier (context is obvious)
@@ -6218,8 +6316,10 @@ if _PyGameView is not None:
             # Look mode — LookSpell pseudo-spell
             if type(spell).__name__ == 'LookSpell':
                 return (target, game.cur_level, "cursor")
-            # Translocation spell — arriving at target
-            if Level.Tags.Translocation in getattr(spell, 'tags', []):
+            # "From destination" rides the ROUTING predicate, not the bare
+            # Translocation tag — the tag alone mislabeled Disperse's aim
+            # center as a destination (slice 5 qualifier migration).
+            if _routes_targeting(spell):
                 return (target, game.cur_level, "destination")
             # Other spell targeting
             return (target, game.cur_level, "target")
@@ -6243,6 +6343,7 @@ if _PyGameView is not None:
                 ref_point = Level.Point(player.x, player.y)
             _qp = f"From {qualifier}. " if qualifier else ""
 
+            ref_point = _cycle_ref(_enemy_scanner, ref_point)
             rebuilt = _enemy_scanner.needs_rebuild(ref_point)
             if rebuilt:
                 enemies = []
@@ -6304,6 +6405,7 @@ if _PyGameView is not None:
                 pass
 
             async_tts.speak(text)
+            _route_cursor_to(view, unit.x, unit.y)
         except Exception as e:
             log(f"[Enemies] Error: {e}")
 
@@ -6323,6 +6425,7 @@ if _PyGameView is not None:
                 ref_point = Level.Point(player.x, player.y)
             _qp = f"From {qualifier}. " if qualifier else ""
 
+            ref_point = _cycle_ref(_ally_scanner, ref_point)
             rebuilt = _ally_scanner.needs_rebuild(ref_point)
             if rebuilt:
                 allies = []
@@ -6373,6 +6476,7 @@ if _PyGameView is not None:
                 log(f"[Allies] {_log_ctx()} {_qp}{log_entry}. {position}")
 
             async_tts.speak(text)
+            _route_cursor_to(view, unit.x, unit.y)
         except Exception as e:
             log(f"[Allies] Error: {e}")
 
@@ -6392,6 +6496,7 @@ if _PyGameView is not None:
                 ref_point = Level.Point(player.x, player.y)
             _qp = f"From {qualifier}. " if qualifier else ""
 
+            ref_point = _cycle_ref(_spawner_scanner, ref_point)
             rebuilt = _spawner_scanner.needs_rebuild(ref_point)
             if rebuilt:
                 spawners = []
@@ -6442,6 +6547,7 @@ if _PyGameView is not None:
                 log(f"[Spawners] {_log_ctx()} {_qp}{log_entry}. {position}")
 
             async_tts.speak(text)
+            _route_cursor_to(view, unit.x, unit.y)
         except Exception as e:
             log(f"[Spawners] Error: {e}")
 
@@ -6517,6 +6623,7 @@ if _PyGameView is not None:
                 ref_point = Level.Point(player.x, player.y)
             _qp = f"From {qualifier}. " if qualifier else ""
 
+            ref_point = _cycle_ref(_landmark_scanner, ref_point)
             rebuilt = _landmark_scanner.needs_rebuild(ref_point)
             if rebuilt:
                 items = []  # (name, dist, offset, tx, ty)
@@ -6580,6 +6687,7 @@ if _PyGameView is not None:
                 log(f"[Landmarks] {_log_ctx()} {_qp}{log_entry}. {position}")
 
             async_tts.speak(text)
+            _route_cursor_to(view, tx, ty)
         except Exception as e:
             log(f"[Landmarks] Error: {e}")
 
@@ -7204,6 +7312,17 @@ if _PyGameView is not None:
     _pin_scanner = CycleScanner("pins")
     _pin_block_starts = [set()]     # Block-start indices for the live pin cycle
 
+    def _cycle_ref(scanner, ref_point):
+        """Cycle-ref freeze (slice 5): a live cycle keeps the reference it
+        started from; continuation presses walk the origin-ordered list even
+        though routing moved the cursor (and with it, attention). Without
+        this, routing + attention-relativity cycles the nearest result
+        forever. Any non-scan key resets the cycle (existing machinery), so
+        the next fresh press re-derives from current attention."""
+        if scanner.items and scanner._ref is not None:
+            return scanner._ref
+        return ref_point
+
     # ---- Unified pin system (cursor-tool pass, slice 4) ----
     # ONE pin list per level object, cycled on K in category blocks (helpers.
     # order_pins_in_blocks: enemies, allies, landmarks, bookmarks — no
@@ -7476,6 +7595,7 @@ if _PyGameView is not None:
                 return
             _qp = f"From {qualifier}. " if qualifier else ""
 
+            ref = _cycle_ref(_pin_scanner, ref)
             rebuilt = _pin_scanner.needs_rebuild(ref)
             if rebuilt:
                 tagged = []
@@ -7537,8 +7657,123 @@ if _PyGameView is not None:
                 text = f"{_qp}{entry}. {position}"
             log(f"[Pin] {_log_ctx()} {text}")
             async_tts.speak(text)
+            _route_cursor_to(view, px, py)
         except Exception as e:
             log(f"[Pin] Cycle error: {e}")
+
+    # ---- J: the bridge (cursor-tool pass, slice 5) ----
+
+    _jump_back_pos = [None]   # Cursor position before the last J jump (one-slot breadcrumb)
+
+    def _jump_to_last_spoken(view):
+        """J: jump the cursor to the last spoken result. From normal play,
+        enters Look at the result — the same choose_spell(LookSpell) call V
+        makes. In aim targeting J is the DELIBERATE aim jump (routing is off
+        there). Rulings (#242): nothing spoken yet = 'Nothing scanned', no
+        move; target died/collected since it spoke = 'gone', NO move (never
+        assert stale truth); target moved = follow the object (identity is
+        the object, not its old coordinates). The landing announce fires
+        unsuppressed — J happens away from the scan line, so the landing IS
+        its feedback."""
+        try:
+            if not view.can_execute_inputs():
+                return
+            game = view.game
+            deploying = getattr(game, 'deploying', False)
+            level = game.next_level if deploying else game.cur_level
+            if level is None:
+                return
+            target = _last_scanned_target[0]
+            if target is None:
+                async_tts.speak("Nothing scanned")
+                log("[Jump] J with nothing scanned")
+                return
+            if isinstance(target, tuple):
+                name, tx, ty = target
+                try:
+                    alive = level.tiles[tx][ty].prop is not None
+                except Exception:
+                    alive = False
+                if not alive:
+                    async_tts.speak(f"{name} gone")
+                    log(f"[Jump] Target gone: {name}")
+                    return
+            else:
+                if target not in level.units:
+                    async_tts.speak(f"{_name(target)} gone")
+                    log(f"[Jump] Target gone: {_name(target)}")
+                    return
+                tx, ty = target.x, target.y
+            point = Level.Point(tx, ty)
+            if not level.is_point_in_bounds(point):
+                return
+            if deploying:
+                if getattr(view, 'deploy_target', None) is None:
+                    return
+                _jump_back_pos[0] = Level.Point(view.deploy_target.x, view.deploy_target.y)
+                view.deploy_target = point
+                _last_examine_xy[0] = None
+                view.try_examine_tile(point)
+                log(f"[Jump] Deploy cursor to ({tx},{ty})")
+                return
+            if getattr(view, 'cur_spell', None) is None:
+                # Bridge in from normal play: enter Look at the result.
+                look_cls = getattr(_main, 'LookSpell', None)
+                if look_cls is None or game.p1 is None:
+                    return
+                spell = look_cls()
+                spell.caster = game.p1
+                view.choose_spell(spell)
+                if getattr(view, 'cur_spell', None) is None:
+                    return  # choose_spell aborted (deploy guard, costs)
+            prev = getattr(view, 'cur_spell_target', None)
+            _jump_back_pos[0] = Level.Point(prev.x, prev.y) if prev else None
+            view.cur_spell_target = point
+            _last_examine_xy[0] = None
+            view.try_examine_tile(point)
+            log(f"[Jump] Cursor to ({tx},{ty})")
+        except Exception as e:
+            log(f"[Jump] Error: {e}")
+
+    def _jump_back(view):
+        """Shift+J: one-slot bounce back to where the cursor stood before the
+        last J (the breadcrumb's core value; no full trail). Swaps, so a
+        second Shift+J returns. Only meaningful while a cursor exists."""
+        try:
+            if not view.can_execute_inputs():
+                return
+            game = view.game
+            prev = _jump_back_pos[0]
+            if prev is None:
+                async_tts.speak("Nowhere to jump back")
+                log("[Jump] Shift+J with no stored position")
+                return
+            deploying = getattr(game, 'deploying', False)
+            if deploying and getattr(view, 'deploy_target', None) is not None:
+                level = game.next_level
+                if level is None or not level.is_point_in_bounds(prev):
+                    return
+                _jump_back_pos[0] = Level.Point(view.deploy_target.x, view.deploy_target.y)
+                view.deploy_target = prev
+                _last_examine_xy[0] = None
+                view.try_examine_tile(prev)
+                log(f"[Jump] Deploy bounce to ({prev.x},{prev.y})")
+                return
+            if getattr(view, 'cur_spell', None) is None or getattr(view, 'cur_spell_target', None) is None:
+                async_tts.speak("Nowhere to jump back")
+                log("[Jump] Shift+J outside a cursor context")
+                return
+            level = game.cur_level
+            if level is None or not level.is_point_in_bounds(prev):
+                return
+            cur = view.cur_spell_target
+            _jump_back_pos[0] = Level.Point(cur.x, cur.y)
+            view.cur_spell_target = prev
+            _last_examine_xy[0] = None
+            view.try_examine_tile(prev)
+            log(f"[Jump] Bounce to ({prev.x},{prev.y})")
+        except Exception as e:
+            log(f"[Jump] Back error: {e}")
 
     # ---- Pin pathfinding ----
     # On a fresh pin: announce the full compressed path. Each turn, the
@@ -8522,6 +8757,16 @@ if _PyGameView is not None:
                         _query_pins(self,
                                     reverse=bool(mods & pygame.KMOD_SHIFT),
                                     block_skip=bool(mods & pygame.KMOD_CTRL))
+                elif evt.key == pygame.K_j:
+                    # J = the bridge (slice 5): jump the cursor to the last
+                    # spoken result — enters Look from normal play, deliberate
+                    # aim jump while targeting. Shift+J bounces one slot back.
+                    # Cheats-enabled J (kill-all) overlap accepted, same call
+                    # as K/N/O.
+                    if pygame.key.get_mods() & pygame.KMOD_SHIFT:
+                        _jump_back(self)
+                    else:
+                        _jump_to_last_spoken(self)
                 elif _is_bind(self, _KB_LOS, evt.key, pygame.K_l):  # LoS summary (rides Show Line of Sight)
                     ref, lvl, qual = _get_scan_reference(self)
                     _query_los_summary(self, scan_level=lvl, ref_point=ref, qualifier=qual)

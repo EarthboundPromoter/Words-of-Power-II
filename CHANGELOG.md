@@ -43,8 +43,26 @@ an early work-in-progress RW3 port — expect frequent changes.
   the *focused* pin: it carries the per-turn guidance line ("North to Wolf,
   12 HP."), and Shift+P re-announces its full path. New setting
   `pin_speak_all` (default off) speaks every pin's update line each turn.
+- **Scans route the cursor.** In Look mode, deploy, and pure-teleport
+  targeting (Blink and kin — Translocation spells with no area to aim), every
+  scan and pin-cycle press also parks the cursor on the result it just spoke:
+  the scan line is the announcement, T and D answer for that tile
+  immediately, and Enter acts on it — the missing mouse-flick. A cycle keeps
+  measuring from where it started, so repeated presses walk outward instead
+  of chasing the cursor. While aiming any other spell the cursor is your
+  tuned aim and scans leave it alone.
+- **J: jump to the last spoken result.** From normal play, J opens Look mode
+  right on the last thing a scan or pin cycle spoke; while aiming, J moves
+  the aim there deliberately (any spell). If it died or was collected since
+  it spoke, J says "gone" and stays put — it never asserts stale truth.
+  Shift+J bounces back to where the cursor was before the jump. J and Y had
+  been freed by the scan-key move; J is now the bridge.
 
 ### Changed
+- **The "From destination" scan qualifier now follows the routing rule** —
+  spoken only for teleports whose target is truly a destination. It used to
+  key on the bare Translocation tag, which mislabeled Disperse's area aim as
+  a destination.
 - **Alt+scan marking is now the pin toggle.** The one-mark-at-a-time limit is
   gone; Alt + I / N / O / U pin without replacing what you marked before, and
   scan lines say "pinned" where they said "marked". If you relied on marking

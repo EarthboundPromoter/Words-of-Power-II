@@ -28,7 +28,7 @@ def _by_title():
 
 def test_sections_shape():
     secs = _sections()
-    assert len(secs) == 6
+    assert len(secs) == 7
     for title, bodies in secs:
         assert isinstance(title, str) and title
         assert isinstance(bodies, list) and len(bodies) == 1
@@ -79,20 +79,21 @@ def _as_pages(sections):
     return pages
 
 
-def test_scan_creatures_yields_heading_plus_nine_nodes():
+def test_scan_creatures_yields_heading_plus_six_nodes():
     # Slice 1 of the cursor-tool pass reshaped this page (intro line,
-    # scans rehomed onto the highlight keys); slice 4 grew it by two: the
-    # K pin cycle and the Alt+K universal toggle, with the Alt+scan line
-    # reworded as the synonym.
+    # scans rehomed onto the highlight keys); slice 5 moved the pin/bridge
+    # keys to their own page (the 10-line speech budget) and grew the intro
+    # with the routing sentence.
     model = build_how_to_play_model(_as_pages(_sections()))
     creatures = model[0]
     assert creatures.nodes[0].text == 'Words Of Power: Scan Creatures'
     assert creatures.nodes[0].level == 0
     body = creatures.nodes[1:]
-    assert len(body) == 9
+    assert len(body) == 6
     assert body[0].text.startswith(
         "The scan keys are the game's own highlight keys"
     )
+    assert 'parks the cursor' in body[0].text            # the routing headline
     assert body[1].text == (
         'F: Health, shields, SP, and active buffs and debuffs. '
         'Shift+F gives an ally overview'
@@ -100,11 +101,20 @@ def test_scan_creatures_yields_heading_plus_nine_nodes():
     assert body[2].text.startswith('I: Enemy scan.')
     assert body[4].text.startswith('U: Ally scan.')
     assert body[5].text.startswith('O: Landmark scan.')
-    assert body[6].text.startswith('K: Pin cycle.')
-    assert body[7].text.startswith('Alt + K: Pin or unpin the last spoken target.')
-    assert body[8].text == (
-        'Alt + I/N/O/U: The same pin toggle, straight off a scan'
-    )
+
+
+def test_pins_page_yields_heading_plus_six_nodes():
+    model = build_how_to_play_model(_as_pages(_sections()))
+    pins = model[1]
+    assert pins.nodes[0].text == 'Words Of Power: Pins And Cursor Jumps'
+    body = pins.nodes[1:]
+    assert len(body) == 6
+    assert body[0].text.startswith('Pins are your cross-category shortlist')
+    assert body[1].text.startswith('K: Pin cycle.')
+    assert body[2].text.startswith('Alt + K: Pin or unpin the last spoken target.')
+    assert body[3].text == 'Alt + I/N/O/U: The same pin toggle, straight off a scan'
+    assert body[4].text.startswith('J: Jump the cursor to the last spoken')
+    assert body[5].text.startswith('Shift + J: Jump back')
 
 
 def test_no_appended_page_accidentally_triggers_numpad_fold():
@@ -116,7 +126,7 @@ def test_no_appended_page_accidentally_triggers_numpad_fold():
 
 def test_tips_page_is_plain_prose_nine_entries():
     model = build_how_to_play_model(_as_pages(_sections()))
-    tips = model[5]
+    tips = model[6]
     assert tips.nodes[0].text == 'Words Of Power: Tips'
     # Nine prose tips, each its own node.
     assert len(tips.nodes) == 1 + 9
@@ -126,6 +136,6 @@ def test_tips_page_is_plain_prose_nine_entries():
 
 def test_deploy_explanation_is_first_body_node():
     model = build_how_to_play_model(_as_pages(_sections()))
-    deploy = model[4]
+    deploy = model[5]
     assert deploy.nodes[0].text == 'Words Of Power: Deploy'
     assert deploy.nodes[1].text.startswith('Deploy is the start-of-level placement phase')

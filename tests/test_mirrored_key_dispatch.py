@@ -91,9 +91,15 @@ def test_mirrored_keys_dispatch_by_bind_not_keycode():
     for bind_id in ('_KB_HL_ENEMIES', '_KB_HL_ALLIES', '_KB_HL_OBJECTS',
                     '_KB_LOS', '_KB_THREAT'):
         assert f"_is_bind(self, {bind_id}, evt.key" in loop, bind_id
-    # The old hardcoded scan keycodes must be gone from dispatch.
-    for dead in ('== pygame.K_j', '== pygame.K_y', '== pygame.K_q'):
+    # The old hardcoded scan keycodes must be gone from dispatch. J left the
+    # dead list in slice 5 — it is the bridge now (jump to last spoken),
+    # its planned tenant all along — but it must never again be a scan.
+    for dead in ('== pygame.K_y', '== pygame.K_q'):
         assert dead not in loop, dead
+    j_branch = loop[loop.index('== pygame.K_j'):]
+    j_branch = j_branch[:j_branch.index('\n                elif ')]
+    assert '_jump_to_last_spoken' in j_branch
+    assert '_query' not in j_branch
 
 
 def test_scan_resets_follow_the_same_binds():

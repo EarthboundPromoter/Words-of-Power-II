@@ -76,6 +76,7 @@ _ns = {
     '_describe_portal_chunks': lambda p, v: ["Rift", "Contents: Imps"],
     '_get_on_death_text': lambda u: None,
     '_own_aura_clauses': lambda v, p: [],
+    '_route_tile_suppress': [False],   # slice 5: routed jumps mute the announce
 }
 # module-level text plumbing (read_text + _fmt_of + _desc_text, 0-indent)
 exec(_extract("def read_text(value, fmt=None):",

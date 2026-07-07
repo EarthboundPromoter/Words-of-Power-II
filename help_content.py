@@ -27,15 +27,21 @@ ASCII is guaranteed to render. Meaning is unchanged.
 # --- Page bodies (native-markup raw text; leading newline matches native) ---
 
 _SCAN_CREATURES = """
-The scan keys are the game's own highlight keys: the key that lights a category on screen is the key that speaks it. Tap to scan; hold to show the tiles.
+The scan keys are the game's own highlight keys: the key that lights a category on screen is the key that speaks it. Tap to scan; hold to show the tiles. In look mode, deploy, and pure teleport targeting, every scan or pin press also parks the cursor on what it spoke, so T, D, and Enter act on it directly; while aiming any other spell, scans leave your aim alone.
 [F:shields]: Health, shields, SP, and active buffs and debuffs. Shift+F gives an ally overview
 [I:shields]: Enemy scan. Repeat to cycle, nearest first; Shift reverses
 [N:shields]: Spawner scan. Repeat to cycle, nearest first; Shift reverses
 [U:shields]: Ally scan. Repeat to cycle, nearest first; Shift reverses
 [O:shields]: Landmark scan. Rifts, shops, shrines, crafting components, memory orbs, and ruby hearts. Repeat to cycle, nearest first; Shift reverses
+"""
+
+_PINS_CURSOR = """
+Pins are your cross-category shortlist: any scan result or tile, remembered, tracked each turn, and cycled on one key.
 [K:shields]: Pin cycle. Your pinned targets in blocks: enemies, allies, landmarks, bookmarks; nearest first within each block. Repeat to cycle; Shift reverses; Ctrl+K jumps block to block
 [Alt + K:shields]: Pin or unpin the last spoken target. With nothing spoken it bookmarks the tile you're on or looking at. The newest pin is the focused one: it speaks a step toward it each turn, and every pin announces when it dies or disappears
 [Alt + I/N/O/U:shields]: The same pin toggle, straight off a scan
+[J:shields]: Jump the cursor to the last spoken scan or pin result. From normal play it opens look mode on it; while aiming a spell it moves the aim. Says gone, and stays put, if the target died since it spoke
+[Shift + J:shields]: Jump back to where the cursor was before the last jump
 """
 
 _SCAN_SURROUNDINGS = """
@@ -93,6 +99,7 @@ Each action passes a turn, and every enemy and effect advances with it; movement
 # Title, body. Titles use the native ALL-CAPS, trailing-colon style.
 _SECTIONS = [
     ("WORDS OF POWER: SCAN CREATURES:", _SCAN_CREATURES),
+    ("WORDS OF POWER: PINS AND CURSOR JUMPS:", _PINS_CURSOR),
     ("WORDS OF POWER: SCAN SURROUNDINGS:", _SCAN_SURROUNDINGS),
     ("WORDS OF POWER: MOVEMENT, SPEECH AND HELP:", _MOVEMENT_SPEECH),
     ("WORDS OF POWER: SHOPS AND CRAFTING:", _SHOPS_CRAFTING),
