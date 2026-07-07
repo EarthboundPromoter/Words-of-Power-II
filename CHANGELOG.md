@@ -19,12 +19,18 @@ an early work-in-progress RW3 port — expect frequent changes.
 - New setting `speak_pickup_effects` (default true): set false to trim Ruby Heart
   and Memory Orb cursor reads to name-only. Walk-on shrines always speak their
   effect.
-- **Shift + Right Ctrl + arrow: 4-tile diagonal cursor move.** Closes a parity
-  gap — the game's own Shift handling covers numpad diagonals, but the mod's
-  arrow diagonals only ever stepped one tile, so arrow-dependent players had a
-  slower diagonal cursor than the game intends anyone to have.
+- **Two-arrow diagonal chording.** Press two orthogonal arrows as one gesture —
+  Up+Right is northeast — for a single diagonal step; add Shift for the 4-tile
+  diagonal. No modifier, both hands or one, and it follows your movement
+  rebinds. A lone press still steps normally (it waits one imperceptible frame
+  for a partner). Held arrows keep the game's native auto-walk untouched.
 
 ### Changed
+- **Right Ctrl no longer means diagonal — Ctrl now means one thing, either
+  side.** The RCtrl+arrow diagonal and its AltGr synonym are retired, replaced
+  by two-arrow chording; the mod never distinguishes left from right Ctrl
+  again. Bare Ctrl (either one) cancels speech; Ctrl chords are reserved for
+  the coming cursor jump. Hard switch, no legacy setting.
 - **Shift + arrow now speaks the landing tile plus a short "Crossed:" summary**
   of everything the cursor skimmed past — units, props, clouds, walls, chasms,
   and floor, grouped with counts ("Crossed: 2 floors, web") — instead of
@@ -52,15 +58,15 @@ an early work-in-progress RW3 port — expect frequent changes.
   performs the 4-tile move itself, with the same landing-plus-crossed voice.
   KNOWN LIMIT, verified by event capture: with NVDA running, NVDA's keyboard
   hook consumes the numpad keypress outright and nothing reaches the game to
-  repair — use Shift+arrow (straight) and Shift+RCtrl+arrow (diagonal), which
-  are immune. NumLock stays on either way; NVDA's NumLock-off review keys are
+  repair — use the arrow gestures (Shift+arrow, Shift+pair), which are
+  immune. NumLock stays on either way; NVDA's NumLock-off review keys are
   untouched.
-- **Left Ctrl speech cancel actually works now.** A modifier guard swallowed
-  the press before the cancel branch could ever run — dead code since it
-  shipped, masked by NVDA's own control-interrupt: the synth went quiet, but
-  the mod's queued lines kept arriving afterward. Cancel now also clears the
-  mod's speech queue and pending HP announcements, and scan cycling survives
-  a mid-cycle cancel.
+- **Ctrl speech cancel actually works now — and either Ctrl does it.** A
+  modifier guard swallowed the press before the cancel branch could ever run —
+  dead code since it shipped, masked by NVDA's own control-interrupt: the
+  synth went quiet, but the mod's queued lines kept arriving afterward. Cancel
+  now also clears the mod's speech queue and pending HP announcements, and
+  scan cycling survives a mid-cycle cancel.
 - Walk-on props (Ruby Heart, Memory Orb, and the three walk-on shrines) now read
   their description in Look mode and the targeting brief, matching the game's
   examine panel, which shows it on mere cursor-over. Reported by Neurrone.

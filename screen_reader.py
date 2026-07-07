@@ -5685,27 +5685,38 @@ if _PyGameView is not None:
         _pg_keybind.K_KP4, _pg_keybind.K_KP6, _pg_keybind.K_KP7,
         _pg_keybind.K_KP8, _pg_keybind.K_KP9))
 
-    # ---- [ChordProbe] two-arrow diagonal chording (Ctrl-rethink probe) ----
-    # PROBE (2026-07-06): the owner is evaluating Scheme two of the Ctrl
-    # rethink — Ctrl means jump only, side-agnostic, and diagonals become
-    # modifier-free two-arrow chords (Up+Right = NE). A real arrow press is
-    # withheld for ~one frame awaiting an orthogonal partner: pair -> one
-    # diagonal step (Shift on the pair -> diagonal x4 via the collector); no
-    # partner -> the press releases to the game a frame late (~33ms,
-    # sub-perceptual). The game's own hand-rolled 20Hz autowalk repeats
+    # ---- Two-arrow diagonal chording (Ctrl-idiom conversion) ----
+    # Owner-ruled 2026-07-06 after a logged feel test: diagonals are
+    # modifier-free two-arrow chords (Up+Right = NE), replacing the retired
+    # RCtrl gestures; Ctrl belongs to jump + cancel, side-agnostic. A real
+    # orthogonal-direction press is withheld for ~one frame awaiting an
+    # orthogonal partner: pair -> one diagonal step (Shift on the pair ->
+    # diagonal x4 via the collector); no partner -> the press releases to
+    # the game a frame late (~33ms, sub-perceptual; the feel-test log showed
+    # deliberate chords pairing at 0-37ms and sequential rolls never
+    # false-firing). The game's hand-rolled 20Hz autowalk repeats
     # (RiftWizard3.py:10336-10343) are classified out by edge-tracking and
-    # pass through unbuffered — except when BOTH arrows of an orthogonal pair
-    # are held, where their repeats collapse into true diagonal autowalk
-    # (the game's accidental two-arrow zigzag, upgraded). Every decision logs
-    # [ChordProbe] so the feel test reads back. Known probe warts: hardcoded
-    # arrow keycodes (bind-following comes with the real build); a press
-    # buffered at a state transition can release one frame stale.
-    _ARROW_VECS = {
-        _pg_keybind.K_UP: (0, -1), _pg_keybind.K_DOWN: (0, 1),
-        _pg_keybind.K_LEFT: (-1, 0), _pg_keybind.K_RIGHT: (1, 0),
-    }
+    # pass through unbuffered — held arrows keep the game's native behavior
+    # (a held-pair diagonal-autowalk diversion was probed and CUT by owner
+    # ruling: chording is for real presses only). Chord-eligible keys follow
+    # the game's four orthogonal movement binds, minus numpad keys (the
+    # numpad has native diagonal keys; buffering its presses would be pure
+    # latency). Known wart: a press buffered at a state transition can
+    # release one frame stale.
     _arrow_down = {}        # keycode -> physically down (edge-tracked)
     _arrow_buffer = [None]  # {'evt','key','vec','t','aged'} | None
+
+    def _chord_vec_for(view, key):
+        """(dx, dy) if key is a chord-eligible orthogonal movement bind —
+        the game's UP/DOWN/LEFT/RIGHT lists, numpad slots excluded — else
+        None. Follows rebinds by construction."""
+        if key in _NUMPAD_DIR_KEYS:
+            return None
+        kb = getattr(view, 'key_binds', None)
+        for bind_id, fallback, vec in _KB_DIRS[:4]:  # orthogonals only
+            if key in _bound_keys(kb, bind_id, fallback):
+                return vec
+        return None
 
     def _chord_step(view, deploying, vec, x4):
         """Perform one chord-synthesized move (the diag-block pattern)."""
@@ -5735,13 +5746,13 @@ if _PyGameView is not None:
         if _x4_move[0] is not None:
             _x4_finalize(view)
 
-    def _chord_probe_process(view, deploying):
-        """Classify this frame's arrow traffic; steal chord pairs."""
+    def _chord_process(view, deploying):
+        """Classify this frame's direction-key traffic; steal chord pairs."""
         import time as _t
         events = view.events
         keys_now = pygame.key.get_pressed()
         # Self-heal the edge tracker against missed KEYUPs (focus loss).
-        for k in _ARROW_VECS:
+        for k in list(_arrow_down):
             if _arrow_down.get(k) and not keys_now[k]:
                 _arrow_down[k] = False
         if not view.can_execute_inputs():
@@ -5755,19 +5766,20 @@ if _PyGameView is not None:
         shift_held = keys_now[pygame.K_LSHIFT] or keys_now[pygame.K_RSHIFT]
         consumed = []
         for evt in list(events):
-            if evt.type == pygame.KEYUP and evt.key in _ARROW_VECS:
-                _arrow_down[evt.key] = False
+            if evt.type == pygame.KEYUP:
+                if evt.key in _arrow_down:
+                    _arrow_down[evt.key] = False
                 continue
-            if evt.type != pygame.KEYDOWN or evt.key not in _ARROW_VECS:
+            if evt.type != pygame.KEYDOWN:
                 continue
-            vec = _ARROW_VECS[evt.key]
+            vec = _chord_vec_for(view, evt.key)
+            if vec is None:
+                continue
             is_repeat = _arrow_down.get(evt.key, False)
             _arrow_down[evt.key] = True
             if is_repeat:
-                # Game-synthesized autowalk repeat — pass through untouched.
-                # (A held-pair diagonal-autowalk diversion was probed and CUT
-                # by owner ruling 2026-07-06: held arrows keep the game's
-                # native behavior; chording is for real presses only.)
+                # Game-synthesized autowalk repeat — pass through untouched
+                # (held arrows keep the game's native behavior).
                 continue
             # Real press.
             b = _arrow_buffer[0]
@@ -5780,12 +5792,11 @@ if _PyGameView is not None:
                     _chord_step(view, deploying,
                                 (b['vec'][0] + vec[0], b['vec'][1] + vec[1]),
                                 shift_held)
-                    log(f"[ChordProbe] chord "
+                    log(f"[Chord] diagonal "
                         f"dt={(_t.time() - b['t']) * 1000:.0f}ms")
                     continue
                 # Same-axis second press: flush the old, buffer the new.
                 events.insert(0, b['evt'])
-                log("[ChordProbe] same-axis flush")
                 _arrow_buffer[0] = None
             consumed.append(evt)
             _arrow_buffer[0] = {'evt': evt, 'key': evt.key, 'vec': vec,
@@ -5798,8 +5809,6 @@ if _PyGameView is not None:
         if b is not None:
             if b['aged']:
                 view.events.insert(0, b['evt'])
-                log(f"[ChordProbe] single {b['key']} released after "
-                    f"{(_t.time() - b['t']) * 1000:.0f}ms")
                 _arrow_buffer[0] = None
             else:
                 b['aged'] = True
@@ -7982,18 +7991,20 @@ if _PyGameView is not None:
             for evt in self.events:
                 if evt.type != pygame.KEYDOWN:
                     continue
-                # LCtrl = speech cancel (control-means-silence, the deepest
-                # screen-reader convention). Handled ABOVE the modifier skip:
-                # the guard below continues on K_LCTRL, which made the old
-                # cancel branch in the dispatch chain unreachable dead code —
-                # masked by NVDA's native control-interrupt (the synth went
-                # quiet, but the mod-side HP cancel and batcher.clear never
-                # ran, so queued batch lines kept arriving). Early branch +
-                # continue: speech dies, scanner state survives (cancel
-                # mid-cycle must not break cycling), and the press composes
-                # with chord prefixes — cancel on press, chord on the letter,
-                # one cancel per physical press (no key repeat exists).
-                if evt.key == pygame.K_LCTRL:
+                # Ctrl = speech cancel, EITHER SIDE (control-means-silence,
+                # the deepest screen-reader convention; the mod never
+                # distinguishes left from right Ctrl — owner ruling
+                # 2026-07-06, the Ctrl-idiom rethink). Handled ABOVE the
+                # modifier skip: the guard below continues on Ctrl keys,
+                # which made the old cancel branch in the dispatch chain
+                # unreachable dead code — masked by NVDA's native
+                # control-interrupt (the synth went quiet, but the mod-side
+                # HP cancel and batcher.clear never ran, so queued batch
+                # lines kept arriving). Early branch + continue: speech dies,
+                # scanner state survives (cancel mid-cycle must not break
+                # cycling), and the press composes with the coming Ctrl
+                # gestures — cancel on press, jump on the chord (slice 3).
+                if evt.key in (pygame.K_LCTRL, pygame.K_RCTRL):
                     async_tts.cancel()
                     _cancel_hp_announcement()
                     batcher.clear()
@@ -8165,58 +8176,14 @@ if _PyGameView is not None:
         except Exception as e:
             log(f"[Hotkey] Error: {e}")
 
-        # ---- RCtrl+Arrow diagonal movement ----
-        # Intercept arrow keys when Right Ctrl is held, convert to diagonal movement.
-        # Must happen before the game sees the arrow event.
-        # Counterclockwise mapping: RCtrl+Up=NW, RCtrl+Right=NE, RCtrl+Down=SE, RCtrl+Left=SW
-        _RCTRL_DIAG_MAP = {
-            pygame.K_UP: Level.Point(-1, -1),     # NW
-            pygame.K_RIGHT: Level.Point(1, -1),   # NE
-            pygame.K_DOWN: Level.Point(1, 1),      # SE
-            pygame.K_LEFT: Level.Point(-1, 1),     # SW
-        }
-        _diag_consumed = []
-        if self.can_execute_inputs():
-            keys = pygame.key.get_pressed()
-            # Also accept LCtrl+Alt (AltGr on European/Spanish keyboards sends LCtrl+RAlt)
-            _diag_trigger = keys[pygame.K_RCTRL] or (
-                keys[pygame.K_LCTRL] and (keys[pygame.K_LALT] or keys[pygame.K_RALT]))
-            if _diag_trigger:
-                # Shift = 4-tile diagonal move (slice 2 parity fix: the game's
-                # own Shift handling covers numpad diagonals, but these arrow
-                # diagonals consume their events before the game sees them, so
-                # arrow-dependent players had a slower diagonal cursor).
-                _diag_x4 = bool(keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT])
-                for evt in self.events:
-                    if evt.type == pygame.KEYDOWN and evt.key in _RCTRL_DIAG_MAP:
-                        movedir = _RCTRL_DIAG_MAP[evt.key]
-                        _steps = 4 if _diag_x4 else 1
-                        if _diag_x4 and (self.cur_spell or (deploying and self.deploy_target)):
-                            _x4_move[0] = {'points': [], 'expected': _steps}
-                        if self.cur_spell:
-                            for _ in range(_steps):
-                                new_target = Level.Point(
-                                    self.cur_spell_target.x + movedir.x,
-                                    self.cur_spell_target.y + movedir.y)
-                                if self.game.cur_level.is_point_in_bounds(new_target):
-                                    self.cur_spell_target = new_target
-                                    self.try_examine_tile(new_target)
-                        elif deploying and self.deploy_target:
-                            for _ in range(_steps):
-                                new_point = Level.Point(
-                                    self.deploy_target.x + movedir.x,
-                                    self.deploy_target.y + movedir.y)
-                                if self.game.next_level.is_point_in_bounds(new_point):
-                                    self.deploy_target = new_point
-                                    self.try_examine_tile(new_point)
-                        else:
-                            self.try_move(movedir)
-                            self.cur_spell_target = None
-                        if _x4_move[0] is not None:
-                            _x4_finalize(self)
-                        _diag_consumed.append(evt)
-                if _diag_consumed:
-                    self.events = [e for e in self.events if e not in _diag_consumed]
+        # NOTE (Ctrl-idiom conversion, owner-ruled 2026-07-06): the
+        # RCtrl+Arrow diagonal block that lived here (with its LCtrl+Alt
+        # AltGr synonym and Shift+RCtrl x4) is RETIRED — diagonals are
+        # two-arrow chords now (_chord_process below), and Ctrl belongs to
+        # jump + cancel, side-agnostic. Clean cut, no legacy synonym (the
+        # slice-1 hard-switch precedent); the motor-accessibility caveat —
+        # a player who cannot press two arrows at once has numpad diagonals
+        # only — is recorded in the pass doc for the remapping design.
 
         # Fake-shift repair (slice 2 addendum): the driver strips Shift from
         # NumLock-on numpad presses, so the game's own x4 check can never see
@@ -8256,14 +8223,12 @@ if _PyGameView is not None:
             if _fake_consumed:
                 self.events = [e for e in self.events if e not in _fake_consumed]
 
-        # [ChordProbe] two-arrow diagonal chording feel test (Ctrl rethink).
-        # Runs after the RCtrl diag block (RCtrl gestures keep priority while
-        # both idioms coexist for the probe) and before the x4 arming, so a
+        # Two-arrow diagonal chording. Runs before the x4 arming, so a
         # released single press still arms the Shift collector this frame.
         try:
-            _chord_probe_process(self, deploying)
+            _chord_process(self, deploying)
         except Exception as _ce:
-            log(f"[ChordProbe] error: {_ce}")
+            log(f"[Chord] error: {_ce}")
 
         # Shift-move (x4) landing summary: arm the collector when this frame
         # carries Shift + a directional press in a cursor context. The game's

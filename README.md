@@ -157,15 +157,15 @@ Two sets of keys: the ones the mod adds, and Rift Wizard 3's own. A few things f
 | **P** | Path to the look-mode cursor — full route to whatever it's on. |
 | **Shift + P** | Re-announce the path to your marked target. |
 | **Shift + Tab** | Previous target while targeting, walking, or looking (reverse of the game's Tab cycle). A fresh press starts from the far end of the list — in walk mode that jumps straight to the rifts. Needs the Steam overlay turned off for this game (see setup above). |
-| **RCtrl + Arrow** | Diagonal movement (Up=NW, Right=NE, Down=SE, Left=SW), for keyboards without a numpad. |
-| **Shift + Arrow** | Move the cursor 4 tiles. Speaks the landing tile plus a short "Crossed:" summary of everything skimmed past, floor included. Says "Edge" when the map edge cuts the move short. Add RCtrl for a 4-tile diagonal. |
-| **Numpad** | Keep NumLock on: bare numpad moves and diagonals work. Shift+numpad 4-tile moves work only **without** NVDA running — the mod repairs a Windows keyboard legacy ("fake shift") that broke the chord for everyone including sighted players, but NVDA's keyboard hook swallows the keypress before any application can see it. Under NVDA, use Shift+Arrow and Shift+RCtrl+Arrow, which are immune. NumLock off leaves the numpad to NVDA review, as usual. |
+| **Two arrows together** | Diagonal movement: Up+Right = NE, Down+Left = SW, and so on. Press the pair as one gesture; a lone press still steps normally. |
+| **Shift + Arrow** | Move the cursor 4 tiles. Speaks the landing tile plus a short "Crossed:" summary of everything skimmed past, floor included. Says "Edge" when the map edge cuts the move short. Shift + a pair does the 4-tile diagonal. |
+| **Numpad** | Keep NumLock on: bare numpad moves and diagonals work. Shift+numpad 4-tile moves work only **without** NVDA running — the mod repairs a Windows keyboard legacy ("fake shift") that broke the chord for everyone including sighted players, but NVDA's keyboard hook swallows the keypress before any application can see it. Under NVDA, use the arrow gestures, which are immune. NumLock off leaves the numpad to NVDA review, as usual. |
 
 **In a level — speech control**
 
 | Key | Function |
 |-----|----------|
-| **Left Ctrl** | Cancel speech. |
+| **Ctrl** | Cancel speech — either control key. |
 | **Z** | Repeat the last message. |
 | **[** / **]** | Speech history back / forward. |
 | **F1** | Open the Words of Power reference (mod keybinds and tips) from any screen — level, menus, shops. |
@@ -199,7 +199,7 @@ the game's native help.
 | Key | Function |
 |-----|----------|
 | **Arrows** or **Numpad 8 / 2 / 4 / 6** | Cardinal movement. |
-| **Numpad 7 / 9 / 1 / 3** | Diagonal movement (the mod's RCtrl+Arrow covers keyboards without a numpad). |
+| **Numpad 7 / 9 / 1 / 3** | Diagonal movement (arrow pairs cover keyboards without a numpad). |
 | **Space** or **Numpad 5** | Pass turn / channel the current spell. |
 | **W** | Walk toward a tile. |
 | **A** | Auto-collect — once a level is cleared of enemies, routes the wizard to gather every remaining pickup (memory orbs, components, hearts). Inactive while hostiles remain. |

@@ -198,11 +198,12 @@ def _hotkey_loop_src():
 
 
 def test_cancel_sits_above_the_modifier_guard_and_the_scanner_resets():
-    # The old branch died because the modifier guard continues on K_LCTRL
+    # The old branch died because the modifier guard continues on Ctrl keys
     # before dispatch; the fix must run before the guard AND before the
-    # scanner resets (cancel mid-cycle must not break cycling).
+    # scanner resets (cancel mid-cycle must not break cycling). Cancel is
+    # side-agnostic — either Ctrl (the Ctrl-idiom ruling).
     loop = _hotkey_loop_src()
-    cancel = loop.index("if evt.key == pygame.K_LCTRL:")
+    cancel = loop.index("if evt.key in (pygame.K_LCTRL, pygame.K_RCTRL):")
     guard = loop.index("if evt.key in (pygame.K_LSHIFT")
     resets = loop.index("# Reset scan cycling")
     assert cancel < guard < resets
@@ -214,24 +215,34 @@ def test_dead_dispatch_cancel_branch_is_gone():
 
 def test_cancel_clears_speech_and_continues():
     loop = _hotkey_loop_src()
-    cancel = loop.index("if evt.key == pygame.K_LCTRL:")
+    cancel = loop.index("if evt.key in (pygame.K_LCTRL, pygame.K_RCTRL):")
     block = loop[cancel:loop.index("# Skip modifier-only keys", cancel)]
     for required in ("async_tts.cancel()", "_cancel_hp_announcement()",
                      "batcher.clear()", "continue"):
         assert required in block, required
 
 
-def test_diagonal_shift_steps_four_tiles():
-    assert "_steps = 4 if _diag_x4 else 1" in _src
+def test_rctrl_diagonal_block_is_retired():
+    # Ctrl-idiom conversion (owner-ruled 2026-07-06): diagonals are
+    # two-arrow chords; RCtrl gestures and the AltGr synonym are gone.
+    assert "_RCTRL_DIAG_MAP" not in _src
+
+
+def test_chording_is_wired():
+    assert "_chord_process(self, deploying)" in _src
+    assert "[Chord] diagonal" in _src
 
 
 def test_examine_hook_collects_during_shift_move():
     assert "_x4_move[0]['points'].append" in _src
 
 
-def test_finalize_runs_in_all_three_x4_paths():
-    # game-path post-original, RCtrl diagonals, and the fake-shift repair
-    assert _src.count("_x4_finalize(self)") == 3
+def test_finalize_runs_in_the_remaining_x4_paths():
+    # game-path post-original and the fake-shift repair use (self);
+    # the chord path finalizes through _chord_step's (view). The (view)
+    # count includes the def line itself, hence 2.
+    assert _src.count("_x4_finalize(self)") == 2
+    assert _src.count("_x4_finalize(view)") == 2
 
 
 # ---- fake-shift detection (Shift+numpad repair) ----
@@ -250,10 +261,17 @@ pygame = types.SimpleNamespace(
     K_UP=50, K_DOWN=51, K_LEFT=52, K_RIGHT=53,
     KEYUP=200, KEYDOWN=201)
 
+# Mirrors the real table's shape: orthogonals first (chording reads
+# _KB_DIRS[:4]), diagonals after; numpad keys ride the orthogonal bind
+# lists' second slots, as in the game's defaults. KP4 is deliberately
+# left unbound to keep an unbound-numpad-key case.
 _KB_DIRS_TEST = (
-    (None, pygame.K_KP8, (0, -1)),
-    (None, pygame.K_KP2, (0, 1)),
-    (None, pygame.K_KP7, (-1, -1)),
+    (0, pygame.K_UP, (0, -1)),
+    (1, pygame.K_DOWN, (0, 1)),
+    (2, pygame.K_LEFT, (-1, 0)),
+    (3, pygame.K_RIGHT, (1, 0)),
+    (4, pygame.K_KP7, (-1, -1)),
+    (5, pygame.K_KP9, (1, -1)),
 )
 
 _fk = {
@@ -264,8 +282,16 @@ _fk = {
 exec(_extract("    _NUMPAD_DIR_KEYS = frozenset((",
               "    def _crossed_tile_label(level, point):"), _fk)
 _detect = _fk['_fake_shift_numpad_dirs']
+_vec_for = _fk['_chord_vec_for']
 
-_VIEW = types.SimpleNamespace(key_binds=None)
+_VIEW = types.SimpleNamespace(key_binds={
+    0: [pygame.K_UP, pygame.K_KP8],
+    1: [pygame.K_DOWN, pygame.K_KP2],
+    2: [pygame.K_LEFT, None],
+    3: [pygame.K_RIGHT, None],
+    4: [pygame.K_KP7, None],
+    5: [pygame.K_KP9, None],
+})
 
 
 def _up(key):
@@ -309,3 +335,23 @@ def test_numpad_key_not_bound_to_a_direction_is_skipped():
 def test_repair_block_consumes_and_tracker_folds():
     assert "_fake_shift_numpad_dirs(self, self.events, _shift_entry)" in _src
     assert "_shift_entry = _phys_shift[0]" in _src
+
+
+# ---- chord eligibility (bind-following, numpad excluded) ----
+
+def test_chord_eligibility_follows_binds_and_excludes_numpad():
+    assert _vec_for(_VIEW, pygame.K_UP) == (0, -1)
+    assert _vec_for(_VIEW, pygame.K_RIGHT) == (1, 0)
+    # Numpad keys never chord, even when bound to a direction — they have
+    # native diagonals, and buffering them would be pure latency.
+    assert _vec_for(_VIEW, pygame.K_KP8) is None
+    assert _vec_for(_VIEW, pygame.K_KP7) is None
+    assert _vec_for(_VIEW, 999) is None
+
+
+def test_chord_eligibility_survives_a_rebind():
+    rebound = types.SimpleNamespace(key_binds={
+        0: [60, None], 1: [61, None], 2: [62, None], 3: [63, None],
+    })
+    assert _vec_for(rebound, 60) == (0, -1)
+    assert _vec_for(rebound, pygame.K_UP) is None
