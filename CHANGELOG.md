@@ -3,6 +3,23 @@
 All notable changes to **Words of Power II** are listed here, newest first. This is
 an early work-in-progress RW3 port — expect frequent changes.
 
+## Unreleased
+
+### Fixed
+- **The mouse no longer hijacks overlays and examine during keyboard play.** The
+  game quietly used the physical mouse position as its attention point: held `L`
+  drew line of sight from the tile under the pointer (wherever it happened to
+  rest), held highlight keys examined that tile every frame — narrowing the threat
+  overlay to whatever unit the mouse sat on, with no keyboard way out — and any
+  pointer drift moved the Look cursor. Now whichever device acted last owns the
+  attention point: any keypress mutes the mouse; a mouse click or wheel wakes it
+  (the waking click only wakes — the next one acts). Mouse motion alone never
+  takes control, so desk bumps and screen-reader pointer routing can't steal it.
+  With the keyboard in charge, held `L` draws from the deploy target, your
+  Look/targeting cursor (a handy visual cursor tracker), or your wizard. New
+  setting `mouse_attention_arbitration` (default true); set false for fully
+  native mouse behavior.
+
 ## 2026-07-07 — 0.5.0 — The Cursor Update
 
 Returning players: [TRANSITION.md](TRANSITION.md) walks these changes in

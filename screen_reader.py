@@ -248,6 +248,19 @@ _SETTINGS_SCHEMA = [
      "# cursor steps work either way; this is the sighted-aid half. Set\n"
      "# false to keep latches speech-only.\n"
      "# Default: true"),
+    ('words_of_power', 'mouse_attention_arbitration', 'true',
+     "# Keyboard-first mouse handling. While you're playing by keyboard the\n"
+     "# physical mouse stops supplying the battlefield attention point: held\n"
+     "# L draws line of sight from the deploy target, the Look or targeting\n"
+     "# cursor, or the wizard - never from wherever the pointer happens to\n"
+     "# rest - held highlight keys stop examining the tile under the\n"
+     "# pointer, and pointer drift can't move the Look cursor. A mouse\n"
+     "# click or wheel hands control back to the mouse (the first click\n"
+     "# only wakes it); any keypress reclaims it. Mouse motion alone never\n"
+     "# reclaims: desk bumps and screen-reader pointer routing move the\n"
+     "# mouse without meaning it. Set false for native mouse behavior at\n"
+     "# all times.\n"
+     "# Default: true"),
     ('words_of_power', 'threat_enumeration_legacy', 'false',
      "# Restore the old global T readout verbatim: count, names, and\n"
      "# directions of everything threatening the tile. The default answer is\n"
@@ -431,6 +444,7 @@ class _Cfg:
     pin_speak_all = _settings.getboolean('words_of_power', 'pin_speak_all', fallback=False)
     threat_enumeration_legacy = _settings.getboolean('words_of_power', 'threat_enumeration_legacy', fallback=False)
     latch_visual_overlay = _settings.getboolean('words_of_power', 'latch_visual_overlay', fallback=True)
+    mouse_attention_arbitration = _settings.getboolean('words_of_power', 'mouse_attention_arbitration', fallback=True)
     digest_enabled = _settings.getboolean('words_of_power', 'digest_enabled', fallback=True)
     # [Composer] — pipeline flags. As of 0.3.2 the composer pipeline is the
     # shipped speech engine: producers on, legacy combat narration off.
@@ -471,6 +485,7 @@ log(f"[Settings] speak_pickup_effects = {cfg.speak_pickup_effects}")
 log(f"[Settings] pin_speak_all = {cfg.pin_speak_all}")
 log(f"[Settings] threat_enumeration_legacy = {cfg.threat_enumeration_legacy}")
 log(f"[Settings] latch_visual_overlay = {cfg.latch_visual_overlay}")
+log(f"[Settings] mouse_attention_arbitration = {cfg.mouse_attention_arbitration}")
 log(f"[Settings] digest_enabled = {cfg.digest_enabled}")
 log(f"[Settings] crisis_enabled = {cfg.crisis_enabled}")
 log(f"[Settings] orphan_enabled = {cfg.orphan_enabled}")
@@ -6434,6 +6449,77 @@ if _PyGameView is not None:
             setattr(_PyGameView, _shot_name, _make_screenshot_wrap(_shot_orig))
     log("  Latch draw hooks installed (draw_level wrap, overlay preempt flags, targeting reassert)")
 
+    # This scope's shared `import pygame` sits BELOW the next section, but
+    # the reclaim-type tuple evaluates at load time — bind the name first
+    # (the 2026-07-07 load failure: NameError on a name every neighboring
+    # section only touches inside deferred functions). Deliberately OUTSIDE
+    # the extraction markers so test_mouse_attention keeps injecting its
+    # fake pygame.
+    import pygame
+
+    # ---- Mouse-attention arbitration: click reclaim ----
+    # The game lets the physical mouse supply the battlefield attention
+    # point wherever the pointer happens to rest: held L draws line of
+    # sight from the tile under the pointer (draw_los, RiftWizard3.py:5702),
+    # held highlight keys examine that tile every frame
+    # (highlight_examine_override, :5736) - which NARROWS the threat
+    # overlay - and any pointer motion retargets the Look cursor and deploy
+    # target and examines its tile (:3007-3015). None of that is
+    # perceivable or controllable in keyboard play: in the 2026-07-07
+    # field session a parked mouse drew a giant off-wizard LoS overlay and
+    # held examine hostage on one unit, locking the threat overlay to it.
+    # Arbitration: whichever device acted last OWNS the attention point.
+    # Any keypress hands it to the keyboard; a mouse CLICK or wheel hands
+    # it back. Mouse MOTION never reclaims (owner ruling 2026-07-07,
+    # click-only): desk bumps and screen-reader pointer routing (NVDA and
+    # JAWS both warp the OS pointer) move the mouse without expressing
+    # intent. First click only WAKES the mouse - the next one acts - the
+    # standard gamepad-versus-mouse idiom.
+    # Mechanism: while the keyboard owns attention, get_mouse_level_point
+    # answers None and every consumer falls through to its keyboard-native
+    # source. Held L follows the game's own origin chain minus the mouse:
+    # deploy target, else the Look/targeting cursor (so holding L tracks
+    # the cursor visually), else the wizard. Held T is untouched - its
+    # narrowing rides examine, which the keyboard now controls. Menus and
+    # UI hover are untouched (they read rects and mouse_pos, not the level
+    # point). Cheat keys that target the hovered tile (K_t teleport etc.)
+    # go inert in keyboard mode - they are mouse-targeted by design.
+    # CONSUMER SET PINNED BY TEST (test_mouse_attention.py): the four call
+    # sites above plus the dead local in draw_threat (:5636). A game
+    # update adding a call site fails the pin and must re-audit this seam.
+    _MOUSE_RECLAIM_TYPES = tuple(
+        t for t in (getattr(pygame, 'MOUSEBUTTONDOWN', None),
+                    getattr(pygame, 'MOUSEWHEEL', None))
+        if t is not None)
+    _mouse_attention = ['keyboard']   # 'keyboard' | 'mouse'; keyboard-first at load
+
+    def _attention_scan_events(events):
+        """Flip the attention owner from this frame's event batch. Called
+        from the all-state draw_screen hook and (same frame, idempotent)
+        from the level input hook so level-state flips land before the
+        game consumes the events. Last event in the batch wins. Logs only
+        on change."""
+        mode = _mouse_attention[0]
+        for evt in events:
+            if evt.type == pygame.KEYDOWN:
+                mode = 'keyboard'
+            elif evt.type in _MOUSE_RECLAIM_TYPES:
+                mode = 'mouse'
+        if mode != _mouse_attention[0]:
+            _mouse_attention[0] = mode
+            log(f"[Input] Attention owner: {mode}")
+
+    _original_get_mouse_level_point = _PyGameView.get_mouse_level_point
+
+    def patched_get_mouse_level_point(self):
+        if cfg.mouse_attention_arbitration and _mouse_attention[0] == 'keyboard':
+            return None
+        return _original_get_mouse_level_point(self)
+
+    _PyGameView.get_mouse_level_point = patched_get_mouse_level_point
+    log("  Mouse-attention arbitration installed (click reclaim)")
+    # ---- end mouse-attention arbitration ----
+
     def patched_try_examine_tile(self, point):
         """Hook cursor movement for Look mode, spell targeting, deploy tile feedback.
         Uses point deduplication instead of timer threads — the game calls this
@@ -8674,6 +8760,14 @@ if _PyGameView is not None:
         Also detects deploy phase start/abort transitions, turn boundaries,
         gameover/victory voicing, and drives the speech batching flush cycle."""
 
+        # Mouse-attention arbitration: flip the owner BEFORE the game
+        # consumes this frame's events, so a keypress after mouse use never
+        # runs one frame with the mouse still owning the attention point.
+        try:
+            _attention_scan_events(getattr(self, 'events', None) or [])
+        except Exception:
+            pass
+
         # First-load keybind migration: patch the live instance's key_binds
         # so saved user options (which may contain old PgUp/PgDn) get overridden.
         # Only on first load — subsequent loads respect user customization.
@@ -9811,6 +9905,14 @@ if _PyGameView is not None:
         Announces state name for non-self-announcing states, and defers
         keybind help to next frame so it speaks after all state-entry content."""
         cur = self.state
+
+        # Mouse-attention arbitration: the all-state flip point (menus,
+        # shop, char sheet - anywhere process_level_input doesn't run).
+        # Idempotent with the level-input scan of the same batch.
+        try:
+            _attention_scan_events(getattr(self, 'events', None) or [])
+        except Exception:
+            pass
 
         # Chronomancer threshold poll (Unit 5 D6) — the timer ticks in the
         # frame loop across LEVEL/SHOP/CHAR_SHEET, so the all-state frame

@@ -132,6 +132,14 @@ Two sets of keys: the ones the mod adds, and Rift Wizard 3's own. A few things f
   **Backspace** (next) for screen-reader use, keeping PgUp/PgDn as secondary and
   unbinding Fast Forward to free Backspace. Change any of this in Options.
 - Press **Shift + /** (**?**) in a level to hear the mod's full reference spoken.
+- **The mouse yields to the keyboard.** While you play by keyboard, the game ignores
+  where the physical mouse happens to rest: held `L` draws line of sight from your
+  wizard — or from your Look/targeting cursor when one is active, which doubles as a
+  visual cursor tracker — held highlight keys don't examine the tile under the
+  pointer, and pointer drift can't move your cursor. Click once to hand control back
+  to the mouse (that first click only wakes it); any keypress takes it back. Mouse
+  motion alone never takes control, so desk bumps and screen-reader pointer routing
+  are harmless. `mouse_attention_arbitration` in settings.ini turns this off.
 
 ### Mod keybinds
 
