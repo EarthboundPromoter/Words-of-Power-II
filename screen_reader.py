@@ -256,6 +256,15 @@ _SETTINGS_SCHEMA = [
      "# one on your command (Shift+J bounces back). Deployment only; Look\n"
      "# mode and teleport aim on levels always route.\n"
      "# Default: true"),
+    ('words_of_power', 'key_trace_enabled', 'false',
+     "# Input diagnostics: log every game-window key press and release to\n"
+     "# screen_reader_debug.log - millisecond spacing between presses, hold\n"
+     "# durations with autowalk repeat counts, and the diagonal-chord\n"
+     "# classifier's decisions. For diagnosing control bugs (keys that\n"
+     "# \"don't register\", diagonals that step twice). Local log only, game\n"
+     "# keys only; nothing is sent anywhere. Off by default - if you report\n"
+     "# an input bug, you may be asked to turn this on and reproduce it.\n"
+     "# Default: false"),
     ('words_of_power', 'mouse_attention_arbitration', 'true',
      "# Keyboard-first mouse handling. While you're playing by keyboard the\n"
      "# physical mouse stops supplying the battlefield attention point: held\n"
@@ -469,6 +478,7 @@ class _Cfg:
     threat_enumeration_legacy = _settings.getboolean('words_of_power', 'threat_enumeration_legacy', fallback=False)
     latch_visual_overlay = _settings.getboolean('words_of_power', 'latch_visual_overlay', fallback=True)
     deploy_scan_routing = _settings.getboolean('words_of_power', 'deploy_scan_routing', fallback=True)
+    key_trace_enabled = _settings.getboolean('words_of_power', 'key_trace_enabled', fallback=False)
     mouse_attention_arbitration = _settings.getboolean('words_of_power', 'mouse_attention_arbitration', fallback=True)
     frame_probe_enabled = _settings.getboolean('words_of_power', 'frame_probe_enabled', fallback=True)
     frame_probe_census = _settings.getboolean('words_of_power', 'frame_probe_census', fallback=True)
@@ -513,6 +523,7 @@ log(f"[Settings] pin_speak_all = {cfg.pin_speak_all}")
 log(f"[Settings] threat_enumeration_legacy = {cfg.threat_enumeration_legacy}")
 log(f"[Settings] latch_visual_overlay = {cfg.latch_visual_overlay}")
 log(f"[Settings] deploy_scan_routing = {cfg.deploy_scan_routing}")
+log(f"[Settings] key_trace_enabled = {cfg.key_trace_enabled}")
 log(f"[Settings] mouse_attention_arbitration = {cfg.mouse_attention_arbitration}")
 log(f"[Settings] frame_probe_enabled = {cfg.frame_probe_enabled}")
 log(f"[Settings] frame_probe_census = {cfg.frame_probe_census}")
@@ -5790,6 +5801,71 @@ if _PyGameView is not None:
         _pg_keybind.K_KP4, _pg_keybind.K_KP6, _pg_keybind.K_KP7,
         _pg_keybind.K_KP8, _pg_keybind.K_KP9))
 
+    # ---- Key trace (input diagnostics, owner-ruled 2026-07-09) ----
+    # Raw press/release edges plus the chord classifier's verdicts, into the
+    # debug log. Off by default: when an input bug can't be diagnosed from a
+    # normal log, the support ask is "turn key_trace_enabled on and
+    # reproduce" (the 07-09 diagonal-roll field report carried no key data
+    # at all — diagnosis happened by the player describing his fingers).
+    # Log-only: never consumes events, never speaks. Scope is the level
+    # input frame (normal play, Look, targeting, deploy) — where movement
+    # and cursor gestures live; menu screens are out of scope.
+    _kt_down = {}            # keycode -> {'t0': perf_counter, 'repeats': int}
+    _kt_last_down = [None]   # perf_counter of the previous fresh KEYDOWN
+
+    def _kt(msg):
+        """Chord-verdict trace line (no-op unless key_trace_enabled)."""
+        if cfg.key_trace_enabled:
+            log(f"[KeyTrace] {msg}")
+
+    def _kt_mods_text(mod):
+        parts = [name for bit, name in ((pygame.KMOD_SHIFT, 'shift'),
+                                        (pygame.KMOD_CTRL, 'ctrl'),
+                                        (pygame.KMOD_ALT, 'alt')) if mod & bit]
+        return f" +{'+'.join(parts)}" if parts else ""
+
+    def _key_trace_scan(view):
+        """Log raw KEYDOWN/KEYUP edges in this frame's batch. A fresh press
+        carries the gap since the previous fresh press — the chord-window
+        datum. The game's hand-rolled 20Hz autowalk repeats aggregate into
+        the release line ('up down after 812ms, 15 repeats') instead of
+        flooding one line each."""
+        if not cfg.key_trace_enabled:
+            return
+        import time as _t
+        try:
+            for evt in getattr(view, 'events', None) or []:
+                if evt.type == pygame.KEYDOWN:
+                    st = _kt_down.get(evt.key)
+                    if st is not None:
+                        st['repeats'] += 1     # synthesized autowalk repeat
+                        continue
+                    now = _t.perf_counter()
+                    gap = ""
+                    if _kt_last_down[0] is not None:
+                        gap = f" (+{(now - _kt_last_down[0]) * 1000:.0f}ms)"
+                    _kt_last_down[0] = now
+                    _kt_down[evt.key] = {'t0': now, 'repeats': 0}
+                    log(f"[KeyTrace] down {pygame.key.name(evt.key)}"
+                        f"{_kt_mods_text(getattr(evt, 'mod', 0))}{gap}")
+                elif evt.type == pygame.KEYUP:
+                    st = _kt_down.pop(evt.key, None)
+                    tail = ""
+                    if st is not None:
+                        held = (_t.perf_counter() - st['t0']) * 1000
+                        rep = f", {st['repeats']} repeats" if st['repeats'] else ""
+                        tail = f" after {held:.0f}ms{rep}"
+                    log(f"[KeyTrace] up {pygame.key.name(evt.key)}{tail}")
+            # Self-heal against missed KEYUPs (focus loss): entries whose key
+            # is no longer physically down would misread the next press as a
+            # repeat and swallow its down line.
+            keys_now = pygame.key.get_pressed()
+            for k in list(_kt_down):
+                if not keys_now[k]:
+                    del _kt_down[k]
+        except Exception as e:
+            log(f"[KeyTrace] error: {e}")
+
     # ---- Two-arrow diagonal chording (Ctrl-idiom conversion) ----
     # Owner-ruled 2026-07-06 after a logged feel test: diagonals are
     # modifier-free two-arrow chords (Up+Right = NE), replacing the retired
@@ -5959,6 +6035,8 @@ if _PyGameView is not None:
             if b is not None:
                 events.insert(0, b['evt'])
                 _arrow_buffer[0] = None
+                _kt(f"chord: state transition, flushed "
+                    f"{pygame.key.name(b['key'])} to the game")
             return
         shift_held = keys_now[pygame.K_LSHIFT] or keys_now[pygame.K_RSHIFT]
         ctrl_held = keys_now[pygame.K_LCTRL] or keys_now[pygame.K_RCTRL]
@@ -6020,9 +6098,13 @@ if _PyGameView is not None:
                 # Same-axis second press: flush the old, buffer the new.
                 events.insert(0, b['evt'])
                 _arrow_buffer[0] = None
+                _kt(f"chord: same axis, flushed {pygame.key.name(b['key'])} "
+                    f"to the game")
             consumed.append(evt)
             _arrow_buffer[0] = {'evt': evt, 'key': evt.key, 'vec': vec,
                                 't': _t.time(), 'aged': False}
+            _kt(f"chord: buffered {pygame.key.name(evt.key)}, awaiting an "
+                f"orthogonal partner")
         if consumed:
             view.events = [e for e in view.events if e not in consumed]
         # Age the buffer AFTER the scan: a press that saw one full batch
@@ -6036,6 +6118,8 @@ if _PyGameView is not None:
                     _jump_step(view, deploying, b['vec'])
                 else:
                     view.events.insert(0, b['evt'])
+                    _kt(f"chord: no partner for {pygame.key.name(b['key'])}, "
+                        f"released to the game as a single step")
             else:
                 b['aged'] = True
 
@@ -8835,6 +8919,10 @@ if _PyGameView is not None:
 
         deploying = getattr(self.game, 'deploying', False)
         _game_ref[0] = self.game
+
+        # Key trace (diagnostic, default off): raw edges logged before
+        # anything below consumes or synthesizes events.
+        _key_trace_scan(self)
 
         # Fake-shift tracker: read the driver-reported shift state as of the
         # PREVIOUS frame, then fold this frame's shift events into the

@@ -25,6 +25,14 @@ an early work-in-progress RW3 port — expect frequent changes.
   jumps to the last spoken one only on your command (`Shift+J` bounces back).
   Deployment only — Look mode and teleport aim on levels route as before. For
   players who evaluate drop tiles from a fixed reference point.
+- **`key_trace_enabled` setting** (default false): input diagnostics. The
+  debug log records game-window key presses and releases — millisecond
+  spacing between presses, hold durations with autowalk repeat counts — and
+  the diagonal-chord classifier's decisions (buffered, chorded, released as a
+  single step). Local log only, game keys only; nothing is sent anywhere.
+  Since it ships off, reporting a control bug (keys that "don't register",
+  diagonals that step twice) may come with the ask to turn it on and
+  reproduce.
 
 ### Changed
 - **Tooltip page counter moved to the end**: PgUp/PgDn tooltip pages now speak
