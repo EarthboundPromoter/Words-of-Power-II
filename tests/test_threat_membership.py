@@ -213,6 +213,30 @@ def test_hostile_examined_speaks_per_unit_not_zone():
     assert speech.spoken[-1] == "Can't hit you"
 
 
+def test_cursor_on_hostile_answers_for_the_wizard_not_the_tile():
+    # yujin field report 2026-07-08: look-mode cursor ON an adjacent melee
+    # orc + T spoke "Can't hit you" — the per-unit check tested the cursor
+    # tile (the orc's own square, which melee reach never includes) instead
+    # of the wizard. The branch's referent is ALWAYS the wizard, whatever
+    # ref_point rode in, and the cursor qualifier is dropped (the answer is
+    # about you, not the cursor).
+    p = _player()                          # wizard at (5, 5)
+    orc = FakeUnit("Orc", 6, 5)            # adjacent, melee reach
+    view = FakeView(p, [orc], zone={(5, 5)}, examine=orc)
+    ns, speech, _calls = _ns()
+    seen = []
+
+    def melee_reach(unit, x, y):
+        seen.append((x, y))
+        return max(abs(unit.x - x), abs(unit.y - y)) == 1
+
+    ns['_unit_threatens_point'] = melee_reach
+    ns['_query_threat'](view, ref_point=types.SimpleNamespace(x=6, y=5),
+                        qualifier="cursor")
+    assert speech.spoken == ["Threatens you"]   # no "From cursor." prefix
+    assert seen == [(5, 5)]                     # tested the wizard's square
+
+
 # ---- The legacy time capsule ----
 
 def test_legacy_restores_the_verbatim_enumeration():

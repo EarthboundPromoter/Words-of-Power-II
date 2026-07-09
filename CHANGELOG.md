@@ -19,6 +19,24 @@ an early work-in-progress RW3 port — expect frequent changes.
   the last look. The walk itself deliberately stalls the game for a second or
   two and its log line says so, reporting its own duration. New setting
   `frame_probe_census` (default true); set false for normal play.
+- **`deploy_scan_routing` setting** (default true, the current behavior): set
+  false to keep the deploy cursor parked while scanning. Scans and the pin
+  cycle then speak results with distances from the square you chose, and `J`
+  jumps to the last spoken one only on your command (`Shift+J` bounces back).
+  Deployment only — Look mode and teleport aim on levels route as before. For
+  players who evaluate drop tiles from a fixed reference point.
+
+### Changed
+- **Tooltip page counter moved to the end**: PgUp/PgDn tooltip pages now speak
+  their content first and the "2 of 5" position last, instead of leading every
+  page with it (player feedback — the counter-first read was fatiguing).
+
+### Fixed
+- **Examine + T now answers about you**: with the cursor on a hostile in Look
+  mode, `T` said "Can't hit you" even for an adjacent melee enemy — the check
+  tested the enemy's own tile instead of the wizard's. It now always answers
+  "Threatens you"/"Can't hit you" for your square, and drops the misleading
+  "From cursor" prefix on that answer (field report 2026-07-08, yujin0986).
 
 ## 2026-07-07 — 0.5.1 — Hotfix: the mouse yields to the keyboard
 

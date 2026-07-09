@@ -141,10 +141,11 @@ def test_registry_overrides_beat_the_rule_both_ways():
 
 # ---- _route_cursor_to ----
 
-def _route_ns():
+def _route_ns(deploy_scan_routing=True):
     ns = {
         'Level': _level_stub(),
         'log': lambda *a: None,
+        'cfg': types.SimpleNamespace(deploy_scan_routing=deploy_scan_routing),
         '_last_examine_xy': [('sentinel', 'sentinel')],
         '_deploy_tile_suppress': [False],
         '_route_tile_suppress': [False],
@@ -208,6 +209,21 @@ def test_deploy_routes_via_deploy_flag():
     assert ns['_deploy_tile_suppress'][0] is True
     assert ns['_route_tile_suppress'][0] is False
     assert view.examined == [(2, 15)]
+
+
+def test_deploy_scan_routing_off_parks_the_cursor():
+    # deploy_scan_routing=false (owner ruling 2026-07-09): in deploy the
+    # cursor is the only referent — scans speak, the cursor stays parked,
+    # J alone moves it. Deploy-only: level-side Look still routes.
+    ns = _route_ns(deploy_scan_routing=False)
+    view = FakeView(deploying=True)
+    assert ns['_route_cursor_to'](view, 2, 15) is False
+    assert (view.deploy_target.x, view.deploy_target.y) == (9, 9)
+    assert ns['_deploy_tile_suppress'][0] is False    # no armed flag left behind
+    assert view.examined == []                        # examine stays parked too
+    look_view = FakeView(cur_spell=LookSpell(name='look'))
+    assert ns['_route_cursor_to'](look_view, 7, 3) is True
+    assert (look_view.cur_spell_target.x, look_view.cur_spell_target.y) == (7, 3)
 
 
 def test_eligible_teleport_routes_tuned_aim_does_not():

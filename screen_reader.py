@@ -248,6 +248,14 @@ _SETTINGS_SCHEMA = [
      "# cursor steps work either way; this is the sighted-aid half. Set\n"
      "# false to keep latches speech-only.\n"
      "# Default: true"),
+    ('words_of_power', 'deploy_scan_routing', 'true',
+     "# During deployment, scan keys (I/U/N/O) and the pin cycle (K) park\n"
+     "# the deploy cursor on each spoken result. Set false to keep the\n"
+     "# cursor where you put it while scanning - results speak with\n"
+     "# distances from your parked square, and J jumps to the last spoken\n"
+     "# one on your command (Shift+J bounces back). Deployment only; Look\n"
+     "# mode and teleport aim on levels always route.\n"
+     "# Default: true"),
     ('words_of_power', 'mouse_attention_arbitration', 'true',
      "# Keyboard-first mouse handling. While you're playing by keyboard the\n"
      "# physical mouse stops supplying the battlefield attention point: held\n"
@@ -460,6 +468,7 @@ class _Cfg:
     pin_speak_all = _settings.getboolean('words_of_power', 'pin_speak_all', fallback=False)
     threat_enumeration_legacy = _settings.getboolean('words_of_power', 'threat_enumeration_legacy', fallback=False)
     latch_visual_overlay = _settings.getboolean('words_of_power', 'latch_visual_overlay', fallback=True)
+    deploy_scan_routing = _settings.getboolean('words_of_power', 'deploy_scan_routing', fallback=True)
     mouse_attention_arbitration = _settings.getboolean('words_of_power', 'mouse_attention_arbitration', fallback=True)
     frame_probe_enabled = _settings.getboolean('words_of_power', 'frame_probe_enabled', fallback=True)
     frame_probe_census = _settings.getboolean('words_of_power', 'frame_probe_census', fallback=True)
@@ -503,6 +512,7 @@ log(f"[Settings] speak_pickup_effects = {cfg.speak_pickup_effects}")
 log(f"[Settings] pin_speak_all = {cfg.pin_speak_all}")
 log(f"[Settings] threat_enumeration_legacy = {cfg.threat_enumeration_legacy}")
 log(f"[Settings] latch_visual_overlay = {cfg.latch_visual_overlay}")
+log(f"[Settings] deploy_scan_routing = {cfg.deploy_scan_routing}")
 log(f"[Settings] mouse_attention_arbitration = {cfg.mouse_attention_arbitration}")
 log(f"[Settings] frame_probe_enabled = {cfg.frame_probe_enabled}")
 log(f"[Settings] frame_probe_census = {cfg.frame_probe_census}")
@@ -4530,20 +4540,27 @@ if _PyGameView is not None:
 
     def _describe_examine_tooltip(view):
         """Describe the current examine_target for PgUp/PgDn tooltip cycling.
-        Handles units (summoned creatures), spells, upgrades, and equipment."""
+        Composition: content first, page counter last ('…. 2 of 5') — player
+        ruling 2026-07-09: a leading counter on every page is fatigue to
+        listen past; trailing, it's skippable. This is the ONE place the
+        counter joins the body."""
         target = view.examine_target
         if target is None:
             return None
-        # Page counter: "2 of 5"
-        num_extras = len(view._examine_extras)
-        idx = view._examine_index
-        counter = f"{idx + 1} of {num_extras + 1}"
+        body = _examine_tooltip_body(view, target)
+        counter = f"{view._examine_index + 1} of {len(view._examine_extras) + 1}"
+        return f"{body}. {counter}"
+
+    def _examine_tooltip_body(view, target):
+        """The tooltip's content, counter-free. Handles units (summoned
+        creatures), spells, upgrades, equipment, components, shops, portals,
+        and buffs."""
         # Unit (summoned creature stat block)
         if isinstance(target, Level.Unit):
-            return f"{counter}. {_describe_unit(target)}"
+            return _describe_unit(target)
         # Spell (full spell description)
         if isinstance(target, Level.Spell):
-            return f"{counter}. {_describe_spell(target)}"
+            return _describe_spell(target)
         # Upgrade (spell upgrade with prereq) or skill. Body segments mirror
         # the game's draw_examine_upgrade order — desc-less bonus-only
         # upgrades (e.g. Blood Horizon) live entirely in the bonus lines.
@@ -4552,12 +4569,12 @@ if _PyGameView is not None:
             prereq = getattr(target, 'prereq', None)
             head = f"Upgrade: {name} for {_name(prereq)}" if prereq else f"Skill: {name}"
             body = [t for _lbl, t in _describe_upgrade_body(target)]
-            return f"{counter}. " + ". ".join([head] + body)
+            return ". ".join([head] + body)
         # Equipment — game draws it through draw_examine_upgrade; share the body
         if isinstance(target, Level.Equipment):
             slot = _SLOT_NAMES.get(getattr(target, 'slot', -1), "Equipment")
             body = [t for _lbl, t in _describe_upgrade_body(target)]
-            return f"{counter}. " + ". ".join([f"{slot}: {_name(target)}"] + body)
+            return ". ".join([f"{slot}: {_name(target)}"] + body)
         # Component (RW3: former consumable Items are now Components). Rift-reward
         # shrines and map drops wrap the component in a ComponentPickup prop
         # (RiftWizard3.py:7477), which is NOT a Component — without unwrapping it
@@ -4576,7 +4593,7 @@ if _PyGameView is not None:
             desc = _desc_text(target)
             if desc and desc not in ("Undescribed Item", "Undescribed Component"):
                 parts.append(_clean_desc(desc))
-            return f"{counter}. " + ". ".join(parts)
+            return ". ".join(parts)
         # Prospective-equipment list (RW3 crafting preview: the gear this rift's
         # components could craft). EquipmentList has no .name → would read "something".
         if isinstance(target, getattr(Level, 'EquipmentList', ())):
@@ -4584,9 +4601,9 @@ if _PyGameView is not None:
             # "Prospective Equipment" header, count, names — or "None"
             eq_names = [_name(e) for e in getattr(target, 'equipments', [])]
             if eq_names:
-                return (f"{counter}. Prospective Equipment, {len(eq_names)}: "
+                return (f"Prospective Equipment, {len(eq_names)}: "
                         + ", ".join(eq_names))
-            return f"{counter}. Prospective Equipment: None"
+            return "Prospective Equipment: None"
 
         # Shrine/shop — rift-selection portals append the shrine as a Shop
         # (Portal.get_extra_examine_tooltips, Level.py:2773-2776); the game
@@ -4594,13 +4611,13 @@ if _PyGameView is not None:
         # to the name-only fallback and the shrine's description was never
         # spoken (field report 2026-07-05).
         if isinstance(target, Level.Shop):
-            return f"{counter}. {_describe_shop_prop(target)}"
+            return _describe_shop_prop(target)
 
         # Rift portal — contents live in level_gen_params, not a .name; without this
         # it falls to the _name fallback and reads "something". Mirrors the main
         # examine path (_describe_target) so tooltip cycling matches look/walk mode.
         if hasattr(target, 'level_gen_params'):
-            return f"{counter}. {_describe_portal(target, view)}"
+            return _describe_portal(target, view)
         # Buff — extra examine tooltips that spell upgrades attach via
         # add_upgrade_tooltip (e.g. the Rejuvenation regen buff behind Healing
         # Light's Ritual of Rejuvenation, the Haste buff behind Ritual of Haste).
@@ -4615,9 +4632,9 @@ if _PyGameView is not None:
             # get_tooltip() and leave description None. Both live in the body
             # helper's bonus/fallback handling.
             body = [t for _lbl, t in _describe_upgrade_body(target)]
-            return f"{counter}. " + ". ".join([_name(target)] + body)
+            return ". ".join([_name(target)] + body)
         # Fallback
-        return f"{counter}. {_name(target)}"
+        return _name(target)
 
     def patched_move_examine_target(self, movedir):
         """Voice tooltip content when PgUp/PgDn cycles through extra examine targets."""
@@ -6750,11 +6767,18 @@ if _PyGameView is not None:
         line is the utterance: the routed tile announce is suppressed, but
         try_examine_tile still runs so examine_target lands on the result —
         T and D answer for it immediately. Returns True when the cursor
-        moved."""
+        moved. Deploy routing sits behind deploy_scan_routing (owner ruling
+        2026-07-09): in deploy the cursor is the only referent there is —
+        no wizard to fall back to — so a player evaluating drop tiles can
+        keep it parked and jump on J alone. Level-side Look and teleport
+        aim always route: entering those cursors is itself the deliberate
+        act."""
         try:
             game = view.game
             point = Level.Point(tx, ty)
             if getattr(game, 'deploying', False) and getattr(view, 'deploy_target', None):
+                if not cfg.deploy_scan_routing:
+                    return False
                 level = game.next_level
                 if level is None or not level.is_point_in_bounds(point):
                     return False
@@ -7681,17 +7705,26 @@ if _PyGameView is not None:
                 ref_x, ref_y = player.x, player.y
             _qp = f"From {qualifier}. " if qualifier else ""
 
-            # Per-unit threat check: if examining a hostile unit
+            # Per-unit threat check: if examining a hostile unit. The
+            # reference is ALWAYS the wizard — this branch answers "does THIS
+            # unit threaten YOU", the question its speech names. Testing the
+            # attention tile here asked "can the orc hit its own square" the
+            # moment look-mode's cursor examined it, and spoke "Can't hit
+            # you" beside an adjacent melee orc (yujin field report
+            # 2026-07-08). The cursor qualifier is dropped for the same
+            # reason: the referent is you, not the cursor (owner ruling
+            # 2026-07-09; square membership on a hostile's tile stays
+            # reachable via the threat latch).
             examine = getattr(view, 'examine_target', None)
             if examine is None:
                 examine = getattr(view, '_examine_target', None)
             if (examine and hasattr(examine, 'cur_hp')
                     and not _is_player(examine)
                     and Level.are_hostile(player, examine)):
-                if _unit_threatens_point(examine, ref_x, ref_y):
-                    text = f"{_qp}Threatens you"
+                if _unit_threatens_point(examine, player.x, player.y):
+                    text = "Threatens you"
                 else:
-                    text = f"{_qp}Can't hit you"
+                    text = "Can't hit you"
                 log(f"[Threat] {_name(examine)}: {text}")
                 async_tts.speak(text)
                 return
