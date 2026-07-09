@@ -261,6 +261,22 @@ _SETTINGS_SCHEMA = [
      "# mouse without meaning it. Set false for native mouse behavior at\n"
      "# all times.\n"
      "# Default: true"),
+    ('words_of_power', 'frame_probe_enabled', 'true',
+     "# Frame heartbeat probe: log a one-line frame-time summary each\n"
+     "# minute, plus an immediate line for any frame gap over 50ms (with\n"
+     "# game state, latch, and garbage-collector context) and any GC pause\n"
+     "# over 10ms. Diagnostic for intermittent stalls - audio cutouts,\n"
+     "# animation hitches - during long sessions. Cheap; set false to\n"
+     "# silence it.\n"
+     "# Default: true"),
+    ('words_of_power', 'frame_probe_census', 'true',
+     "# Object census riding the frame probe: every 5 minutes, walk the\n"
+     "# Python heap and log which object types grew (leak hunting). The\n"
+     "# walk itself stalls the game for up to a second or two - the log\n"
+     "# line says so and reports its own duration, so it can't be mistaken\n"
+     "# for the bug being hunted. Heavier than the probe proper; set false\n"
+     "# for normal play. Does nothing unless frame_probe_enabled is true.\n"
+     "# Default: true"),
     ('words_of_power', 'threat_enumeration_legacy', 'false',
      "# Restore the old global T readout verbatim: count, names, and\n"
      "# directions of everything threatening the tile. The default answer is\n"
@@ -445,6 +461,8 @@ class _Cfg:
     threat_enumeration_legacy = _settings.getboolean('words_of_power', 'threat_enumeration_legacy', fallback=False)
     latch_visual_overlay = _settings.getboolean('words_of_power', 'latch_visual_overlay', fallback=True)
     mouse_attention_arbitration = _settings.getboolean('words_of_power', 'mouse_attention_arbitration', fallback=True)
+    frame_probe_enabled = _settings.getboolean('words_of_power', 'frame_probe_enabled', fallback=True)
+    frame_probe_census = _settings.getboolean('words_of_power', 'frame_probe_census', fallback=True)
     digest_enabled = _settings.getboolean('words_of_power', 'digest_enabled', fallback=True)
     # [Composer] — pipeline flags. As of 0.3.2 the composer pipeline is the
     # shipped speech engine: producers on, legacy combat narration off.
@@ -486,6 +504,8 @@ log(f"[Settings] pin_speak_all = {cfg.pin_speak_all}")
 log(f"[Settings] threat_enumeration_legacy = {cfg.threat_enumeration_legacy}")
 log(f"[Settings] latch_visual_overlay = {cfg.latch_visual_overlay}")
 log(f"[Settings] mouse_attention_arbitration = {cfg.mouse_attention_arbitration}")
+log(f"[Settings] frame_probe_enabled = {cfg.frame_probe_enabled}")
+log(f"[Settings] frame_probe_census = {cfg.frame_probe_census}")
 log(f"[Settings] digest_enabled = {cfg.digest_enabled}")
 log(f"[Settings] crisis_enabled = {cfg.crisis_enabled}")
 log(f"[Settings] orphan_enabled = {cfg.orphan_enabled}")
@@ -9893,6 +9913,169 @@ if _PyGameView is not None:
         # STATE_LEVEL and unvoiced states — no keybinds announced
         return ""
 
+    # ---- Frame heartbeat probe ----
+    # Diagnostic for the sustained-runtime stall family (2026-07-07:
+    # intermittent audio cutouts idling post-deploy; the unexplained
+    # animation freeze; player reports of menu double-scrolls, which the
+    # game's hand-rolled 200ms key repeat converts any held-key stall
+    # into; one player guessed memory leak). Frame-to-frame gap measured
+    # at the all-state draw_screen hook: a gap over the spike threshold
+    # logs immediately with state, latch, and GC context; each minute a
+    # one-line summary logs frames, average, max, spike count, and process
+    # working set (a leak reads as monotonic growth). GC passes are timed
+    # DIRECTLY via gc.callbacks - a collector pause shows up attributed,
+    # not inferred. All lines carry the [Probe] tag; frame_probe_enabled
+    # (default true) silences the whole probe.
+    import gc as _probe_gc
+    _PROBE_SPIKE_MS = 50.0
+    _PROBE_GC_MS = 10.0
+    _PROBE_WINDOW_S = 60.0
+    _PROBE_CENSUS_FIRST_S = 60.0   # early baseline, then...
+    _PROBE_CENSUS_EVERY_S = 300.0  # ...every five minutes
+    _PROBE_CENSUS_STRIDE = 32      # sample 1-in-32 objects; deltas scaled back up
+    _probe = {'last': None, 'win_start': None, 'frames': 0, 'sum': 0.0,
+              'max': 0.0, 'spikes': 0, 'gc_t0': None,
+              'start': None, 'census_last': None, 'census_prev': None}
+
+    def _probe_census(now):
+        """Leak hunt: walk the tracked heap, count objects by type (strided
+        sample), log the biggest growers since the previous census. This IS
+        a deliberate stall - it logs its own duration and says so, so a
+        census line can never be mistaken for the quarry. LIMIT: sees only
+        GC-tracked Python containers; C-side memory (pygame surfaces,
+        sounds) shows in the summary rss but not here - objects flat while
+        rss climbs is itself a finding (points at C-level caches)."""
+        t0 = time.perf_counter()
+        objs = _probe_gc.get_objects()
+        total = len(objs)
+        counts = {}
+        for o in objs[::_PROBE_CENSUS_STRIDE]:
+            t = type(o)
+            k = f"{t.__module__}.{t.__qualname__}"
+            counts[k] = counts.get(k, 0) + 1
+        del objs
+        prev = _probe['census_prev']
+        _probe['census_prev'] = counts
+        _probe['census_last'] = now
+        dur_ms = (time.perf_counter() - t0) * 1000.0
+        if prev is None:
+            top = sorted(counts.items(), key=lambda kv: -kv[1])[:8]
+            desc = ", ".join(f"{k} ~{v * _PROBE_CENSUS_STRIDE}" for k, v in top)
+            log(f"[Probe] Census baseline: {total} tracked objects "
+                f"({dur_ms:.0f}ms self-inflicted stall). Top: {desc}")
+        else:
+            deltas = {k: counts.get(k, 0) - prev.get(k, 0)
+                      for k in set(counts) | set(prev)}
+            top = [(k, v) for k, v in
+                   sorted(deltas.items(), key=lambda kv: -kv[1])[:8] if v > 0]
+            desc = ", ".join(f"{k} +~{v * _PROBE_CENSUS_STRIDE}" for k, v in top)
+            log(f"[Probe] Census: {total} tracked objects "
+                f"({dur_ms:.0f}ms self-inflicted stall). "
+                f"Growers: {desc or 'none'}")
+
+    def _probe_meminfo():
+        """(working set MB, lifetime page-fault count) via psapi (ctypes;
+        no new dependency). Fault-rate is the working-set-trim tell: a
+        storm of slow frames with FLAT gc counters but EXPLODING faults
+        means the OS reclaimed our pages and frames are paying re-touch
+        tax (2026-07-07 22:55 storm signature)."""
+        try:
+            class _PMC(ctypes.Structure):
+                _fields_ = [('cb', ctypes.c_uint32),
+                            ('PageFaultCount', ctypes.c_uint32),
+                            ('PeakWorkingSetSize', ctypes.c_size_t),
+                            ('WorkingSetSize', ctypes.c_size_t),
+                            ('QuotaPeakPagedPoolUsage', ctypes.c_size_t),
+                            ('QuotaPagedPoolUsage', ctypes.c_size_t),
+                            ('QuotaPeakNonPagedPoolUsage', ctypes.c_size_t),
+                            ('QuotaNonPagedPoolUsage', ctypes.c_size_t),
+                            ('PagefileUsage', ctypes.c_size_t),
+                            ('PeakPagefileUsage', ctypes.c_size_t)]
+            pmc = _PMC()
+            pmc.cb = ctypes.sizeof(_PMC)
+            # c_void_p sign-extends the -1 pseudo-handle to 64 bits; the
+            # bare int truncates and the call fails silently.
+            h = ctypes.c_void_p(ctypes.windll.kernel32.GetCurrentProcess())
+            if ctypes.windll.psapi.GetProcessMemoryInfo(h, ctypes.byref(pmc), pmc.cb):
+                return (pmc.WorkingSetSize / (1024.0 * 1024.0),
+                        int(pmc.PageFaultCount))
+        except Exception:
+            pass
+        return None
+
+    def _probe_gc_callback(phase, info):
+        try:
+            if phase == 'start':
+                _probe['gc_t0'] = time.perf_counter()
+                return
+            t0 = _probe['gc_t0']
+            _probe['gc_t0'] = None
+            if t0 is None:
+                return
+            ms = (time.perf_counter() - t0) * 1000.0
+            if ms >= _PROBE_GC_MS:
+                log(f"[Probe] GC gen{info.get('generation')} pause {ms:.0f}ms, "
+                    f"collected {info.get('collected')}")
+        except Exception:
+            pass
+
+    if cfg.frame_probe_enabled:
+        _probe_gc.callbacks.append(_probe_gc_callback)
+
+    def _probe_frame(view):
+        now = time.perf_counter()
+        last = _probe['last']
+        _probe['last'] = now
+        if last is None:
+            _probe['win_start'] = now
+            _probe['start'] = now
+            return
+        ms = (now - last) * 1000.0
+        _probe['frames'] += 1
+        _probe['sum'] += ms
+        if ms > _probe['max']:
+            _probe['max'] = ms
+        if ms >= _PROBE_SPIKE_MS:
+            _probe['spikes'] += 1
+            try:
+                state = _STATE_NAMES.get(view.state, str(view.state))
+            except Exception:
+                state = str(getattr(view, 'state', '?'))
+            try:
+                latch = _latch[0]
+                latch_desc = 'none' if latch is None else latch['overlay']
+            except Exception:
+                latch_desc = '?'
+            log(f"[Probe] Frame spike {ms:.0f}ms, state {state}, "
+                f"latch {latch_desc}, gc counts {_probe_gc.get_count()}")
+        if now - _probe['win_start'] >= _PROBE_WINDOW_S:
+            avg = _probe['sum'] / max(_probe['frames'], 1)
+            mem = _probe_meminfo()
+            mem_part = ""
+            if mem is not None:
+                rss, faults = mem
+                prev_faults = _probe.get('faults_last')
+                _probe['faults_last'] = faults
+                fault_part = (f", faults +{faults - prev_faults}"
+                              if prev_faults is not None else "")
+                mem_part = f", rss {rss:.0f}MB{fault_part}"
+            log(f"[Probe] {_probe['frames']} frames, avg {avg:.1f}ms, "
+                f"max {_probe['max']:.0f}ms, spikes {_probe['spikes']}{mem_part}")
+            _probe.update(win_start=now, frames=0, sum=0.0, max=0.0, spikes=0)
+        if cfg.frame_probe_census:
+            census_last = _probe['census_last']
+            due = ((census_last is None
+                    and now - _probe['start'] >= _PROBE_CENSUS_FIRST_S)
+                   or (census_last is not None
+                       and now - census_last >= _PROBE_CENSUS_EVERY_S))
+            if due:
+                # The census stall lands between frames; reset the frame
+                # clock after it so its cost isn't double-counted as a
+                # mystery spike on the NEXT frame.
+                _probe_census(now)
+                _probe['last'] = time.perf_counter()
+    # ---- end frame heartbeat probe ----
+
     _prev_state = [None]
     _original_draw_screen = _PyGameView.draw_screen
 
@@ -9905,6 +10088,13 @@ if _PyGameView is not None:
         Announces state name for non-self-announcing states, and defers
         keybind help to next frame so it speaks after all state-entry content."""
         cur = self.state
+
+        # Frame heartbeat probe: measure the gap since the previous frame.
+        if cfg.frame_probe_enabled:
+            try:
+                _probe_frame(self)
+            except Exception:
+                pass
 
         # Mouse-attention arbitration: the all-state flip point (menus,
         # shop, char sheet - anywhere process_level_input doesn't run).

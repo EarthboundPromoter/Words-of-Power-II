@@ -3,6 +3,23 @@
 All notable changes to **Words of Power II** are listed here, newest first. This is
 an early work-in-progress RW3 port — expect frequent changes.
 
+## Unreleased
+
+### Added
+- **Frame heartbeat probe** (diagnostic): the debug log gains `[Probe]` lines —
+  an immediate line for any frame gap over 50ms (with game state, latch, and
+  garbage-collector context), a one-line per-minute summary (frame count,
+  average, max, spikes, process memory), and attributed timing for any
+  garbage-collector pause over 10ms. For hunting intermittent stalls reported
+  as audio cutouts, animation hitches, and menu double-scrolls during long
+  sessions. New setting `frame_probe_enabled` (default true); set false to
+  silence it.
+- **Object census** riding the probe (leak hunting): every five minutes the
+  debug log records how many Python objects exist and which types grew since
+  the last look. The walk itself deliberately stalls the game for a second or
+  two and its log line says so, reporting its own duration. New setting
+  `frame_probe_census` (default true); set false for normal play.
+
 ## 2026-07-07 — 0.5.1 — Hotfix: the mouse yields to the keyboard
 
 ### Fixed
