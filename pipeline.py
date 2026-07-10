@@ -71,6 +71,14 @@ def fire_pipeline(tts, log_fn, cfg, wizard_unit, telemetry=None):
     import orphan as _orphan
     from journal import journal
 
+    # Slice 0 (the G1 Shape-C consumption contract): bring the shared
+    # record index current ONCE per boundary; every producer reads it
+    # instead of building its own. extend_index never raises (it
+    # degrades to a clear-first rebuild internally — an exception here
+    # would mute the whole turn's speech).
+    journal.extend_index()
+    shared = journal.record_index
+
     sections = []
 
     if cfg.crisis_enabled:
@@ -79,6 +87,7 @@ def fire_pipeline(tts, log_fn, cfg, wizard_unit, telemetry=None):
             lambda: _crisis.producer.fire(
                 journal.records, wizard_unit, log_fn, telemetry=telemetry,
                 damage_summed=getattr(cfg, 'crisis_damage_summed', False),
+                shared_index=shared,
             ),
             log_fn,
         )
@@ -104,6 +113,7 @@ def fire_pipeline(tts, log_fn, cfg, wizard_unit, telemetry=None):
             lambda: _equipment.producer.fire(
                 journal.records, cfg.show_coordinates,
                 log_fn, telemetry=telemetry,
+                shared_index=shared,
             ),
             log_fn,
         )
@@ -131,6 +141,7 @@ def fire_pipeline(tts, log_fn, cfg, wizard_unit, telemetry=None):
                 spawn_coord_cap=getattr(cfg, 'spawn_coord_cap', 5),
                 enemy_shield_totals=getattr(cfg, 'enemy_shield_totals', True),
                 ally_shield_totals=getattr(cfg, 'ally_shield_totals', False),
+                shared_index=shared,
             ),
             log_fn,
         )
@@ -138,11 +149,18 @@ def fire_pipeline(tts, log_fn, cfg, wizard_unit, telemetry=None):
             sections.append(section)
 
     # Mark-invariant watchdog. Any record with marks from two producers
-    # indicates a coordination bug. Telemetry fires once per offending
-    # record — should always be zero in healthy operation.
+    # indicates a coordination bug. Slice 0: producers note every record
+    # they stamp; the check drains that set instead of walking the whole
+    # level list. Semantics shift, accepted and documented (plan §0.7):
+    # the old full pass RE-emitted a stale double-claim every boundary;
+    # the drain emits once, at the boundary the second mark lands — new
+    # violations are still detected at the same boundary they occur.
+    # The drain runs UNCONDITIONALLY so the noted set never accumulates
+    # when telemetry is off.
+    marked = journal.drain_marked_records()
     if telemetry is not None:
         try:
-            _check_double_claims(journal.records, telemetry)
+            _check_double_claims(marked, telemetry)
         except Exception:
             pass
 

@@ -90,6 +90,10 @@ def _claim(record):
     marks = record.setdefault('marks', [])
     if CRISIS_MARK not in marks:
         marks.append(CRISIS_MARK)
+        # Slice 0: feed the pipeline's double-claim watchdog (it drains
+        # noted records instead of walking the whole level list).
+        from journal import journal as _j
+        _j.note_producer_mark(record)
 
 
 def _has_crisis_mark(record):
@@ -548,7 +552,7 @@ class _CrisisProducer:
         return float('inf') if not turns else turns
 
     def fire(self, journal_records, wizard_unit, log_fn, telemetry=None,
-             damage_summed=False):
+             damage_summed=False, shared_index=None):
         """Walk journal records since last fire. Identify wizard-target
         events. Stamp marks. Compose Wizard-prefix lines.
 
@@ -575,10 +579,15 @@ class _CrisisProducer:
         else:
             wizard_pos = (None, None)
 
+        # Slice 0: the tail is derived from THIS producer's own cursor by
+        # sequence comparison (tail_after scans back from the end — O(new)),
+        # never from a list offset or the journal's extension watermark
+        # (build law 1/4). Semantics identical to the old full-list filter.
+        from journal import tail_after as _tail_after
+        tail = _tail_after(journal_records, self._last_processed_seq)
         new_records = [
-            r for r in journal_records
+            r for r in tail
             if r.get('sequence') is not None
-            and r.get('sequence') > self._last_processed_seq
             and not _has_crisis_mark(r)
         ]
         if not new_records and wizard_unit is None:
@@ -586,12 +595,11 @@ class _CrisisProducer:
 
         # Advance the "processed" cursor regardless of whether we emit;
         # records we skip this turn won't be re-scanned next turn.
-        if journal_records:
-            max_seq = max(
-                r.get('sequence', -1) for r in journal_records
-            )
+        # (Append-order sequences: the tail's last record carries its max.)
+        if tail:
             self._last_processed_seq = max(
-                self._last_processed_seq, max_seq
+                self._last_processed_seq,
+                tail[-1].get('sequence', -1),
             )
 
         lines = []
@@ -614,7 +622,8 @@ class _CrisisProducer:
         # (equipment's). Damage and shield below are unconditional and do
         # NOT use this. Lazy digest import mirrors the pipeline's pattern.
         import digest as _digest
-        _idx = _digest.build_record_index(journal_records)
+        _idx = (shared_index.by_seq if shared_index is not None
+                else _digest.build_record_index(journal_records))
 
         def _positive_out_of_chain(rec):
             if _digest.walk_to_keypress_root(rec, _idx) is not None:

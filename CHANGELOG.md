@@ -35,6 +35,11 @@ an early work-in-progress RW3 port — expect frequent changes.
   reproduce.
 
 ### Changed
+- **Internal: combat narration reads records through one shared index.**
+  No speech changes — replay-verified word-for-word identical across nine
+  recorded sessions. Composition cost no longer grows with how long
+  you've been on a level; on the heaviest recorded session it dropped
+  about sevenfold. Groundwork for the composer refactor.
 - **The 4-tile cursor move lands on a name, not a description**: Shift+move
   landings now speak the tile's contents by name (unit, prop, cloud, or
   terrain) instead of the full tile read — a rift landing no longer recites

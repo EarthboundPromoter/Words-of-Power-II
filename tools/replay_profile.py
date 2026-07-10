@@ -185,7 +185,7 @@ def segment_fires(events):
     return fires, dropped_batches
 
 
-def replay(path, show_coords=True, top=8, quiet=False):
+def replay(path, show_coords=True, top=8, quiet=False, dump_text=None):
     import pipeline
     import crisis
     import digest
@@ -258,8 +258,17 @@ def replay(path, show_coords=True, top=8, quiet=False):
             'records': len(batch),
             'total': total,
             'chars': len(text),
+            'text': text,
             **{k: slice_ms[k] * 1000.0 for k in PRODUCERS},
         })
+
+    if dump_text:
+        # The slice gate's parity artifact: one line per composed fire,
+        # empty fires included — two runs of the same log on different
+        # code diff clean iff the spoken output is identical.
+        with open(dump_text, 'w', encoding='utf-8') as f:
+            for r in rows:
+                f.write(f"L{r['level']} T{r['turn']}\t{r['text']}\n")
 
     _report(path, rows, n_records, level_ids, dropped, bad_lines,
             fail_counts, top, log_lines, quiet)
@@ -320,6 +329,9 @@ def main():
     ap.add_argument('--profile', action='store_true',
                     help='cProfile the replay; print top functions')
     ap.add_argument('--quiet', action='store_true', help='suppress error echo')
+    ap.add_argument('--dump-text', metavar='PATH',
+                    help='write one line per composed fire (level/turn + '
+                         'emitted text) — the text-identical slice gate')
     args = ap.parse_args()
 
     _bootstrap_game()
@@ -331,7 +343,7 @@ def main():
         prof = cProfile.Profile()
         prof.enable()
         replay(path, show_coords=not args.no_coords, top=args.top,
-               quiet=args.quiet)
+               quiet=args.quiet, dump_text=args.dump_text)
         prof.disable()
         stats = pstats.Stats(prof).strip_dirs()
         print("\n--- cProfile: top 25 by cumulative time ---")
@@ -340,7 +352,7 @@ def main():
         stats.sort_stats('tottime').print_stats(25)
     else:
         replay(path, show_coords=not args.no_coords, top=args.top,
-               quiet=args.quiet)
+               quiet=args.quiet, dump_text=args.dump_text)
 
 
 if __name__ == '__main__':

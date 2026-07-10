@@ -59,6 +59,88 @@ def register_container_watch(attrs, hook):
     _container_attr_hook = hook
 
 
+class RecordIndex:
+    """Live view over the journal's record list (slice 0, the G1 Shape-C
+    consumption contract): seq->record plus parent_seq->children, extended
+    incrementally by _Journal.extend_index(). The dicts are NEVER rebound —
+    cleared in place — so a held reference stays valid across resets and
+    rebuilds. wizard_team memoizes orphan._find_wizard_team's five-key
+    scan (first player-controlled snapshot's team), maintained at
+    extension time. See docs/SLICE0_BOUNDARY_SPINE_BUILD_PLAN.md."""
+    __slots__ = ('by_seq', 'children', 'wizard_team')
+
+    def __init__(self):
+        self.by_seq = {}
+        self.children = {}
+        self.wizard_team = None
+
+    def clear(self):
+        self.by_seq.clear()
+        self.children.clear()
+        self.wizard_team = None
+
+
+def tail_after(records, cursor_seq):
+    """The records with sequence > cursor_seq. Assumes append-order
+    sequences (the journal's invariant: record() is the sole append and
+    sequence is monotonic). Scans backward from the end — O(tail) — and
+    compares SEQUENCES, never list positions, so it is correct across
+    journal.reset() (sequence survives reset; list offsets do not — the
+    slice-0 skeptic's finding 1)."""
+    i = len(records)
+    while i > 0 and records[i - 1].get('sequence', 0) > cursor_seq:
+        i -= 1
+    return records[i:]
+
+
+def gather_descendants(root, record_index):
+    """Every record whose lineage roots in `root`, sequence-ordered, root
+    included — the children-map equivalent of the producers' old
+    walk-every-record gathers. Membership is equal when root is a true
+    root (parent None); a PARENTED root returns [] exactly as the old
+    walk-to-ultimate-root comparison did (nothing's ultimate root equals
+    a non-root record, itself included). Cycle-guarded: the old walkers
+    all carried one, and a naive DFS would hang on data they skip
+    (slice-0 skeptic finding 5). O(chain size), not O(level list)."""
+    if root is None or root.get('sequence') is None:
+        return []
+    if root.get('parent') is not None:
+        return []
+    out = []
+    seen = set()
+    stack = [root]
+    children = record_index.children
+    while stack:
+        rec = stack.pop()
+        seq = rec.get('sequence')
+        if seq is None or seq in seen:
+            continue
+        seen.add(seq)
+        out.append(rec)
+        kids = children.get(seq)
+        if kids:
+            stack.extend(kids)
+    out.sort(key=lambda r: r.get('sequence', 0))
+    return out
+
+
+_WIZARD_SNAP_KEYS = ('caster', 'target', 'unit', 'user', 'owner')
+
+
+def _wizard_team_from(rec):
+    """orphan._find_wizard_team's per-record half, replicated exactly
+    (five payload keys, isinstance-dict guard against string payload
+    fields like EventOnBuffAttemptApply's, team must be non-None)."""
+    payload = rec.get('payload') or {}
+    for key in _WIZARD_SNAP_KEYS:
+        snap = payload.get(key)
+        if isinstance(snap, dict) and snap.get('is_player_controlled'):
+            team = snap.get('team')
+            if team is not None:
+                return team
+    return None
+
+
 class _Journal:
     _atexit_registered = False
 
@@ -116,6 +198,16 @@ class _Journal:
         # LoS re-diff consumer. The consumer slot survives reset().
         self.terrain_los_dirty = False
         self._terrain_dirty_consumer = None
+        # Slice 0 (G1 Shape C): the persistent record index — extended on
+        # read via extend_index(), coupled to the list's lifecycle in
+        # reset(). _indexed_count/_last_indexed_seq are index-maintenance
+        # state ONLY, never a producer read position (skeptic finding 4).
+        # _marked_this_boundary feeds the pipeline's double-claim watchdog
+        # (drained every fire, cleared on reset).
+        self.record_index = RecordIndex()
+        self._indexed_count = 0
+        self._last_indexed_seq = None
+        self._marked_this_boundary = []
 
     def reset(self, level_id, level=None):
         self.records = []
@@ -136,6 +228,13 @@ class _Journal:
         self._level = level
         self.terrain_los_dirty = False
         self.level_id = level_id
+        # The index dies with the list, in the same method — lifecycle
+        # coupled by construction (slice 0). Dicts cleared in place so
+        # held RecordIndex references stay valid.
+        self.record_index.clear()
+        self._indexed_count = 0
+        self._last_indexed_seq = None
+        self._marked_this_boundary = []
         if self._fp:
             self._emit({"__meta__": "level_reset", "level_id": level_id, "seq": self.sequence})
             # Level transitions are a natural pause — land the departed
@@ -206,6 +305,77 @@ class _Journal:
                 self._terrain_dirty_consumer()
             except Exception:
                 pass
+
+    def extend_index(self):
+        """Bring record_index current with self.records. Idempotent,
+        O(records appended since the last call) — extend-on-read: every
+        consumer calls this before reading the maps (the fire_pipeline
+        boundary and the mid-turn suppression query both do).
+
+        Wholesale list replacement is DETECTED and answered with a
+        clear-first rebuild: the stored count exceeding the list, or the
+        record at the high-water position no longer carrying the
+        remembered sequence, means the list is not the one we indexed
+        (replay rebinds journal.records per batch — the rebuild is that
+        path's NORMAL operation, not an edge case). Extending from zero
+        over foreign entries would leave a departed level's parents
+        resolvable, so the maps always clear first (skeptic finding 3).
+        Sequences are read only off record dicts — the journal's own
+        counter stays 0 during replay and is never consulted.
+
+        Never raises: both fire sites wrap the whole boundary in
+        try/except, so an exception here would mute the turn's speech
+        (skeptic finding 10). Unexpected failure degrades to one rebuild
+        attempt; failure again leaves the maps cleared with counters
+        zeroed, and the next call retries from scratch."""
+        try:
+            self._extend_index_inner()
+        except Exception:
+            try:
+                self.record_index.clear()
+                self._indexed_count = 0
+                self._last_indexed_seq = None
+                self._extend_index_inner()
+            except Exception:
+                self.record_index.clear()
+                self._indexed_count = 0
+                self._last_indexed_seq = None
+
+    def _extend_index_inner(self):
+        records = self.records
+        n = self._indexed_count
+        if n > len(records) or (
+                n > 0 and records[n - 1].get('sequence') != self._last_indexed_seq):
+            self.record_index.clear()
+            n = 0
+        idx = self.record_index
+        by_seq = idx.by_seq
+        children = idx.children
+        for rec in records[n:]:
+            if 'sequence' in rec:
+                by_seq[rec['sequence']] = rec
+            parent = rec.get('parent')
+            if parent is not None:
+                # parent-None records are roots; indexing them under None
+                # would accumulate every root in one bucket (finding 5).
+                children.setdefault(parent, []).append(rec)
+            if idx.wizard_team is None:
+                idx.wizard_team = _wizard_team_from(rec)
+        self._indexed_count = len(records)
+        self._last_indexed_seq = (
+            records[-1].get('sequence') if records else None)
+
+    def note_producer_mark(self, rec):
+        """Watchdog feed (slice 0): producers report each record they
+        claim-stamp; the pipeline's double-claim check drains this set
+        instead of walking the level's whole list. A record noted twice
+        is exactly the case the watchdog exists to catch."""
+        self._marked_this_boundary.append(rec)
+
+    def drain_marked_records(self):
+        out = self._marked_this_boundary
+        self._marked_this_boundary = []
+        return out
 
     def _current_parent_seq(self):
         # Parent for a new record = the innermost live cause. cause_stack wins when

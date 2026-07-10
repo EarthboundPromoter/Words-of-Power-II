@@ -65,6 +65,9 @@ def _claim(record):
     marks = record.setdefault('marks', [])
     if EQUIPMENT_MARK not in marks:
         marks.append(EQUIPMENT_MARK)
+        # Slice 0: feed the pipeline's double-claim watchdog.
+        from journal import journal as _j
+        _j.note_producer_mark(record)
 
 
 # ======================================================================
@@ -546,7 +549,8 @@ class _EquipmentProducer:
     def __init__(self):
         self._last_processed_seq = -1
 
-    def fire(self, journal_records, show_coords, log_fn, telemetry=None):
+    def fire(self, journal_records, show_coords, log_fn, telemetry=None,
+             shared_index=None):
         """Compose the equipment section for this turn boundary.
 
         Returns:
@@ -556,21 +560,28 @@ class _EquipmentProducer:
         if not journal_records:
             return (PRIORITY_PLAYER_PASSIVES, "")
 
+        # Slice 0: tail by this producer's own sequence cursor (never a
+        # list offset — build law 1); shared index replaces the per-fire
+        # full-list index build and wizard-team scan. shared_index=None
+        # (tests, standalone use) keeps the old local builds verbatim.
+        from journal import tail_after as _tail_after
+        tail = _tail_after(journal_records, self._last_processed_seq)
         new_records = [
-            r for r in journal_records
-            if r.get('sequence') is not None
-            and r.get('sequence') > self._last_processed_seq
+            r for r in tail if r.get('sequence') is not None
         ]
-        max_seq = max(
-            (r.get('sequence', -1) for r in journal_records), default=-1
-        )
-        self._last_processed_seq = max(self._last_processed_seq, max_seq)
+        if tail:
+            self._last_processed_seq = max(
+                self._last_processed_seq, tail[-1].get('sequence', -1))
 
         if not new_records:
             return (PRIORITY_PLAYER_PASSIVES, "")
 
-        idx = _build_index(journal_records)
-        wizard_team = _find_wizard_team(journal_records)
+        if shared_index is not None:
+            idx = shared_index.by_seq
+            wizard_team = shared_index.wizard_team
+        else:
+            idx = _build_index(journal_records)
+            wizard_team = _find_wizard_team(journal_records)
 
         roots = [
             r for r in new_records
@@ -581,7 +592,16 @@ class _EquipmentProducer:
 
         lines = []
         for root in roots:
-            chain = _gather_chain(journal_records, root, idx)
+            # Full-history chain membership (this producer's shipped
+            # scope — orphan's gathers are window-scoped, this one is
+            # not; plan §2b). The children-map walk kills the
+            # per-root full-list scan that made equipment the most
+            # expensive producer while composing nothing.
+            if shared_index is not None:
+                from journal import gather_descendants as _gd
+                chain = _gd(root, shared_index)
+            else:
+                chain = _gather_chain(journal_records, root, idx)
             new_lines = _render_equipment_chain(chain, wizard_team, show_coords)
             lines.extend(new_lines)
 

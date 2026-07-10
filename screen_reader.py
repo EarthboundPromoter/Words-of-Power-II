@@ -1803,11 +1803,17 @@ def _current_keypress_root_seq():
     if not cfg.digest_enabled:
         return None
     try:
-        records = _journal.journal.records
         cause_stack = _journal.journal.cause_stack
         if not cause_stack:
             return None
-        idx = _digest.build_record_index(records)
+        # Slice 0: extend-on-read replaces the per-call full index build
+        # (this was the mod's highest-frequency full-list rebuild — once
+        # per digest-covered handler invocation, mid-turn). extend_index
+        # is idempotent and O(records since the last read); the walk is
+        # unchanged. Replay never runs this path, so its gate is the
+        # index equivalence pins (test_record_index), not replay.
+        _journal.journal.extend_index()
+        idx = _journal.journal.record_index.by_seq
         for rec in cause_stack:
             root = _digest.walk_to_keypress_root(rec, idx)
             if root is not None:
