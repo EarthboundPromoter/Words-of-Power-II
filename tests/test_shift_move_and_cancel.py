@@ -292,7 +292,7 @@ def test_finalize_runs_in_the_remaining_x4_paths():
 # was down entering the frame. Detection is order-sensitive by design — a
 # genuine press-then-release has the opposite ordering and must not match.
 
-from helpers import _bound_keys  # noqa: E402
+from helpers import _bound_keys, _pluralize  # noqa: E402
 
 # pygame isn't installed in the test venv; the detector only compares keycode
 # identities, so a stub namespace with distinct ints is a faithful double.
@@ -316,12 +316,16 @@ _KB_DIRS_TEST = (
 )
 
 _jump_tts = _FakeTTS()
-_jump_cfg = types.SimpleNamespace(jump_coalesce_units=False)
+_jump_cfg = types.SimpleNamespace(jump_coalesce_units=False,
+                                  jump_count_open_space=False,
+                                  jump_compass=True,
+                                  jump_landing_first=False)
 
 _fk = {
     '_pg_keybind': pygame,
     '_KB_DIRS': _KB_DIRS_TEST,
     '_bound_keys': _bound_keys,
+    '_pluralize': _pluralize,
     # call-time deps for _jump_step
     'cfg': _jump_cfg,
     'Level': types.SimpleNamespace(
@@ -409,11 +413,14 @@ def test_chord_eligibility_survives_a_rebind():
     assert _vec_for(rebound, pygame.K_UP) is None
 
 
-# ---- axis jump (slice 3): word-jump stop rule ----
+# ---- axis jump: word-jump stop rule + receipt (spring-look pass) ----
 # Reference = the first stepped tile's headline; a first tile that already
-# differs from the origin AND carries content lands in one step. Landing
-# speaks via the normal announcer plus "N direction" (". Edge" on clamp);
-# pinned at the edge speaks "Edge" alone.
+# differs from the origin AND carries content lands in one step — and
+# SOUNDS like a step (no receipt, landing only). Landing speaks via the
+# normal announcer plus the receipt ("4 floor east"; ", edge" on clamp);
+# pinned at the edge speaks "Edge" alone, every press. Full-count default:
+# the number is distance-to-landing; unit/prop spans always speak their
+# true crossed count ("past 2 Imps east").
 
 class _JumpLevel:
     def __init__(self, row):
@@ -447,35 +454,38 @@ def test_jump_runs_floors_and_lands_on_the_unit():
     view = _jrun(row, 0)
     assert view.cur_spell_target.x == 4
     assert [p.x for p in view.examined] == [4]
-    assert _jump_tts.spoken == ["4 east"]
+    assert _jump_tts.spoken == ["4 floor east"]
 
 
 def test_jump_from_a_unit_runs_the_floors_to_the_wall():
     row = [_Tile(unit=_named("Imp")), _Tile(), _Tile(), _Tile(wall=True)]
     view = _jrun(row, 0)
     assert view.cur_spell_target.x == 3
-    assert _jump_tts.spoken == ["3 east"]
+    assert _jump_tts.spoken == ["3 floor east"]
 
 
-def test_adjacent_content_lands_in_one_step():
+def test_adjacent_content_lands_in_one_step_and_sounds_like_one():
+    # No receipt at all: a one-step jump is a step; the landing announcer
+    # (examine) is the whole utterance.
     row = [_Tile(), _Tile(unit=_named("Imp")), _Tile(), _Tile()]
     view = _jrun(row, 0)
     assert view.cur_spell_target.x == 1
-    assert _jump_tts.spoken == ["1 east"]
+    assert [p.x for p in view.examined] == [1]
+    assert _jump_tts.spoken == []
 
 
 def test_prop_breaks_a_floor_run():
     row = [_Tile(), _Tile(), _Tile(prop=_named("Rift")), _Tile()]
     view = _jrun(row, 0)
     assert view.cur_spell_target.x == 2
-    assert _jump_tts.spoken == ["2 east"]
+    assert _jump_tts.spoken == ["2 floor east"]
 
 
 def test_uniform_run_to_the_edge_appends_edge():
     row = [_Tile(), _Tile(), _Tile(), _Tile()]
     view = _jrun(row, 0)
     assert view.cur_spell_target.x == 3
-    assert _jump_tts.spoken == ["3 east. Edge"]
+    assert _jump_tts.spoken == ["3 floor east, edge"]
 
 
 def test_pinned_at_edge_speaks_edge_and_stays_put():
@@ -492,8 +502,12 @@ def test_default_stops_at_every_unit_coalesce_strides_the_cluster():
                 _Tile(unit=_named("Imp")), _Tile()]
     view = _jrun(row(), 0)                 # default: next imp is content
     assert view.cur_spell_target.x == 1
+    assert _jump_tts.spoken == []          # one-step jump sounds like a step
     view = _jrun(row(), 0, coalesce=True)  # stride the same-name cluster
     assert view.cur_spell_target.x == 3
+    # Unit carve-out: the strided beings are counted truthfully, both
+    # count modes (the landing tile speaks for itself).
+    assert _jump_tts.spoken == ["past 2 Imps east"]
 
 
 def test_jump_wiring_pins():

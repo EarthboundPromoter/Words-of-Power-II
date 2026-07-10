@@ -6,6 +6,36 @@ an early work-in-progress RW3 port — expect frequent changes.
 ## Unreleased
 
 ### Added
+- **Spring look: hold Ctrl to peek.** From normal play, `Ctrl+direction`
+  conjures a look cursor at your feet and steps it one tile — the same press
+  both opens and moves. Keep holding Ctrl and every arrow steps the cursor;
+  add Shift to jump. Release Ctrl and you're back in control ("Cancelled"),
+  cursor gone — the mode lives in your finger, so there's nothing to forget.
+  To keep what you found: press `V` mid-peek to stay in look mode after
+  release, or a spell hotkey to aim that spell exactly where you were
+  looking (the game keeps the cursor position when switching spells — review
+  flows straight into casting). `Ctrl+Shift+direction` from normal play
+  conjures and jumps in one gesture: the "what's out there to the east?"
+  glance. Focus loss with Ctrl held can't strand the mode; the hold is
+  re-checked every frame.
+- **Jump receipts say what you crossed.** The axis jump now speaks the span
+  it skimmed, not just a number: "4 floor east, Imp" instead of "4 east".
+  Spans are uniform by construction, so one word covers the crossing
+  truthfully — "3 chasm east", "2 Poison Gas north". A jump that moves one
+  tile speaks like a step: landing only. Three new settings:
+  `jump_count_open_space` (default false: the number is the distance to the
+  landing tile — an immediate range check; true counts the open span
+  itself), `jump_compass` (default true: drop the direction word if you
+  don't want it — it mainly confirms diagonal chords), and
+  `jump_landing_first` (default false: receipt then landing; true flips to
+  "Imp ... Moved 4 floor east"). Beings and items are never miscounted:
+  with `jump_coalesce_units` on, a strided cluster speaks its true census
+  ("past 3 Goblins"), in both count modes.
+- **Edge answers every time.** Any blocked cursor gesture at the map
+  boundary now says "Edge" on every fresh press — single steps included,
+  which used to clamp silently — in look, targeting, and deploy alike.
+  Holding a key against the boundary says it once per press, not per
+  autowalk repeat.
 - **Search boxes speak** — the game's search bars in the shops (spells,
   crafting, bestiary) and the combat log are now fully usable by ear. `Q` (the
   game's own binding) focuses the box and the mod announces it; as you type,
@@ -51,7 +81,18 @@ an early work-in-progress RW3 port — expect frequent changes.
   reproduce.
 
 ### Changed
-- **The 4-tile cursor move lands on a name, not a description**: Shift+move
+- **The axis jump is now `Ctrl+Shift+direction` — a rebind, not a fix.**
+  Bare `Ctrl+direction` needed to step so the spring look can creep, so the
+  jump takes the heavier chord. One grammar everywhere a cursor exists:
+  arrow steps, `Shift+arrow` strides 4, `Ctrl+arrow` steps (and holds the
+  spring from normal play), `Ctrl+Shift+arrow` jumps. If you'd learned
+  `Ctrl+arrow` as the jump, add Shift. Numpad jump chords are intentionally
+  unsupported — with NumLock on (which NVDA users need), Windows strips
+  Shift from numpad presses and the chord would silently degrade to a step;
+  jumps live on the arrow row. The jump's landing announcement also moved:
+  the receipt now speaks before the landing by default (`jump_landing_first`
+  restores the old order, with a "Moved" prefix so the trailing number
+  reads as a receipt, not a new contact). Shift+move
   landings now speak the tile's contents by name (unit, prop, cloud, or
   terrain) instead of the full tile read — a rift landing no longer recites
   the whole portal tooltip mid-sprint. Coordinates, the latch token, and

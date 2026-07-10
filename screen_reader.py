@@ -231,10 +231,30 @@ _SETTINGS_SCHEMA = [
      "# permanently.\n"
      "# Default: true"),
     ('words_of_power', 'jump_coalesce_units', 'false',
-     "# Axis jump (Ctrl+direction): when the run crosses several units with\n"
-     "# the SAME name in a row, stride the whole cluster as one block\n"
+     "# Axis jump (Ctrl+Shift+direction): when the run crosses several units\n"
+     "# with the SAME name in a row, stride the whole cluster as one block\n"
      "# instead of stopping at each one. Default false: the jump stops at\n"
-     "# every unit, so nothing with agency is skimmed past unheard.\n"
+     "# every unit, so nothing with agency is skimmed past unheard. When a\n"
+     "# cluster IS strided, the receipt counts it truthfully ('past 3\n"
+     "# Goblins') in both jump_count modes.\n"
+     "# Default: false"),
+    ('words_of_power', 'jump_count_open_space', 'false',
+     "# Jump receipt count. false (default): the number is the distance to\n"
+     "# the landing tile - '4 floor, Goblin' means the goblin is four tiles\n"
+     "# out, an immediate range check. true: the number counts the open\n"
+     "# span itself - '3 floor, Goblin' means three floor tiles lie between\n"
+     "# you and it. Units and props always speak their true count.\n"
+     "# Default: false"),
+    ('words_of_power', 'jump_compass', 'true',
+     "# Speak the compass direction in jump receipts ('4 floor east'). You\n"
+     "# pressed the arrow, so the direction is redundant for most players;\n"
+     "# it earns its keep confirming a two-arrow diagonal chord registered\n"
+     "# as one diagonal. Set false to drop it.\n"
+     "# Default: true"),
+    ('words_of_power', 'jump_landing_first', 'false',
+     "# Jump announcement order. false (default): receipt then landing -\n"
+     "# '4 floor east. Goblin, HP 12 of 12.' true: landing then receipt -\n"
+     "# 'Goblin, HP 12 of 12. Moved 4 floor east.'\n"
      "# Default: false"),
     ('words_of_power', 'pin_speak_all', 'false',
      "# Pins (K cycle): speak a per-turn update line for EVERY pin, not just\n"
@@ -480,6 +500,9 @@ class _Cfg:
     aoe_group_names = _settings.getboolean('words_of_power', 'aoe_group_names', fallback=True)
     speak_pickup_effects = _settings.getboolean('words_of_power', 'speak_pickup_effects', fallback=True)
     jump_coalesce_units = _settings.getboolean('words_of_power', 'jump_coalesce_units', fallback=False)
+    jump_count_open_space = _settings.getboolean('words_of_power', 'jump_count_open_space', fallback=False)
+    jump_compass = _settings.getboolean('words_of_power', 'jump_compass', fallback=True)
+    jump_landing_first = _settings.getboolean('words_of_power', 'jump_landing_first', fallback=False)
     pin_speak_all = _settings.getboolean('words_of_power', 'pin_speak_all', fallback=False)
     threat_enumeration_legacy = _settings.getboolean('words_of_power', 'threat_enumeration_legacy', fallback=False)
     latch_visual_overlay = _settings.getboolean('words_of_power', 'latch_visual_overlay', fallback=True)
@@ -5977,6 +6000,7 @@ if _PyGameView is not None:
     # the same gaits via Shift+arrow and Shift+RCtrl+arrow. Documented in
     # help/README.
     _phys_shift = [False]  # driver-reported shift state as of last frame
+    _edge_down = {}        # keycode -> down; gates Edge to one per fresh press
 
     _NUMPAD_DIR_KEYS = frozenset((
         _pg_keybind.K_KP1, _pg_keybind.K_KP2, _pg_keybind.K_KP3,
@@ -6051,7 +6075,10 @@ if _PyGameView is not None:
     # ---- Two-arrow diagonal chording (Ctrl-idiom conversion) ----
     # Owner-ruled 2026-07-06 after a logged feel test: diagonals are
     # modifier-free two-arrow chords (Up+Right = NE), replacing the retired
-    # RCtrl gestures; Ctrl belongs to jump + cancel, side-agnostic. A real
+    # RCtrl gestures; Ctrl belongs to cancel + cursor gestures, side-
+    # agnostic. Gesture grammar (owner-ruled 2026-07-10, spring-look pass):
+    # arrow steps, Shift+arrow strides 4, Ctrl+arrow STEPS (conjuring the
+    # spring Look from normal play), Ctrl+Shift+arrow jumps. A real
     # orthogonal-direction press is withheld for ~one frame awaiting an
     # orthogonal partner: pair -> one diagonal step (Shift on the pair ->
     # diagonal x4 via the collector); no partner -> the press releases to
@@ -6068,6 +6095,7 @@ if _PyGameView is not None:
     # release one frame stale.
     _arrow_down = {}        # keycode -> physically down (edge-tracked)
     _arrow_buffer = [None]  # {'evt','key','vec','t','aged'} | None
+    _spring = [None]        # LookSpell instance conjured by Ctrl+direction (spring look)
 
     def _chord_vec_for(view, key):
         """(dx, dy) if key is a chord-eligible orthogonal movement bind —
@@ -6077,6 +6105,16 @@ if _PyGameView is not None:
             return None
         kb = getattr(view, 'key_binds', None)
         for bind_id, fallback, vec in _KB_DIRS[:4]:  # orthogonals only
+            if key in _bound_keys(kb, bind_id, fallback):
+                return vec
+        return None
+
+    def _dir_vec(view, key):
+        """(dx, dy) if key is ANY direction bind — all eight, numpad
+        included. The spring conjure and the edge scan want the whole
+        rose, not just the chord-eligible orthogonals."""
+        kb = getattr(view, 'key_binds', None)
+        for bind_id, fallback, vec in _KB_DIRS:
             if key in _bound_keys(kb, bind_id, fallback):
                 return vec
         return None
@@ -6094,6 +6132,12 @@ if _PyGameView is not None:
                 if view.game.cur_level.is_point_in_bounds(nt):
                     view.cur_spell_target = nt
                     view.try_examine_tile(nt)
+                elif steps == 1:
+                    # Blocked single step: say why nothing happened, every
+                    # press (owner ruling 2026-07-10; x4 answers through
+                    # _x4_finalize instead).
+                    log("[Cursor] Edge")
+                    async_tts.speak("Edge")
         elif deploying and view.deploy_target:
             for _ in range(steps):
                 np = Level.Point(view.deploy_target.x + movedir.x,
@@ -6101,6 +6145,9 @@ if _PyGameView is not None:
                 if view.game.next_level.is_point_in_bounds(np):
                     view.deploy_target = np
                     view.try_examine_tile(np)
+                elif steps == 1:
+                    log("[Cursor] Edge")
+                    async_tts.speak("Edge")
         else:
             # Normal play: single diagonal player move (the game never
             # repeats player movement under Shift — parity kept).
@@ -6109,7 +6156,9 @@ if _PyGameView is not None:
         if _x4_move[0] is not None:
             _x4_finalize(view)
 
-    # ---- Axis jump (slice 3): Ctrl+direction, either Ctrl ----
+    # ---- Axis jump (slice 3): Ctrl+Shift+direction, either Ctrl ----
+    # (Re-chorded from bare Ctrl+direction in the spring-look pass, owner-
+    # ruled 2026-07-10: bare Ctrl now STEPS so the spring can creep.)
     # Skim the cursor along an axis until the announcement would change —
     # "skip repeats of what you'd hear." Word-jump semantics resolve the
     # from-vs-toward asymmetry: the run's reference is the FIRST STEPPED
@@ -6118,16 +6167,70 @@ if _PyGameView is not None:
     # jump in one step. So: from floor across floors, land on the imp; from
     # the imp across floors, land on the wall; from floor with the imp
     # adjacent, land on the imp immediately. Landing speaks through the
-    # normal announcer plus a distance line ("7 east"; ". Edge" when the
-    # map edge stopped the run). jump_coalesce_units (default false) strides
-    # same-name unit clusters; default stops at every unit. Cursor contexts
-    # only — the wizard never jumps (the wizard four-jump is a separate
-    # queued feature with its own turn-cost design).
+    # normal announcer plus the receipt ("4 floor east"; see _jump_receipt
+    # for count modes and the unit/prop carve-out; "Edge" pinned, every
+    # press). jump_coalesce_units (default false) strides same-name unit
+    # clusters; default stops at every unit. Cursor contexts only — the
+    # wizard never jumps (the wizard four-jump is a separate queued feature
+    # with its own turn-cost design).
     _JUMP_DIR_NAMES = {
         (0, -1): "north", (0, 1): "south", (-1, 0): "west", (1, 0): "east",
         (-1, -1): "northwest", (1, -1): "northeast",
         (-1, 1): "southwest", (1, 1): "southeast",
     }
+
+    # ---- Spring look (owner-ruled 2026-07-10) ----
+    # Ctrl+direction from normal play conjures a Look cursor at the wizard
+    # and steps it; Ctrl+Shift+direction conjures and jumps. While Ctrl is
+    # held the look persists; releasing Ctrl aborts a SPRING-conjured
+    # cursor only ("Cancelled" = control is back) — V-look and targeting
+    # never release-abort. The latch rides instance identity for free: V
+    # or a spell hotkey replaces cur_spell through choose_spell (which
+    # keeps the cursor position, RiftWizard3.py:2345), the identity check
+    # stops matching, and the hold quietly stops owning the cursor. Entry
+    # goes through the ORIGINAL choose_spell: the game's menu_confirm
+    # click cues the mode and the glance's first tile speaks immediately —
+    # "Look mode" stays V's announcement. Lifecycle is a POLL, not KEYUP
+    # events: polls self-heal against focus loss eating the release
+    # (framework: events for transitions, polls for truth).
+
+    def _spring_conjure(view):
+        """Conjure the spring Look cursor. True when the cursor exists."""
+        try:
+            look_cls = getattr(_main, 'LookSpell', None)
+            p1 = getattr(getattr(view, 'game', None), 'p1', None)
+            if look_cls is None or p1 is None:
+                return False
+            spell = look_cls()
+            spell.caster = p1
+            _original_choose_spell(view, spell)
+            if getattr(view, 'cur_spell', None) is spell:
+                _spring[0] = spell
+                log("[Spring] Look conjured")
+                return True
+        except Exception as e:
+            log(f"[Spring] conjure error: {e}")
+        return False
+
+    def _spring_poll(view, ctrl_held):
+        """Release/disown check, once per frame. True when the spring
+        aborted this frame (the buffered glance press dies with it)."""
+        sp = _spring[0]
+        if sp is None:
+            return False
+        if getattr(view, 'cur_spell', None) is not sp:
+            # Latched (V), escalated (spell hotkey), cast, or cleared by a
+            # transition — the hold no longer owns the cursor.
+            _spring[0] = None
+            return False
+        if ctrl_held:
+            return False
+        _spring[0] = None
+        try:
+            view.abort_cur_spell()   # patched: speaks "Cancelled"
+        except Exception as e:
+            log(f"[Spring] abort error: {e}")
+        return True
 
     def _jump_sig(level, point, coalesce):
         """Headline signature for the stop rule. Mirrors the tile describer's
@@ -6153,6 +6256,36 @@ if _PyGameView is not None:
             return ('cloud', _name(cloud), terrain)
         return (terrain,)
 
+    def _jump_receipt(origin, landing, vec, ref, edged):
+        """Receipt for a jump: count + span type (+ compass, config).
+        Count semantics (owner-ruled 2026-07-10): the number is the
+        distance to the landing tile by default — '4 floor, Goblin' means
+        the goblin is four out, an immediate range check;
+        jump_count_open_space counts the span itself instead. Units and
+        props are discrete beings/objects and ALWAYS speak their true
+        crossed count in both modes ('past 3 Goblins') — inflating a
+        census of things with agency is never acceptable compression."""
+        n = max(abs(landing.x - origin.x), abs(landing.y - origin.y))
+        kind = ref[0]
+        if kind in ('unit', 'prop'):
+            crossed = n - 1
+            name = ref[1] if isinstance(ref[1], str) else "unit"
+            if crossed >= 2:
+                body = f"past {crossed} {_pluralize(name)}"
+            elif crossed == 1:
+                body = f"past {name}"
+            else:
+                body = ""   # moved one tile onto span content: landing says it
+        else:
+            word = ref[1] if kind == 'cloud' else kind
+            count = (n if edged else n - 1) if cfg.jump_count_open_space else n
+            body = f"{count} {word}"
+        if cfg.jump_compass:
+            body = f"{body} {_JUMP_DIR_NAMES.get(vec, '')}".strip()
+        if edged:
+            body = f"{body}, edge" if body else "edge"
+        return body
+
     def _jump_step(view, deploying, vec):
         """Perform one axis jump from the current cursor position."""
         try:
@@ -6167,15 +6300,17 @@ if _PyGameView is not None:
 
             first = step(origin)
             if not level.is_point_in_bounds(first):
-                # Pinned against the edge: say why nothing happened
-                # (slice 2 ruling — silence is a bad state).
+                # Pinned against the edge: say why nothing happened, EVERY
+                # press (slice 2 ruling — silence is a bad state; owner
+                # ruling 2026-07-10 — retrying the edge re-announces).
                 log("[Jump] Edge")
                 async_tts.speak("Edge")
                 return
             ref = _jump_sig(level, first, coalesce)
             edged = False
-            if (ref != _jump_sig(level, origin, coalesce)
-                    and ref[0] != 'floor'):
+            adjacent = (ref != _jump_sig(level, origin, coalesce)
+                        and ref[0] != 'floor')
+            if adjacent:
                 landing = first  # adjacent content: speech changes in one step
             else:
                 landing = first
@@ -6191,13 +6326,22 @@ if _PyGameView is not None:
                 view.deploy_target = landing
             else:
                 view.cur_spell_target = landing
-            view.try_examine_tile(landing)
-            n = max(abs(landing.x - origin.x), abs(landing.y - origin.y))
-            text = f"{n} {_JUMP_DIR_NAMES.get(vec, '')}".strip()
-            if edged:
-                text = f"{text}. Edge"
-            log(f"[Jump] {text}")
-            async_tts.speak(text)
+            # A one-step jump sounds exactly like a step: landing only.
+            receipt = "" if adjacent else _jump_receipt(origin, landing, vec,
+                                                        ref, edged)
+            if not receipt:
+                view.try_examine_tile(landing)
+            elif cfg.jump_landing_first:
+                # The landing announcer speaks synchronously inside
+                # try_examine_tile, so order is just call order.
+                view.try_examine_tile(landing)
+                text = f"Moved {receipt}"
+                log(f"[Jump] {text}")
+                async_tts.speak(text)
+            else:
+                log(f"[Jump] {receipt}")
+                async_tts.speak(receipt)
+                view.try_examine_tile(landing)
         except Exception as e:
             log(f"[Jump] error: {e}")
 
@@ -6210,6 +6354,12 @@ if _PyGameView is not None:
         for k in list(_arrow_down):
             if _arrow_down.get(k) and not keys_now[k]:
                 _arrow_down[k] = False
+        ctrl_held = keys_now[pygame.K_LCTRL] or keys_now[pygame.K_RCTRL]
+        if _spring_poll(view, ctrl_held):
+            # The glance died with the release: a press buffered during
+            # the hold belonged to it — never leak it to the game as a
+            # player move.
+            _arrow_buffer[0] = None
         if not view.can_execute_inputs():
             # Never withhold input the game wouldn't act on; flush any
             # held-over press so nothing goes stale across a transition.
@@ -6221,10 +6371,17 @@ if _PyGameView is not None:
                     f"{pygame.key.name(b['key'])} to the game")
             return
         shift_held = keys_now[pygame.K_LSHIFT] or keys_now[pygame.K_RSHIFT]
-        ctrl_held = keys_now[pygame.K_LCTRL] or keys_now[pygame.K_RCTRL]
         cursor_ctx = (view.cur_spell is not None
                       or (deploying and getattr(view, 'deploy_target', None)))
-        jumping = bool(ctrl_held and cursor_ctx)
+        # Re-chord (owner-ruled 2026-07-10, spring-look pass): the axis jump
+        # is Ctrl+Shift+direction; bare Ctrl+direction steps — from normal
+        # play it conjures the spring Look first, in cursor contexts the
+        # press just falls through to the game's own single step. Numpad
+        # jump chords are intentionally unsupported (NumLock fake-shift,
+        # owner 2026-07-10): a stripped Shift degrades the chord to a
+        # bare-Ctrl step — benign, and jumps live on the arrow row.
+        springable = bool(ctrl_held and not cursor_ctx and not deploying)
+        jumping = bool(ctrl_held and shift_held and (cursor_ctx or springable))
         consumed = []
         for evt in list(events):
             if evt.type == pygame.KEYUP:
@@ -6233,8 +6390,17 @@ if _PyGameView is not None:
                 continue
             if evt.type != pygame.KEYDOWN:
                 continue
-            # Ctrl+numpad: jump along the numpad direction, diagonals free.
-            # Numpad keys never chord, so they resolve immediately.
+            # Spring conjure: first Ctrl'd direction press with no cursor.
+            # On conjure failure the press falls through untouched — the
+            # game's native behavior survives mod breakage (API drift).
+            if springable and _dir_vec(view, evt.key) is not None:
+                if _spring_conjure(view):
+                    cursor_ctx = True
+                springable = False
+                jumping = bool(ctrl_held and shift_held and cursor_ctx)
+            # Ctrl+Shift+numpad: jump along the numpad direction, diagonals
+            # free. Numpad keys never chord, so they resolve immediately.
+            # (Bare Ctrl+numpad falls through — the game steps the cursor.)
             if jumping and evt.key in _NUMPAD_DIR_KEYS:
                 is_repeat = _arrow_down.get(evt.key, False)
                 _arrow_down[evt.key] = True
@@ -6253,10 +6419,11 @@ if _PyGameView is not None:
             _arrow_down[evt.key] = True
             if is_repeat:
                 # Game-synthesized autowalk repeat — pass through untouched
-                # (held arrows keep the game's native behavior), EXCEPT while
-                # Ctrl is held in a cursor context: the jump is a discrete
-                # gesture, so autowalk repeats are swallowed rather than
-                # letting the game single-step under the chord.
+                # (held arrows keep the game's native behavior; a held bare-
+                # Ctrl arrow autowalks the cursor under the spring), EXCEPT
+                # while Ctrl+Shift is down in a cursor context: the jump is
+                # a discrete gesture, so autowalk repeats are swallowed
+                # rather than letting the game single-step under the chord.
                 if jumping:
                     consumed.append(evt)
                 continue
@@ -6266,7 +6433,7 @@ if _PyGameView is not None:
                 dot = (b['vec'][0] * vec[0] + b['vec'][1] * vec[1])
                 if dot == 0:
                     # Orthogonal partner inside the window: CHORD —
-                    # diagonal step, or diagonal jump under Ctrl.
+                    # diagonal step, or diagonal jump under Ctrl+Shift.
                     consumed.append(evt)
                     _arrow_buffer[0] = None
                     pair = (b['vec'][0] + vec[0], b['vec'][1] + vec[1])
@@ -6290,8 +6457,8 @@ if _PyGameView is not None:
         if consumed:
             view.events = [e for e in view.events if e not in consumed]
         # Age the buffer AFTER the scan: a press that saw one full batch
-        # with no partner resolves — an orthogonal jump under Ctrl, else
-        # released to the game (single step, a frame late).
+        # with no partner resolves — an orthogonal jump under Ctrl+Shift,
+        # else released to the game (single step, a frame late).
         b = _arrow_buffer[0]
         if b is not None:
             if b['aged']:
@@ -9830,6 +9997,43 @@ if _PyGameView is not None:
                     # expected steps: 4 per press (two presses can share one
                     # 33ms event batch) — shortfall means the map edge.
                     _x4_move[0] = {'points': [], 'expected': 4 * _dir_presses}
+
+        # Blocked cursor step at the map boundary: the game clamps with no
+        # examine change, so nothing would speak (silence is a bad state).
+        # Say Edge on EVERY fresh press (owner-ruled 2026-07-10: retrying
+        # the edge re-announces). Bare and Ctrl steps only — Shift strides
+        # answer through _x4_finalize, consumed Ctrl+Shift jumps never reach
+        # this scan, and normal-play movement is the game's business.
+        try:
+            _keys_edge = pygame.key.get_pressed()
+            _etgt = _elvl = None
+            if (self.can_execute_inputs()
+                    and not (_keys_edge[pygame.K_LSHIFT]
+                             or _keys_edge[pygame.K_RSHIFT])):
+                if deploying and getattr(self, 'deploy_target', None):
+                    _etgt, _elvl = self.deploy_target, self.game.next_level
+                elif (self.cur_spell is not None
+                        and getattr(self, 'cur_spell_target', None)):
+                    _etgt, _elvl = self.cur_spell_target, self.game.cur_level
+            for _eevt in self.events:
+                if _eevt.type != pygame.KEYDOWN:
+                    continue
+                _evec = _dir_vec(self, _eevt.key)
+                if _evec is None:
+                    continue
+                _fresh = not _edge_down.get(_eevt.key)
+                _edge_down[_eevt.key] = True   # mark first: one Edge per press
+                if (_fresh and _etgt is not None and _elvl is not None
+                        and not _elvl.is_point_in_bounds(Level.Point(
+                            _etgt.x + _evec[0], _etgt.y + _evec[1]))):
+                    log("[Cursor] Edge")
+                    async_tts.speak("Edge")
+            # Self-heal on physical release, like the chord tracker.
+            for _ek in list(_edge_down):
+                if not _keys_edge[_ek]:
+                    del _edge_down[_ek]
+        except Exception as _ee:
+            log(f"[Edge] scan error: {_ee}")
 
         # Capture cursor AFTER our hotkeys, BEFORE game's native input (arrows/mouse)
         _pre_native_pos = None
