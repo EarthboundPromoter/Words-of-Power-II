@@ -7,8 +7,10 @@
 #
 # Why this exists: the game draws one line per (source, attr) pair, which
 # scans fine on screen but stutters aurally — "Blood spells gain. Blood
-# spells gain. Blood spells gain" (field report 2026-07-05, ahicks). The
-# grouped grammar keeps every bonus under one prefix per source. These tests
+# spells gain. Blood spells gain" (field report 2026-07-05, ahicks; quote
+# predates the 2026-07-10 scope-wording ruling). The grouped grammar keeps
+# every bonus under one prefix per source, and the prefix carries the game's
+# own scope wording — "spells and equipment" (text.py:204-210). These tests
 # pin the grouped shape on REAL gear (Blood Staff, Iron Legion's Banner) and
 # fabricated edge cases (multi-tag, gain/lose split, stats filter, resists).
 #
@@ -70,16 +72,16 @@ def _tag(name):
 def test_blood_staff_groups_all_five_bonuses_under_one_prefix():
     lines = _bonus(EQ.BloodStaff())
     assert lines == [
-        "Blood spells gain 50% Minion Health, 50% Damage, "
+        "Blood spells and equipment gain 50% Minion Health, 50% Damage, "
         "1 Max Charges, 2 Range, 3 Minion Damage"
     ]
     # extraction-harness convention: second call identical (no consumed state)
     assert _bonus(EQ.BloodStaff()) == lines
 
 
-def test_single_bonus_item_reads_exactly_as_before():
-    # Iron Legion's Banner: one tag bonus -> the pre-grouping string, unchanged
-    assert _bonus(EQ.IronLegionsBanner()) == ["Metallic spells gain 1 Num Summons"]
+def test_single_bonus_item_reads_one_plain_sentence():
+    # Iron Legion's Banner: one tag bonus -> one sentence, no grouping artifacts
+    assert _bonus(EQ.IronLegionsBanner()) == ["Metallic spells and equipment gain 1 Num Summons"]
 
 
 # ---- grouping shape ----
@@ -92,16 +94,16 @@ def test_multi_tag_item_reads_tag_by_tag_not_draw_order():
         tag_bonuses={fire: {'radius': 1}, ice: {'duration': 2}},
     )
     assert _bonus(o) == [
-        "Fire spells gain 25% Damage, 1 Radius",
-        "Ice spells gain 10% Damage, 2 Duration",
+        "Fire spells and equipment gain 25% Damage, 1 Radius",
+        "Ice spells and equipment gain 10% Damage, 2 Duration",
     ]
 
 
 def test_global_gain_and_lose_stay_separate_prefixes():
     o = _obj(global_bonuses_pct={'damage': 10}, global_bonuses={'range': 1, 'duration': -2})
     assert _bonus(o) == [
-        "All spells gain 10% Damage, 1 Range",
-        "All spells lose -2 Duration",
+        "All spells and equipment gain 10% Damage, 1 Range",
+        "All spells and equipment lose -2 Duration",
     ]
 
 
@@ -110,7 +112,7 @@ def test_resists_stay_standalone_lines_after_bonus_groups():
     o = _obj(tag_bonuses={fire: {'damage': 5, 'radius': 1}},
              resists={_tag("Fire"): 50, _tag("Ice"): 25})
     assert _bonus(o) == [
-        "Fire spells gain 5 Damage, 1 Radius",
+        "Fire spells and equipment gain 5 Damage, 1 Radius",
         "50% Fire resist",
         "25% Ice resist",
     ]
@@ -119,7 +121,26 @@ def test_resists_stay_standalone_lines_after_bonus_groups():
 def test_zero_values_still_skipped():
     fire = _tag("Fire")
     o = _obj(tag_bonuses={fire: {'damage': 0, 'radius': 1}})
-    assert _bonus(o) == ["Fire spells gain 1 Radius"]
+    assert _bonus(o) == ["Fire spells and equipment gain 1 Radius"]
+
+
+# ---- mixed scope: global + tag on one object ----
+
+
+def test_global_bonuses_stay_distinguished_from_tag_bonuses():
+    # The one genuinely mixed object in the game is Multicast's spell-weaving
+    # buff (MulticastBuff, Spells.py:6258-6260): +1 quick cast globally, -1
+    # back from Sorcery. Grouping keys on the full source prefix, so global
+    # lines keep their own "All spells" sentence and can never fold under a
+    # tag heading (owner regression check 2026-07-10; census of all 1,097
+    # shop/equipment objects found no other mixed case).
+    sorcery = _tag("Sorcery")
+    o = _obj(tag_bonuses={sorcery: {'quick_cast': -1}},
+             global_bonuses={'quick_cast': 1})
+    assert _bonus(o) == [
+        "Sorcery spells and equipment gain -1 Quick Cast",
+        "All spells and equipment gain 1 Quick Cast",
+    ]
 
 
 # ---- per-spell bonuses ----

@@ -265,6 +265,12 @@ _SETTINGS_SCHEMA = [
      "# keys only; nothing is sent anywhere. Off by default - if you report\n"
      "# an input bug, you may be asked to turn this on and reproduce it.\n"
      "# Default: false"),
+    ('words_of_power', 'search_key_echo', 'false',
+     "# Speak each character typed into a search box (shop, bestiary, combat\n"
+     "# log). Off by default: the live result count already voices every\n"
+     "# edit, and screen readers with their own typed-character echo would\n"
+     "# say each key twice.\n"
+     "# Default: false"),
     ('words_of_power', 'mouse_attention_arbitration', 'true',
      "# Keyboard-first mouse handling. While you're playing by keyboard the\n"
      "# physical mouse stops supplying the battlefield attention point: held\n"
@@ -479,6 +485,7 @@ class _Cfg:
     latch_visual_overlay = _settings.getboolean('words_of_power', 'latch_visual_overlay', fallback=True)
     deploy_scan_routing = _settings.getboolean('words_of_power', 'deploy_scan_routing', fallback=True)
     key_trace_enabled = _settings.getboolean('words_of_power', 'key_trace_enabled', fallback=False)
+    search_key_echo = _settings.getboolean('words_of_power', 'search_key_echo', fallback=False)
     mouse_attention_arbitration = _settings.getboolean('words_of_power', 'mouse_attention_arbitration', fallback=True)
     frame_probe_enabled = _settings.getboolean('words_of_power', 'frame_probe_enabled', fallback=True)
     frame_probe_census = _settings.getboolean('words_of_power', 'frame_probe_census', fallback=True)
@@ -524,6 +531,7 @@ log(f"[Settings] threat_enumeration_legacy = {cfg.threat_enumeration_legacy}")
 log(f"[Settings] latch_visual_overlay = {cfg.latch_visual_overlay}")
 log(f"[Settings] deploy_scan_routing = {cfg.deploy_scan_routing}")
 log(f"[Settings] key_trace_enabled = {cfg.key_trace_enabled}")
+log(f"[Settings] search_key_echo = {cfg.search_key_echo}")
 log(f"[Settings] mouse_attention_arbitration = {cfg.mouse_attention_arbitration}")
 log(f"[Settings] frame_probe_enabled = {cfg.frame_probe_enabled}")
 log(f"[Settings] frame_probe_census = {cfg.frame_probe_census}")
@@ -826,6 +834,7 @@ class SyncTTS:
         self.base_tts = base_tts
         self._history = deque(maxlen=200)
         self._cursor = -1  # -1 = live (latest entry)
+        self._interrupt_live = False  # newest history entry is a live update
 
     @property
     def _last_spoken(self):
@@ -835,9 +844,24 @@ class SyncTTS:
     def speak(self, text):
         self._history.append(text)
         self._cursor = -1  # reset to live on new speech
+        self._interrupt_live = False
         # The one line every utterance passes through: standard-tier logs
         # always record what was heard, independent of which feature spoke.
         log(f"[Spoke] {text}")
+        self.base_tts.speak(text)
+
+    def speak_interrupting(self, text):
+        """Live-update tier: cut off whatever is speaking and say the newest
+        state (search-as-you-type counts). Consecutive live updates replace
+        each other in history, so [/] review keeps the settled value, not
+        every superseded fragment."""
+        if self._interrupt_live and self._history:
+            self._history.pop()
+        self._history.append(text)
+        self._cursor = -1
+        self._interrupt_live = True
+        log(f"[Spoke] {text}")
+        self.base_tts.cancel()
         self.base_tts.speak(text)
 
     def cancel(self):
@@ -880,6 +904,7 @@ class SyncTTS:
         for chunk in chunks:
             self._history.append(chunk)
         self._cursor = -1
+        self._interrupt_live = False
         joined = ' '.join(chunks)
         log(f"[Spoke] {joined}")
         self.base_tts.speak(joined)
@@ -897,6 +922,100 @@ class SyncTTS:
 async_tts = SyncTTS(tts)
 async_tts.speak(f"Words of Power version {MOD_VERSION}")
 log(f"[Init] Spoke version: {MOD_VERSION}")
+
+# ============================================================================
+# SEARCH BOX SPEECH — shared shop / combat-log transitions
+# ============================================================================
+# Both of the game's search boxes (shop family incl. bestiary, and the combat
+# log) are voiced by diffing (focused, query) across the game's own input
+# handler — so every mutation path speaks: Q key, mouse click on the bar,
+# key-repeat backspace. Typing is silent by default (search_key_echo flips
+# per-character echo on); the live result count speaks on the interrupt tier
+# so fast typing self-supersedes instead of queueing a backlog.
+
+_SEARCH_PROMPT_SHOP = ("Search. Type to filter. "
+                       "Enter keeps, Escape clears, Down arrow reads back.")
+_SEARCH_PROMPT_LOG = ("Search this page. Type to filter. "
+                      "Enter keeps, Escape clears, Down arrow reads back.")
+
+
+def _search_echo_text(chars):
+    """Spoken form of typed or deleted characters ('space' for a lone space)."""
+    return "space" if chars == " " else chars
+
+
+def _search_down_pressed(view):
+    """True if a nav-down key went down this frame. Down is the readback key
+    while a search box has focus — the game swallows arrows there, so this
+    adds speech to a dead key without changing game behavior."""
+    import pygame
+    import sys
+    down_keys = None
+    kbd = getattr(sys.modules.get('__main__'), 'KEY_BIND_DOWN', None)
+    if kbd is not None:
+        try:
+            down_keys = [k for k in view.key_binds[kbd] if k]
+        except Exception:
+            down_keys = None
+    if not down_keys:
+        down_keys = [pygame.K_DOWN]
+    try:
+        return any(evt.type == pygame.KEYDOWN and evt.key in down_keys
+                   for evt in view.events)
+    except Exception:
+        return False
+
+
+def _speak_search_transition(was_focused, was_query, focused, query, readout,
+                             count_fn, prompt, landing_fn=None):
+    """Voice one frame's search-box change; returns True if it spoke.
+    Transitions: focus gained (prompt, prefixed with any kept query), focus
+    lost (kept / cleared / closed), Down readback (query + count), and query
+    edits (echo per search_key_echo + live count, interrupt tier).
+    landing_fn: content the filter landed on — spoken after the count when
+    Enter keeps a query, so the first result is audible without moving
+    (a single result may be impossible to move to at all — field report
+    2026-07-10, combat log)."""
+    try:
+        if focused and not was_focused:
+            head = f"Search: {query}. {count_fn()}. " if query else ""
+            async_tts.speak(f"{head}{prompt}")
+            return True
+        if was_focused and not focused:
+            if query:
+                text = f"Search: {query}. {count_fn()}"
+                landing = landing_fn() if landing_fn else ""
+                if landing:
+                    text = f"{text}. {landing}"
+                async_tts.speak(text)
+            elif was_query:
+                async_tts.speak(f"Search cleared. {count_fn()}")
+            else:
+                async_tts.speak("Search closed")
+            return True
+        if focused and readout:
+            body = f"Search: {query}" if query else "Search empty"
+            async_tts.speak_interrupting(f"{body}. {count_fn()}")
+            return True
+        if focused and query != was_query:
+            count = count_fn()
+            if not query:
+                text = f"Empty. {count}" if count else "Empty"
+            elif cfg.search_key_echo:
+                if query.startswith(was_query) and len(query) > len(was_query):
+                    text = f"{_search_echo_text(query[len(was_query):])}. {count}"
+                elif was_query.startswith(query):
+                    text = f"{_search_echo_text(was_query[len(query):])} deleted. {count}"
+                else:
+                    text = f"{query}. {count}"
+            else:
+                text = count
+            if text:
+                async_tts.speak_interrupting(text)
+            return True
+    except Exception as e:
+        log(f"[Search] Error: {e}")
+    return False
 
 # ============================================================================
 # SPEECH BATCHING — Priority Queue + Flush System
@@ -1307,11 +1426,34 @@ def _fmt_of(obj):
             return None
     return None
 
+_CLAUSE_END = ('.', '!', '?', ':', ';', ',')
+
+def _newlines_to_clauses(text):
+    """Transcode visual line breaks into spoken clause boundaries. The game
+    draws multi-line descriptions as separate lines — visual structure the
+    synth can't hear: a raw newline reaches it as bare whitespace and the
+    lines run together ("...at the target Deal 14 Arcane damage..." — field
+    report 2026-07-10, mashed shop descriptions). Lines already ending in
+    punctuation keep it; interior lines without it gain a period."""
+    if not text or '\n' not in text:
+        return text
+    lines = [l.strip() for l in text.split('\n') if l.strip()]
+    if not lines:
+        return ""
+    out = []
+    last = len(lines) - 1
+    for i, l in enumerate(lines):
+        if i < last and not l.endswith(_CLAUSE_END):
+            l += "."
+        out.append(l)
+    return " ".join(out)
+
 def _desc_text(obj):
     """Read an object's description fully formatted for speech, substituting LIVE
     get_stat values (damage/radius/duration/etc. with the player's passives,
     equipment, and upgrades applied — matching the game's own tooltip) by pairing
-    its description template with fmt_dict(). Falls back gracefully without fmt_dict."""
+    its description template with fmt_dict(). Falls back gracefully without fmt_dict.
+    Line breaks come back as clause boundaries, not raw newlines."""
     if obj is None:
         return ""
     try:
@@ -1324,7 +1466,7 @@ def _desc_text(obj):
             fmt = obj.fmt_dict()
         except Exception:
             fmt = None
-    return read_text(desc, fmt)
+    return _newlines_to_clauses(read_text(desc, fmt))
 
 # Helper: identify if a unit is the player
 def _is_player(unit):
@@ -3438,8 +3580,8 @@ if _PyGameView is not None:
     def _format_bonus_lines(obj):
         """Extract bonus dictionary lines from an Equipment, Spell, or Upgrade
         object. One line per bonus SOURCE (tag / spell / all-spells) with its
-        attributes grouped — "Blood spells gain 50% Minion Health, 1 Max
-        Charges" — never one sentence per attribute: the game draws a line per
+        attributes grouped — "Blood spells and equipment gain 50% Minion
+        Health, 1 Max Charges" — never one sentence per attribute: the game draws a line per
         (source, attr) pair (RiftWizard3.py:7113-7165) and the repeated prefix
         scans as column alignment on screen but stutters aurally (field report
         2026-07-05). Grouping merges a source's percent and flat items into
@@ -3456,16 +3598,19 @@ if _PyGameView is not None:
                 index[prefix] = len(groups)
                 groups.append([prefix, [item]])
 
+        # "spells and equipment", not "spells" — the game's own scope wording
+        # (TAG_*_BONUS / ALL_*, text.py:204-210): these bonuses apply to
+        # equipment too, and the distinction matters (owner ruling 2026-07-10)
         for tag, bonuses in getattr(obj, 'tag_bonuses_pct', {}).items():
             tag_n = _name(tag)
             for attr, val in bonuses.items():
                 if val:
-                    add(f"{tag_n} spells gain", f"{int(val)}% {_fmt_attr(attr)}")
+                    add(f"{tag_n} spells and equipment gain", f"{int(val)}% {_fmt_attr(attr)}")
         for tag, bonuses in getattr(obj, 'tag_bonuses', {}).items():
             tag_n = _name(tag)
             for attr, val in bonuses.items():
                 if val:
-                    add(f"{tag_n} spells gain", f"{val} {_fmt_attr(attr)}")
+                    add(f"{tag_n} spells and equipment gain", f"{val} {_fmt_attr(attr)}")
         for spell_class, bonuses in getattr(obj, 'spell_bonuses_pct', {}).items():
             spell_ex = None
             try:
@@ -3505,15 +3650,15 @@ if _PyGameView is not None:
         for attr, val in getattr(obj, 'global_bonuses_pct', {}).items():
             if val:
                 if val >= 0:
-                    add("All spells gain", f"{int(val)}% {_fmt_attr(attr)}")
+                    add("All spells and equipment gain", f"{int(val)}% {_fmt_attr(attr)}")
                 else:
-                    add("All spells lose", f"{int(val)}% {_fmt_attr(attr)}")
+                    add("All spells and equipment lose", f"{int(val)}% {_fmt_attr(attr)}")
         for attr, val in getattr(obj, 'global_bonuses', {}).items():
             if val:
                 if val >= 0:
-                    add("All spells gain", f"{val} {_fmt_attr(attr)}")
+                    add("All spells and equipment gain", f"{val} {_fmt_attr(attr)}")
                 else:
-                    add("All spells lose", f"{val} {_fmt_attr(attr)}")
+                    add("All spells and equipment lose", f"{val} {_fmt_attr(attr)}")
         lines = [f"{prefix} {', '.join(items)}" for prefix, items in groups]
         for tag, val in getattr(obj, 'resists', {}).items():
             if val:
@@ -3951,6 +4096,31 @@ if _PyGameView is not None:
         async_tts.speak(text)
         log(f"[Craft] Progress: {text}")
 
+    def _describe_shop_row(view, target):
+        """Full row describer for a shop option, by shop type — shared by
+        selection navigation and the search landing read."""
+        st = getattr(view, 'shop_type', -1)
+        if st == _SHOP_TYPE_BESTIARY:
+            # Bestiary: unit description, no cost
+            return _describe_bestiary_entry(target)
+        if st == _SHOP_TYPE_CRAFTING:
+            return _describe_craft_blueprint(view, target)
+        if st == _SHOP_TYPE_COMPONENT_SELECTION:
+            return _describe_component(view, target)
+        cost = _shop_item_cost(view, target)
+        desc = _describe_shop_target(target)
+        return f"{cost}. {desc}" if cost else desc
+
+    def _shop_search_landing(view):
+        """What the kept filter landed on (reset_shop_page selects the first
+        surviving option, RiftWizard3.py:4891-4907) — spoken with the Enter
+        announcement so the first result is heard without arrowing to it."""
+        target = view._examine_target
+        if target is None:
+            return ""
+        _last_shop_target[0] = target
+        return _describe_shop_row(view, target)
+
     def patched_shop_selection_adjust(self, inc):
         """Announce shop/bestiary item when navigating."""
         _original_shop_sel_adjust(self, inc)
@@ -3958,18 +4128,7 @@ if _PyGameView is not None:
             target = self._examine_target
             if target is not None and target is not _last_shop_target[0]:
                 _last_shop_target[0] = target
-                st = getattr(self, 'shop_type', -1)
-                if st == _SHOP_TYPE_BESTIARY:
-                    # Bestiary: unit description, no cost
-                    text = _describe_bestiary_entry(target)
-                elif st == _SHOP_TYPE_CRAFTING:
-                    text = _describe_craft_blueprint(self, target)
-                elif st == _SHOP_TYPE_COMPONENT_SELECTION:
-                    text = _describe_component(self, target)
-                else:
-                    cost = _shop_item_cost(self, target)
-                    desc = _describe_shop_target(target)
-                    text = f"{cost}. {desc}" if cost else desc
+                text = _describe_shop_row(self, target)
                 async_tts.speak(text)
                 log(f"[Shop] {text}")
         except Exception as e:
@@ -4342,6 +4501,14 @@ if _PyGameView is not None:
             shadow = view.get_shop_filter_modifier_category(cat)
             if shadow:
                 parts.append(f"Hold Shift for {_shop_filter_category_names.get(shadow, str(shadow))}")
+            # Discoverability: the search bar is invisible to a blind player —
+            # name the game's own key for it (placeholder text says "(Q) or
+            # click to type", RiftWizard3.py:3989).
+            try:
+                qkey = view.get_keybind_letters(getattr(_main, 'KEY_BIND_QUERY'))
+                parts.append(f"{qkey} to search")
+            except Exception:
+                parts.append("Q to search")
             text = ". ".join(parts)
             async_tts.speak(text)
             log(f"[Shop Guide] {text}")
@@ -4351,10 +4518,15 @@ if _PyGameView is not None:
     def patched_process_shop_input(self):
         """Mod review keys layered on shop input: comma = full filter page (spell +
         crafting); I = item being built, R = recipe progress (component selection).
-        All gated off while the search box has focus (so typing isn't eaten)."""
+        All gated off while the search box has focus (so typing isn't eaten).
+        Search box speech: diff (focused, query) across the original handler —
+        focus prompt, live count per edit (interrupt tier), Down readback."""
+        import pygame
         st = getattr(self, 'shop_type', -1)
-        if not getattr(self, 'search_focused', False):
-            import pygame
+        was_focused = bool(getattr(self, 'search_focused', False))
+        was_query = getattr(self, 'search_query', "") or ""
+        readout = False
+        if not was_focused:
             for evt in self.events:
                 if evt.type != pygame.KEYDOWN:
                     continue
@@ -4368,7 +4540,15 @@ if _PyGameView is not None:
                     if evt.key == pygame.K_r:
                         _speak_craft_progress(self)
                         break
+        else:
+            readout = _search_down_pressed(self)
         _original_process_shop_input(self)
+        _speak_search_transition(
+            was_focused, was_query,
+            bool(getattr(self, 'search_focused', False)),
+            getattr(self, 'search_query', "") or "",
+            readout, lambda: _filter_result_count(self), _SEARCH_PROMPT_SHOP,
+            landing_fn=lambda: _shop_search_landing(self))
 
     if _original_toggle_scoped:
         _PyGameView.toggle_shop_scoped_filter = patched_toggle_shop_scoped_filter
@@ -10740,15 +10920,33 @@ if _PyGameView is not None:
         return f"Level {view.combat_log_level}, Turn {view.combat_log_turn}"
 
     def _combat_log_current_line(view):
-        """Get the line at the current scroll offset."""
+        """Get the line at the current scroll offset — from the list the
+        screen is actually showing: filtered matches while a query is active
+        (draw_combat_log, RiftWizard3.py:9922), full page lines otherwise."""
         try:
-            lines = view.combat_log_lines
-            idx = 1 + view.combat_log_offset
+            if getattr(view, 'combat_log_query', ""):
+                lines = getattr(view, 'combat_log_match_lines', None) or []
+                idx = view.combat_log_offset
+            else:
+                lines = view.combat_log_lines
+                idx = 1 + view.combat_log_offset
             if 0 <= idx < len(lines):
                 return lines[idx]
         except Exception:
             pass
         return ""
+
+    def _combat_log_count(view):
+        """Result-count phrasing for the combat log search (page scope)."""
+        try:
+            if getattr(view, 'combat_log_query', ""):
+                n = len(getattr(view, 'combat_log_match_lines', None) or [])
+                if n == 0:
+                    return "No matching lines"
+                return "1 matching line" if n == 1 else f"{n} matching lines"
+            return f"{len(view.combat_log_lines)} lines"
+        except Exception:
+            return ""
 
     def _patched_process_combat_log(self):
         if not _sr_combat_log_entered[0]:
@@ -10762,17 +10960,32 @@ if _PyGameView is not None:
         prev_offset = self.combat_log_offset
         prev_turn = self.combat_log_turn
         prev_level = self.combat_log_level
+        prev_focused = bool(getattr(self, 'combat_log_query_focused', False))
+        prev_query = getattr(self, 'combat_log_query', "") or ""
+        readout = _search_down_pressed(self) if prev_focused else False
         _orig_process_combat_log(self)
 
+        now_focused = bool(getattr(self, 'combat_log_query_focused', False))
+        now_query = getattr(self, 'combat_log_query', "") or ""
         if self.state != _STATE_COMBAT_LOG:
             _sr_combat_log_entered[0] = False
         elif self.combat_log_turn != prev_turn or self.combat_log_level != prev_level:
-            # Turn or level changed (Left/Right)
+            # Turn or level changed (Left/Right). The game silently wipes any
+            # active query here (set_combat_log_display, RiftWizard3.py:9865)
+            # — surface that alongside the new page.
             header = _combat_log_header(self)
             line = _combat_log_current_line(self)
             msg = f"{header}. {line}" if line else header
+            if prev_query and not now_query:
+                msg = f"Search cleared. {msg}"
             async_tts.speak(msg)
             log(f"[State] COMBAT_LOG: {header}")
+        elif _speak_search_transition(prev_focused, prev_query, now_focused,
+                                      now_query, readout,
+                                      lambda: _combat_log_count(self),
+                                      _SEARCH_PROMPT_LOG,
+                                      landing_fn=lambda: _combat_log_current_line(self)):
+            pass
         elif self.combat_log_offset != prev_offset:
             # Scrolled within same turn
             line = _combat_log_current_line(self)

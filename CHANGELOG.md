@@ -6,6 +6,22 @@ an early work-in-progress RW3 port — expect frequent changes.
 ## Unreleased
 
 ### Added
+- **Search boxes speak** — the game's search bars in the shops (spells,
+  crafting, bestiary) and the combat log are now fully usable by ear. `Q` (the
+  game's own binding) focuses the box and the mod announces it; as you type,
+  the live result count speaks with each edit, cutting off the previous count
+  so fast typing never queues a backlog. `Enter` keeps the filter ("Search:
+  fireball. 4 results"), `Escape` clears it, and `Down arrow` reads back the
+  current query and count while the box has focus (the game ignores arrows
+  there). The shop search matches names, descriptions, tags, and upgrade text
+  — typing "fireball" also finds spells whose upgrades cast it. The combat
+  log search filters the displayed page's lines; paging to another turn
+  clears it, and the mod says so. The comma filter guide now mentions the
+  search key.
+- **`search_key_echo` setting** (default false): speak each character typed
+  into a search box. Off by default — the live count already voices every
+  edit, and screen readers with their own typed-character echo would say each
+  key twice.
 - **Frame heartbeat probe** (diagnostic): the debug log gains `[Probe]` lines —
   an immediate line for any frame gap over 50ms (with game state, latch, and
   garbage-collector context), a one-line per-minute summary (frame count,
@@ -50,6 +66,24 @@ an early work-in-progress RW3 port — expect frequent changes.
   page with it (player feedback — the counter-first read was fatiguing).
 
 ### Fixed
+- **Bonus lines say what the game says: "spells and equipment"**: grouped
+  bonus readouts said "Blood spells gain…" and "All spells gain…" where the
+  game's own text is "Blood spells **and equipment** gain…" — these bonuses
+  apply to your gear too, and the readout was underselling their scope.
+- **Multi-line descriptions no longer run together**: spell, upgrade, and
+  equipment descriptions written as several lines (Moon Glaive, Knightly
+  Oath, and many more) reached the synthesizer with bare line breaks, which
+  most voices read straight through without a pause. Line breaks now become
+  sentence boundaries, everywhere descriptions are spoken — shop navigation,
+  tooltips, examine, the character sheet.
+- **A kept search now reads what it landed on**: pressing Enter to keep a
+  search filter announces the first result after the count ("Search:
+  fireball. 4 results. Cost 3 SP. Fireball. …"). Before, the first result —
+  and in the combat log, a single matching line, which the scroll keys can't
+  even reach — was never spoken.
+- **Combat log speech follows the filtered view**: with a search active, the
+  line reader spoke from the unfiltered page while the screen showed only
+  matches.
 - **Examine + T now answers about you**: with the cursor on a hostile in Look
   mode, `T` said "Can't hit you" even for an adjacent melee enemy — the check
   tested the enemy's own tile instead of the wizard's. It now always answers
