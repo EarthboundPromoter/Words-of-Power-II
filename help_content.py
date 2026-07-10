@@ -48,7 +48,7 @@ _SCAN_SURROUNDINGS = """
 [L:shields]: Enemies in your line of sight, by type and direction. The game also highlights the tiles you can see
 [T:shields]: Whether you're threatened. In look mode, whether the targeted square is threatened
 [Alt + L:shields]: Latch the line of sight overlay: it stays drawn, and every cursor step adds in sight or out of sight. From normal play it follows you; from look, aiming, or deploy it watches from that tile. Same chord releases
-[Alt + T:shields]: Latch the threat overlay: every cursor step adds threatened or clear. Examine an enemy first to latch just that enemy's reach. One latch at a time; F reports what's latched
+[Alt + T:shields]: Latch the threat overlay: every cursor step adds threatened or safe. Examine an enemy first to latch just that enemy's reach. One latch at a time; F reports what's latched
 [X:shields]: Hazard scan. Clouds and webs
 [B:shields]: Spatial scan. Walkable distance in eight directions
 [G:shields]: Charges. The active spell if you're targeting, otherwise all your spells
@@ -58,7 +58,7 @@ _SCAN_SURROUNDINGS = """
 
 _MOVEMENT_SPEECH = """
 [Two arrows together:shields]: Diagonal movement. Up and Right together is northeast, Down and Left is southwest, and so on. Press the pair as one gesture
-[Shift + Arrow:shields]: Move the cursor 4 tiles. Speaks the landing tile, then a short summary of everything crossed, floor included. Says Edge when the map edge cuts the move short
+[Shift + Arrow:shields]: Move the cursor 4 tiles. Speaks the landing tile by name, then a short summary of everything crossed, floor included. Press D on arrival for full detail. Says Edge when the map edge cuts the move short
 [Shift + two arrows:shields]: The 4 tile move, diagonal. Same landing and crossed summary
 [Ctrl + direction:shields]: Jump the cursor along that line until what you would hear changes: past open floor to the next unit, item, or wall. Speaks the landing, then the distance, like 6 east. Says Edge when the map ends the run. Either Ctrl; works with arrows, arrow pairs, and the numpad
 [Numpad:shields]: Keep NumLock on. Bare numpad moves and diagonals work; with NumLock off the numpad belongs to your screen reader's review keys, which return when you leave the game. Shift+numpad 4 tile moves only work without NVDA running, because NVDA swallows that chord below the game; use the arrow gestures instead, which always work

@@ -1,12 +1,15 @@
 # Tests for slice 2 of the cursor-tool pass: movement hygiene.
 #
-# Three behaviors pinned (CURSOR_TOOL_UX_PASS.md, owner-ruled 2026-07-06):
-# - Shift+move speaks the LANDING through the normal announcer plus one
-#   compressed "Crossed:" summary (was: all four tiles in sequence). Floor
-#   COUNTS (owner: dropping it makes the player do arithmetic); duplicates
-#   group with digit counts; a move clamped short by the map edge appends
-#   "Edge", and a move pinned at the edge (no step possible) speaks "Edge"
-#   alone — silence is a bad state (framework).
+# Three behaviors pinned (CURSOR_TOOL_UX_PASS.md, owner-ruled 2026-07-06;
+# landing voice re-ruled 2026-07-09, workshop W1):
+# - Shift+move speaks the LANDING as a HEADLINE (names in describer order,
+#   coordinates + latch token + targeting warnings kept; full description
+#   is one D press away) plus one compressed "Crossed:" summary (was: all
+#   four tiles in sequence). Floor COUNTS (owner: dropping it makes the
+#   player do arithmetic); duplicates group with digit counts; a move
+#   clamped short by the map edge appends "Edge", and a move pinned at the
+#   edge (no step possible) speaks "Edge" alone — silence is a bad state
+#   (framework).
 # - LCtrl speech cancel is handled ABOVE the modifier-skip guard (the guard
 #   `continue`s on K_LCTRL, which made the old dispatch-chain branch dead
 #   code) and above the scanner resets, so a mid-cycle cancel never breaks
@@ -110,6 +113,46 @@ def test_out_of_bounds_is_dropped():
     assert _label(_Grid(_Tile()), _P(x=5, y=5)) is None
 
 
+# ---- _x4_landing_headline (workshop W1 ruling: names, not descriptions) ----
+
+_headline = _ns['_x4_landing_headline']
+
+
+def test_headline_names_unit_prop_and_cloud_in_describer_order():
+    tile = _Tile(unit=_named("Imp"), prop=_named("Rift"), cloud=_named("web"))
+    assert _headline(None, _Grid(tile), _P(x=0, y=0)) == "Imp, Rift, web"
+
+
+def test_headline_speaks_bare_terrain():
+    assert _headline(None, _Grid(_Tile(prop=_named("Rift"))), _P(x=0, y=0)) == "Rift"
+    assert _headline(None, _Grid(_Tile(wall=True)), _P(x=0, y=0)) == "wall"
+    assert _headline(None, _Grid(_Tile()), _P(x=0, y=0)) == "floor"
+
+
+def test_headline_keeps_deploy_standability_answer():
+    grid = _Grid(_Tile())
+    grid.get_unit_at = lambda x, y: None
+    grid.can_stand = lambda x, y, p1: False
+    view = types.SimpleNamespace(game=types.SimpleNamespace(p1=object()))
+    assert _headline(view, grid, _P(x=0, y=0), deploying=True) == "blocked"
+    grid.can_stand = lambda x, y, p1: True
+    assert _headline(view, grid, _P(x=0, y=0), deploying=True) == "clear"
+
+
+def test_headline_announcer_keeps_token_coords_and_warnings():
+    # Source pins: the announcer half must keep the latch token, the
+    # coordinate suffix, the targeting warnings, and both suppress-consume
+    # heads — state and aim safety survive the headline cut.
+    seg = _src[_src.index("def _announce_x4_landing"):
+               _src.index("def _x4_finalize")]
+    for required in ("_latch_token(view, level, point.x, point.y)",
+                     "cfg.show_coordinates",
+                     "_check_aoe_warning(view)",
+                     "_route_tile_suppress[0]",
+                     "_deploy_tile_suppress[0]"):
+        assert required in seg, required
+
+
 # ---- _x4_finalize (extracted): landing + summary + edge rulings ----
 
 class _FakeTTS:
@@ -131,9 +174,7 @@ _fns = {
     '_x4_move': _x4,
     'async_tts': _tts,
     'log': lambda *a, **k: None,
-    '_announce_look_tile': lambda v, p: _look_announced.append(p),
-    '_announce_target_tile': lambda v, p: _look_announced.append(p),
-    '_announce_deploy_tile': lambda v, p: _look_announced.append(p),
+    '_announce_x4_landing': lambda v, level, p, **k: _look_announced.append(p),
 }
 exec(_extract("    def _x4_finalize(view):",
               "    # ---- Overlay latches (cursor-tool pass, slice 7) ----"), _fns)

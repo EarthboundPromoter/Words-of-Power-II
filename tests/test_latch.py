@@ -286,7 +286,7 @@ def test_global_threat_token_rides_the_shared_membership():
     ns['_toggle_latch'](view, 'threat')
     assert ns['_latch_token'](view, level, 4, 4) == ", threatened"
     level.zone_answer = False
-    assert ns['_latch_token'](view, level, 4, 4) == ", clear"
+    assert ns['_latch_token'](view, level, 4, 4) == ", safe"
 
 
 def test_token_is_silent_off_level_and_when_unlatched():

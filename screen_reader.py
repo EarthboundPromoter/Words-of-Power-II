@@ -5761,9 +5761,11 @@ if _PyGameView is not None:
     # The game's Shift+move steps the cursor 4 tiles, calling try_examine_tile
     # per step (RiftWizard3.py:2986-3001) — which used to speak all four tiles
     # in sequence. A sighted player perceives the crossed tiles as a glimpse,
-    # not four reads (owner ruling): speak the LANDING through the normal
-    # announcer, then one compressed "Crossed:" summary of what the cursor
-    # skimmed past. Armed per press in patched_process_level_input; collection
+    # not four reads (owner ruling): speak the LANDING as a name-first
+    # headline (workshop W1 re-ruling 2026-07-09 — the mover chose speed;
+    # D carries the full detail), then one compressed "Crossed:" summary of
+    # what the cursor skimmed past. Armed per press in
+    # patched_process_level_input; collection
     # happens in patched_try_examine_tile; finalized after the game's handler
     # (landing = last collected point, so edge-of-map clamping is free).
     _x4_move = [None]  # None | {'points': [Point, ...]} while collecting
@@ -6170,6 +6172,76 @@ if _PyGameView is not None:
             pass
         return "floor"
 
+    def _x4_landing_headline(view, level, point, deploying=False):
+        """Name-first landing text for a completed x4 move (workshop W1
+        ruling 2026-07-09): unit, prop, and cloud NAMES in describer
+        order; bare terrain otherwise; deploy keeps its clear/blocked
+        standability answer. The full description is one D press away —
+        the mover chose speed."""
+        tile = level.tiles[point.x][point.y]
+        parts = []
+        unit = getattr(tile, 'unit', None)
+        if unit is None and deploying:
+            getter = getattr(level, 'get_unit_at', None)
+            if getter is not None:
+                unit = getter(point.x, point.y)
+        if unit is not None:
+            parts.append(_name(unit))
+        prop = getattr(tile, 'prop', None)
+        if prop is not None:
+            parts.append(_name(prop))
+        cloud = getattr(tile, 'cloud', None)
+        if cloud is not None:
+            parts.append(_name(cloud, "Cloud"))
+        if parts:
+            return ", ".join(parts)
+        if deploying:
+            try:
+                valid = level.can_stand(point.x, point.y, view.game.p1)
+            except Exception:
+                valid = True
+            return "clear" if valid else "blocked"
+        try:
+            if tile.is_wall():
+                return "wall"
+            if tile.is_chasm:
+                return "chasm"
+        except Exception:
+            pass
+        return "floor"
+
+    def _announce_x4_landing(view, level, point, deploying=False,
+                             targeting=False):
+        """Speak the x4 landing headline. Mirrors the full announcers'
+        suppress-consume heads so routing interplay is unchanged; keeps
+        coordinates, the latch token, and (targeting) the range/AoE
+        warnings — state and aim safety, not description."""
+        if deploying:
+            if _deploy_tile_suppress[0]:
+                _deploy_tile_suppress[0] = False
+                return
+        elif _route_tile_suppress[0]:
+            _route_tile_suppress[0] = False
+            return
+        try:
+            if level is None:
+                return
+            text = _x4_landing_headline(view, level, point, deploying)
+            if cfg.show_coordinates:
+                text = f"{text} ({point.x},{point.y})"
+            if targeting:
+                range_warn, aoe_info, group_suffix = _check_aoe_warning(view)
+                _prefix = f"{range_warn}{aoe_info}".strip()
+                if _prefix:
+                    text = f"{_prefix} {text}"
+                if group_suffix:
+                    text = f"{text}. {group_suffix}"
+            text = f"{text}{_latch_token(view, level, point.x, point.y)}"
+            log(f"[Cursor] Landing: {text}")
+            async_tts.speak(text)
+        except Exception as e:
+            log(f"[Cursor] Landing error: {e}")
+
     def _x4_finalize(view):
         """Speak landing + crossed summary for a completed Shift-move."""
         state = _x4_move[0]
@@ -6189,18 +6261,19 @@ if _PyGameView is not None:
         landing = points[-1]
         deploying = getattr(view.game, 'deploying', False)
         level = view.game.next_level if deploying else view.game.cur_level
-        # The landing speaks through the normal announcer — identical voice
-        # to a single step that lands on this tile.
+        # The landing speaks a HEADLINE, not the full tile voice (workshop
+        # W1 ruling 2026-07-09: shipped order stands, names over
+        # descriptions — the mover chose speed; D carries the data).
         if deploying:
             dt = getattr(view, 'deploy_target', None)
             if dt is None or (landing.x, landing.y) == (dt.x, dt.y):
-                _announce_deploy_tile(view, landing)
+                _announce_x4_landing(view, level, landing, deploying=True)
         else:
             spell = getattr(view, 'cur_spell', None)
             if spell is not None and type(spell).__name__ == 'LookSpell':
-                _announce_look_tile(view, landing)
+                _announce_x4_landing(view, level, landing)
             elif spell is not None:
-                _announce_target_tile(view, landing)
+                _announce_x4_landing(view, level, landing, targeting=True)
         labels = []
         for p in points[:-1]:
             label = _crossed_tile_label(level, p)
@@ -6380,10 +6453,10 @@ if _PyGameView is not None:
                 reach = ((narrow.x, narrow.y) == (x, y)
                          or _unit_threatens_point(narrow, x, y))
                 if Level.are_hostile(player, narrow):
-                    return ", threatened" if reach else ", clear"
+                    return ", threatened" if reach else ", safe"
                 return ", in reach" if reach else ", out of reach"
             threatened = _threat_membership(view, level, player, x, y)
-            return ", threatened" if threatened else ", clear"
+            return ", threatened" if threatened else ", safe"
         except Exception:
             return ""
 

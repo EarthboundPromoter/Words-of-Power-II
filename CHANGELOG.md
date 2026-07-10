@@ -35,6 +35,16 @@ an early work-in-progress RW3 port — expect frequent changes.
   reproduce.
 
 ### Changed
+- **The 4-tile cursor move lands on a name, not a description**: Shift+move
+  landings now speak the tile's contents by name (unit, prop, cloud, or
+  terrain) instead of the full tile read — a rift landing no longer recites
+  the whole portal tooltip mid-sprint. Coordinates, the latch token, and
+  targeting's range and area warnings still speak. Press D on arrival for
+  the full detail. The crossed summary is unchanged.
+- **Threat wording unified: threatened or safe, everywhere**: the latched
+  threat overlay's cursor tokens now say "safe" where they said "clear",
+  matching the T query's "Threatened"/"Safe". One word pair for the same
+  fact across every threat readout.
 - **Tooltip page counter moved to the end**: PgUp/PgDn tooltip pages now speak
   their content first and the "2 of 5" position last, instead of leading every
   page with it (player feedback — the counter-first read was fatiguing).
