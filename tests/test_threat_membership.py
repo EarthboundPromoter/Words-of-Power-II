@@ -7,8 +7,10 @@
 # - The zone variant matters: draw_threat narrows to ANY examined unit,
 #   allies included — with an ally examined the mod must NOT read the
 #   narrowed zone for the am-I-threatened question (one-point fallback).
-# - Per-unit attribution is untouched: examine a hostile + T = "Threatens
-#   you" / "Can't hit you".
+# - Per-unit attribution: examine a hostile + T = "Threatens you" /
+#   "Can't hit you"; examine an ally + T = "You're in its reach" / "Out of
+#   its reach" (ally-reach coverage fix — reach vocabulary, never threat;
+#   hostility is live, so a berserk ally answers as threat).
 # - The legacy enumeration is restored VERBATIM behind
 #   threat_enumeration_legacy (default off) — a time capsule.
 # - Perf shape: with a fresh zone, no per-unit can_threaten work happens.
@@ -168,15 +170,17 @@ def test_enemy_occupied_tile_is_threatened_in_the_fallback():
 # ---- Zone-variant guard: examined units narrow the game's zone ----
 
 def test_ally_examined_never_reads_the_narrowed_zone():
+    # The GLOBAL question (the latch token's, since examine+T now answers
+    # per-unit for allies too) must not read a zone narrowed to the ally —
+    # go through the membership helper directly, as the token does.
     p = _player()
     blade = FakeUnit("Dancing Blade", 6, 5, team=0)   # friendly, not the wizard
     imp = FakeUnit("Imp", 8, 5)
     view = FakeView(p, [blade, imp], zone={(5, 5)}, examine=blade)
     ns, speech, calls = _ns(threatens=("Imp",))
-    ns['_query_threat'](view)
+    assert ns['_threat_membership'](view, view.game.cur_level, p, 5, 5) is True
     assert view.draw_calls == 0              # pixels would show the ally variant
-    assert speech.spoken == ["Threatened"]   # answered by the one-point test
-    assert "Imp" in calls
+    assert "Imp" in calls                    # answered by the one-point test
 
 
 def test_wizard_examined_still_uses_the_global_zone():
@@ -211,6 +215,34 @@ def test_hostile_examined_speaks_per_unit_not_zone():
     view2 = FakeView(p, [misser], zone={(5, 5)}, examine=misser)
     ns['_query_threat'](view2)
     assert speech.spoken[-1] == "Can't hit you"
+
+
+def test_ally_examined_speaks_reach_never_threat():
+    # Ally-reach coverage fix (BUG_QUEUE 2026-07-09): the game draws an
+    # examined ally's reach in the same red; the mod had no spoken path.
+    # Reach vocabulary by owner ruling 2026-07-10 — exposure, not danger.
+    p = _player()
+    blade = FakeUnit("Dancing Blade", 6, 5, team=0)
+    view = FakeView(p, [blade], zone={(5, 5)}, examine=blade)
+    ns, speech, _calls = _ns(threatens=("Dancing Blade",))
+    ns['_query_threat'](view)
+    assert speech.spoken == ["You're in its reach"]
+    assert view.draw_calls == 0
+    healer = FakeUnit("Healer", 12, 12, team=0)
+    view2 = FakeView(p, [healer], zone={(5, 5)}, examine=healer)
+    ns['_query_threat'](view2)
+    assert speech.spoken[-1] == "Out of its reach"
+
+
+def test_berserk_ally_examined_answers_as_threat():
+    # Hostility is live (are_hostile is True for a berserked same-team
+    # unit, Level.py:138) — the flipped ally answers in threat wording.
+    p = _player()
+    blade = FakeUnit("Dancing Blade", 6, 5, team=7)   # flipped hostile
+    view = FakeView(p, [blade], zone={(5, 5)}, examine=blade)
+    ns, speech, _calls = _ns(threatens=("Dancing Blade",))
+    ns['_query_threat'](view)
+    assert speech.spoken == ["Threatens you"]
 
 
 def test_cursor_on_hostile_answers_for_the_wizard_not_the_tile():

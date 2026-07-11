@@ -173,6 +173,21 @@ def test_threat_latch_pins_examined_hostile_else_global():
     assert speech.spoken[-1] == "Latched: threat"
 
 
+def test_threat_latch_pins_examined_ally_and_says_reach():
+    # Ally-reach coverage fix (BUG_QUEUE 2026-07-09): the old hostility
+    # gate silently latched the GLOBAL zone with an ally examined. Allies
+    # latch like anyone else, announced as reach — never threat (owner
+    # ruling 2026-07-10).
+    ns, speech = _make_ns()
+    level = FakeLevel()
+    blade = FakeUnit("Dancing Blade", 2, 2, team=0)     # wizard's team
+    level.units.append(blade)
+    view = LatchView(level, examine=blade)
+    ns['_toggle_latch'](view, 'threat')
+    assert ns['_latch'][0]['narrow_unit'] is blade
+    assert speech.spoken == ["Latched: Dancing Blade's reach"]
+
+
 def test_latches_are_exclusive():
     ns, _speech = _make_ns()
     view = LatchView(FakeLevel())
@@ -278,6 +293,28 @@ def test_threat_token_wording_follows_live_hostility():
     assert ns['_latch_token'](view, level, 4, 4) == ", out of reach"
 
 
+def test_ally_latch_tokens_and_berserk_flip():
+    # An ally latched directly rides the same live-hostility pair as a
+    # charmed hostile (ally-reach coverage fix) — and a berserk flip
+    # (are_hostile goes True, Level.py:138) swings it back to threat
+    # wording with no re-latch.
+    ns, _speech = _make_ns()
+    level = FakeLevel()
+    blade = FakeUnit("Dancing Blade", 2, 2, team=0)
+    blade.reaches = True
+    level.units.append(blade)
+    view = LatchView(level, examine=blade)
+    ns['_toggle_latch'](view, 'threat')
+    assert ns['_latch_token'](view, level, 4, 4) == ", in reach"
+    blade.reaches = False
+    assert ns['_latch_token'](view, level, 4, 4) == ", out of reach"
+    # Own-tile membership counts for allies too (RiftWizard3.py:5662).
+    assert ns['_latch_token'](view, level, 2, 2) == ", in reach"
+    blade.reaches = True
+    blade.team = 7                                      # berserk-flipped
+    assert ns['_latch_token'](view, level, 4, 4) == ", threatened"
+
+
 def test_global_threat_token_rides_the_shared_membership():
     ns, _speech = _make_ns()
     level = FakeLevel()
@@ -302,11 +339,25 @@ def test_vitals_line_forms():
     ns, _speech = _make_ns()
     level = FakeLevel()
     view = LatchView(level)
-    assert ns['_latch_vitals_line']() == ""
+    assert ns['_latch_vitals_line'](view) == ""
     ns['_toggle_latch'](view, 'los')
-    assert ns['_latch_vitals_line']() == "Line of sight latched, following you"
+    assert ns['_latch_vitals_line'](view) == "Line of sight latched, following you"
     ns['_toggle_latch'](view, 'threat')
-    assert ns['_latch_vitals_line']() == "Threat latched"
+    assert ns['_latch_vitals_line'](view) == "Threat latched"
+
+
+def test_vitals_line_narrow_wording_is_live_hostility():
+    # F reports reach for an ally's pin, threat for a hostile's — and the
+    # words follow a mid-latch team flip, same as the token.
+    ns, _speech = _make_ns()
+    level = FakeLevel()
+    blade = FakeUnit("Dancing Blade", 2, 2, team=0)
+    level.units.append(blade)
+    view = LatchView(level, examine=blade)
+    ns['_toggle_latch'](view, 'threat')
+    assert ns['_latch_vitals_line'](view) == "Dancing Blade's reach latched"
+    blade.team = 7                                      # berserk-flipped
+    assert ns['_latch_vitals_line'](view) == "Dancing Blade's threat latched"
 
 
 # ---- Draw wrap: suppress/reassert, preempt, gates ----
@@ -514,4 +565,4 @@ def test_all_draw_wraps_installed():
 def test_announce_funnels_carry_the_token():
     assert _src.count("_latch_token(view, level,") >= 2   # look + deploy
     assert "_latch_token(view, getattr(view.game, 'cur_level', None)" in _src
-    assert "_latch_vitals_line()" in _src
+    assert "_latch_vitals_line(view)" in _src

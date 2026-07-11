@@ -135,6 +135,20 @@ an early work-in-progress RW3 port — expect frequent changes.
   page with it (player feedback — the counter-first read was fatiguing).
 
 ### Fixed
+- **Ally reach speaks — as reach, never threat**: the game draws an examined
+  ally's attack range in the same red overlay as enemy threat, but the mod
+  had no spoken path to it — examine + `T` fell through to the global
+  answer, and `Alt+T` silently latched the whole threat zone instead of the
+  ally. Both now work for allies, in their own vocabulary: examine + `T`
+  answers "You're in its reach"/"Out of its reach", and an ally's latch
+  announces and tokens as "reach"/"in reach"/"out of reach" — so knowing
+  where your minions can act (and where their splash could catch you) never
+  masquerades as enemy danger. An ally in whose reach you stand genuinely is
+  just that; whether it could actually hurt you there is what its abilities
+  panel tells you. If an ally turns on you — berserk, charm — every one of
+  these surfaces flips to threat wording on its own. Global "Threatened"/
+  "Safe" answers are unchanged: they were always enemies-only, and an
+  overlapping ally reach never softens them.
 - **Bonus lines say what the game says: "spells and equipment"**: grouped
   bonus readouts said "Blood spells gain…" and "All spells gain…" where the
   game's own text is "Blood spells **and equipment** gain…" — these bonuses

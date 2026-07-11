@@ -48,7 +48,7 @@ _SCAN_SURROUNDINGS = """
 [L:shields]: Enemies in your line of sight, by type and direction. The game also highlights the tiles you can see
 [T:shields]: Whether you're threatened. In look mode, whether the targeted square is threatened
 [Alt + L:shields]: Latch the line of sight overlay: it stays drawn, and every cursor step adds in sight or out of sight. From normal play it follows you; from look, aiming, or deploy it watches from that tile. Same chord releases
-[Alt + T:shields]: Latch the threat overlay: every cursor step adds threatened or safe. Examine an enemy first to latch just that enemy's reach. One latch at a time; F reports what's latched
+[Alt + T:shields]: Latch the threat overlay: every cursor step adds threatened or safe. Examine a unit first to latch just its reach; allies speak in reach, not threatened. One latch at a time; F reports what's latched
 [X:shields]: Hazard scan. Clouds and webs
 [B:shields]: Spatial scan. Walkable distance in eight directions
 [G:shields]: Charges. The active spell if you're targeting, otherwise all your spells

@@ -6733,8 +6733,15 @@ if _PyGameView is not None:
         LoS origin = the attention object (normal play: the wizard,
         FOLLOWS; Look/targeting/deploy: that tile, FROZEN — deploy pins on
         next_level and carries into the realm). Threat is origin-free;
-        examining a hostile at latch time pins THAT unit's narrowed
-        overlay. Announce wording provisional (⟨DESIGN⟩, ear)."""
+        examining ANY non-wizard unit at latch time pins THAT unit's
+        narrowed overlay — allies included (ally-reach coverage fix,
+        BUG_QUEUE 2026-07-09: the game narrows draw_threat to any examined
+        unit, RiftWizard3.py:5638-5642, and the mod's old hostility gate
+        silently latched the GLOBAL zone instead). Ally announce says
+        reach, never threat (owner ruling 2026-07-10: reach vocabulary is
+        the friendly-fire distinguisher; hostility is checked LIVE, so a
+        berserk ally latches as threat). Announce wording provisional
+        (⟨DESIGN⟩, ear)."""
         try:
             game = view.game
             level = view.get_display_level()
@@ -6766,10 +6773,12 @@ if _PyGameView is not None:
                     examine = getattr(view, '_examine_target', None)
                 if (examine is not None and hasattr(examine, 'cur_hp')
                         and not _is_player(examine)
-                        and Level.are_hostile(game.p1, examine)
                         and examine in level.units):
                     latch['narrow_unit'] = examine
-                    announce = f"Latched: {_name(examine)}'s threat"
+                    word = ('reach' if game.p1 is not None
+                            and not Level.are_hostile(game.p1, examine)
+                            else 'threat')
+                    announce = f"Latched: {_name(examine)}'s {word}"
                 else:
                     announce = "Latched: threat"
             _latch[0] = latch
@@ -6785,7 +6794,8 @@ if _PyGameView is not None:
         the pinned unit's reach with LIVE hostility wording — a charmed
         narrow_unit's reach is not a 'threat', so the words shift to
         in-reach while the pixels keep drawing it (lifetime #4; provisional,
-        ear); global threat rides slice 6's membership machinery."""
+        ear; the same pair serves an ally latched directly, ally-reach
+        coverage fix); global threat rides slice 6's membership machinery."""
         try:
             latch = _latch[0]
             if latch is None:
@@ -6815,9 +6825,11 @@ if _PyGameView is not None:
         except Exception:
             return ""
 
-    def _latch_vitals_line():
+    def _latch_vitals_line(view):
         """Latch state for the F vitals readout (discoverability ruling:
-        no periodic reminders; F carries the state)."""
+        no periodic reminders; F carries the state). Narrow wording is
+        LIVE hostility, same as the token: an ally's pin reports reach,
+        a hostile's (or berserk-flipped ally's) reports threat."""
         latch = _latch[0]
         if latch is None:
             return ""
@@ -6826,7 +6838,11 @@ if _PyGameView is not None:
                 return "Line of sight latched, following you"
             return "Line of sight latched from a tile"
         if latch['narrow_unit'] is not None:
-            return f"{_name(latch['narrow_unit'])}'s threat latched"
+            player = getattr(getattr(view, 'game', None), 'p1', None)
+            word = ('reach' if player is not None
+                    and not Level.are_hostile(player, latch['narrow_unit'])
+                    else 'threat')
+            return f"{_name(latch['narrow_unit'])}'s {word} latched"
         return "Threat latched"
 
     def _draw_los_from(view, ox, oy):
@@ -7183,7 +7199,7 @@ if _PyGameView is not None:
             if status_parts:
                 parts.append("Status: " + ", ".join(status_parts))
 
-            latch_line = _latch_vitals_line()
+            latch_line = _latch_vitals_line(view)
             if latch_line:
                 parts.append(latch_line)
 
@@ -8198,7 +8214,8 @@ if _PyGameView is not None:
         """T key: Threat vocalization (redesigned, cursor-tool pass slice 6).
         No unit highlighted: 'Threatened' or 'Safe' — membership in the
         game's own threat_zone at the attention tile. Who-threatens stays
-        behind examine + T ('Threatens you' / 'Can't hit you'), the same
+        behind examine + T ('Threatens you' / 'Can't hit you'; an ally
+        answers 'You're in its reach' / 'Out of its reach'), the same
         gate the game puts attribution behind (the overlay is an anonymous
         tile set; per-unit reach shows only while examining that unit)."""
         try:
@@ -8217,7 +8234,7 @@ if _PyGameView is not None:
                 ref_x, ref_y = player.x, player.y
             _qp = f"From {qualifier}. " if qualifier else ""
 
-            # Per-unit threat check: if examining a hostile unit. The
+            # Per-unit threat check: if examining any non-wizard unit. The
             # reference is ALWAYS the wizard — this branch answers "does THIS
             # unit threaten YOU", the question its speech names. Testing the
             # attention tile here asked "can the orc hit its own square" the
@@ -8225,18 +8242,23 @@ if _PyGameView is not None:
             # you" beside an adjacent melee orc (yujin field report
             # 2026-07-08). The cursor qualifier is dropped for the same
             # reason: the referent is you, not the cursor (owner ruling
-            # 2026-07-09; square membership on a hostile's tile stays
-            # reachable via the threat latch).
+            # 2026-07-09; square membership on a unit's tile stays
+            # reachable via the threat latch). Allies answer too — the game
+            # draws an examined ally's reach in the same red (ally-reach
+            # coverage fix, BUG_QUEUE 2026-07-09) — but in reach vocabulary,
+            # never threat (owner ruling 2026-07-10): an ally's reach is
+            # exposure, not danger. Hostility is LIVE, so a berserk ally
+            # answers as threat.
             examine = getattr(view, 'examine_target', None)
             if examine is None:
                 examine = getattr(view, '_examine_target', None)
             if (examine and hasattr(examine, 'cur_hp')
-                    and not _is_player(examine)
-                    and Level.are_hostile(player, examine)):
-                if _unit_threatens_point(examine, player.x, player.y):
-                    text = "Threatens you"
+                    and not _is_player(examine)):
+                reach = _unit_threatens_point(examine, player.x, player.y)
+                if Level.are_hostile(player, examine):
+                    text = "Threatens you" if reach else "Can't hit you"
                 else:
-                    text = "Can't hit you"
+                    text = "You're in its reach" if reach else "Out of its reach"
                 log(f"[Threat] {_name(examine)}: {text}")
                 async_tts.speak(text)
                 return
