@@ -39,10 +39,12 @@ an early work-in-progress RW3 port — expect frequent changes.
   both opens and moves. Keep holding Ctrl and every arrow steps the cursor;
   add Shift to jump. Release Ctrl and you're back in control ("Cancelled"),
   cursor gone — the mode lives in your finger, so there's nothing to forget.
-  To keep what you found: press `V` mid-peek to stay in look mode after
-  release, or a spell hotkey to aim that spell exactly where you were
-  looking (the game keeps the cursor position when switching spells — review
-  flows straight into casting). `Ctrl+Shift+direction` from normal play
+  To keep what you found: press `Enter` (or `V`) mid-peek to stay in look
+  mode after release — Enter and numpad Enter sit under your hands where V
+  is a reach with Ctrl held, and the conversion announces "Look mode" — or
+  a spell hotkey to aim that spell exactly where you were looking (the game
+  keeps the cursor position when switching spells — review flows straight
+  into casting). `Ctrl+Shift+direction` from normal play
   conjures and jumps in one gesture: the "what's out there to the east?"
   glance. Focus loss with Ctrl held can't strand the mode; the hold is
   re-checked every frame.

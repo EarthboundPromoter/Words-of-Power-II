@@ -9,6 +9,12 @@
 #   and the identity check disowns the hold silently (the latch, free).
 # - Conjure failure (API drift: no LookSpell) fails safe — the press falls
 #   through to the game untouched.
+# - Spring latch (owner-ruled 2026-07-10): confirm mid-spring converts the
+#   peek to plain look mode through the WRAPPED choose_spell ("Look mode"
+#   speaks); release no longer cancels. Latch failure leaves the spring
+#   owned. The chord loop swallows confirm for the whole Ctrl hold while a
+#   look cursor is up (key-repeat would otherwise feed the game's native
+#   confirm, whose failed cast closes the fresh look).
 # - Jump receipt: count modes (full = distance-to-landing default,
 #   open-space = the span itself), compass on by default, landing-first
 #   ordering config, unit/prop true-count carve-out in BOTH modes.
@@ -146,6 +152,67 @@ def test_release_aborts_the_spring():
     assert _poll(v, False) is True   # the buffered glance press dies with it
     assert _spring[0] is None
     assert v.aborted
+
+
+# ---- spring latch (confirm mid-spring, owner-ruled 2026-07-10) ----
+
+_latch = _ns['_spring_latch']
+
+
+def _latchable_view():
+    """A view whose choose_spell mimics the wrapped one: records the call
+    and takes the cursor (the announcement itself is the wrapper's own
+    pinned behavior, not re-proven here)."""
+    v = _view()
+    v.chosen = []
+
+    def _choose(spell):
+        v.chosen.append(spell)
+        v.cur_spell = spell
+    v.choose_spell = _choose
+    return v
+
+
+def test_confirm_latch_converts_the_spring():
+    _spring[0] = None
+    v = _latchable_view()
+    _conjure(v)
+    old = v.cur_spell
+    assert _latch(v) is True
+    assert v.cur_spell is not old                       # fresh instance
+    assert isinstance(v.cur_spell, _FakeMain.LookSpell)
+    assert v.cur_spell.caster is v.game.p1
+    assert v.chosen == [v.cur_spell]                    # the WRAPPED path
+    assert _spring[0] is None                           # hold disowned
+    # Releasing Ctrl no longer cancels: the cursor outlives the hold.
+    assert _poll(v, False) is False
+    assert not v.aborted
+    assert v.cur_spell is not None
+
+
+def test_latch_failure_leaves_the_spring_owned():
+    # choose_spell that never takes the cursor (API drift stand-in): the
+    # latch reports failure and the hold keeps behaving like a hold.
+    _spring[0] = None
+    v = _view()
+    v.choose_spell = lambda spell: None
+    _conjure(v)
+    old = v.cur_spell
+    assert _latch(v) is False
+    assert v.cur_spell is old
+    assert _spring[0] is old
+    assert _poll(v, True) is False                      # still owned
+    assert _poll(v, False) is True                      # release still cancels
+    assert v.aborted
+
+
+def test_confirm_swallow_wired_in_the_chord_loop():
+    # The chord loop consumes confirm keydowns while Ctrl is held over a
+    # look cursor, and only a spring-owned cursor latches.
+    assert "getattr(_main, 'KEY_BIND_CONFIRM', None)" in _src
+    assert "_spring_latch(view)" in _src
+    swallow = _src.index("KEY_BIND_CONFIRM")
+    assert _src.index("# Spring conjure: first Ctrl'd direction press") > swallow
 
 
 def test_latch_disowns_without_abort():

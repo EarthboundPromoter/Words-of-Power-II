@@ -6195,12 +6195,16 @@ if _PyGameView is not None:
     # never release-abort. The latch rides instance identity for free: V
     # or a spell hotkey replaces cur_spell through choose_spell (which
     # keeps the cursor position, RiftWizard3.py:2345), the identity check
-    # stops matching, and the hold quietly stops owning the cursor. Entry
+    # stops matching, and the hold quietly stops owning the cursor.
+    # Confirm (Enter / numpad Enter) latches DELIBERATELY (owner-ruled
+    # 2026-07-10: V is an awful reach with Ctrl held; Enter sits under
+    # the arrow hand) — same identity mechanism, via _spring_latch. Entry
     # goes through the ORIGINAL choose_spell: the game's menu_confirm
     # click cues the mode and the glance's first tile speaks immediately —
-    # "Look mode" stays V's announcement. Lifecycle is a POLL, not KEYUP
-    # events: polls self-heal against focus loss eating the release
-    # (framework: events for transitions, polls for truth).
+    # "Look mode" stays V's announcement (and the Enter latch's, through
+    # the WRAPPED path). Lifecycle is a POLL, not KEYUP events: polls
+    # self-heal against focus loss eating the release (framework: events
+    # for transitions, polls for truth).
 
     def _spring_conjure(view):
         """Conjure the spring Look cursor. True when the cursor exists."""
@@ -6239,6 +6243,32 @@ if _PyGameView is not None:
         except Exception as e:
             log(f"[Spring] abort error: {e}")
         return True
+
+    def _spring_latch(view):
+        """Confirm mid-spring: keep the cursor — the peek becomes plain
+        look mode (owner-ruled 2026-07-10: V is an awful reach with Ctrl
+        held; Enter and numpad Enter sit under the hands). A fresh
+        LookSpell through the WRAPPED choose_spell keeps the cursor tile
+        (the game's native carry-over, RiftWizard3.py:2345) and speaks
+        "Look mode" — the cursor-is-yours cue V already owns. The old
+        instance stops matching, so the hold quietly stops owning the
+        cursor and releasing Ctrl no longer cancels. On failure the
+        spring stays owned — the hold keeps behaving like a hold."""
+        try:
+            look_cls = getattr(_main, 'LookSpell', None)
+            p1 = getattr(getattr(view, 'game', None), 'p1', None)
+            if look_cls is None or p1 is None:
+                return False
+            spell = look_cls()
+            spell.caster = p1
+            view.choose_spell(spell)
+            if getattr(view, 'cur_spell', None) is spell:
+                _spring[0] = None
+                log("[Spring] Latched to look mode")
+                return True
+        except Exception as e:
+            log(f"[Spring] latch error: {e}")
+        return False
 
     def _jump_sig(level, point, coalesce):
         """Headline signature for the stop rule. Mirrors the tile describer's
@@ -6397,6 +6427,25 @@ if _PyGameView is not None:
                     _arrow_down[evt.key] = False
                 continue
             if evt.type != pygame.KEYDOWN:
+                continue
+            # Spring latch (owner-ruled 2026-07-10): confirm mid-spring
+            # keeps the cursor. Swallowed for the WHOLE Ctrl hold while a
+            # look cursor is up — pygame key-repeat would otherwise latch
+            # on the first edge and feed the repeats to the game's native
+            # confirm, whose failed look-cast CLOSES the fresh cursor
+            # (cast_cur_spell nulls cur_spell unconditionally,
+            # RiftWizard3.py:2356). Nothing of value is swallowed: mid-
+            # spring that native close is what releasing Ctrl already
+            # does. Without Ctrl, confirm in look mode stays native.
+            if (ctrl_held
+                    and type(getattr(view, 'cur_spell', None)).__name__ == 'LookSpell'
+                    and evt.key in _bound_keys(
+                        getattr(view, 'key_binds', None),
+                        getattr(_main, 'KEY_BIND_CONFIRM', None),
+                        pygame.K_RETURN)):
+                consumed.append(evt)
+                if view.cur_spell is _spring[0]:
+                    _spring_latch(view)
                 continue
             # Spring conjure: first Ctrl'd direction press with no cursor.
             # On conjure failure the press falls through untouched — the
