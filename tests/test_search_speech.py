@@ -72,7 +72,14 @@ exec(_extract("class SyncTTS:", "async_tts = SyncTTS(tts)", False), _tts_ns)
 SyncTTS = _tts_ns['SyncTTS']
 
 # ---- combat log helpers (4-indent, nested in the installer closure) ----
-_cl_ns = {}
+# _combat_log_current_line routes lines through helpers._log_line_speakable
+# (closure import, above the extraction window) — inject the real one so
+# the exec'd copy resolves it and the transcode is tested.
+import sys
+if str(MOD) not in sys.path:
+    sys.path.insert(0, str(MOD))
+from helpers import _log_line_speakable
+_cl_ns = {'_log_line_speakable': _log_line_speakable}
 exec(_extract("    def _combat_log_current_line(view):",
               "    def _patched_process_combat_log(self):", True), _cl_ns)
 _cl_line = _cl_ns['_combat_log_current_line']
@@ -310,3 +317,13 @@ def test_blank_lines_are_dropped():
 def test_last_line_never_gains_punctuation():
     assert _to_clauses("One\nTwo") == "One. Two"
     assert _to_clauses("only") == "only"
+
+
+def test_line_transcodes_color_markup_with_team():
+    # Field specimen 2026-07-10: the viewer spoke the game's color markup
+    # bracket-for-bracket. The line path transcodes label-from-style AND
+    # speaks the unit team tints as prefixes (owner ruling same day).
+    view = _cl_view(combat_log_lines=[
+        "Turn 30",
+        "[Wizard:wizard] killed by [Satyr:enemy] Melee Attack"])
+    assert _cl_line(view) == "Wizard killed by enemy Satyr Melee Attack"

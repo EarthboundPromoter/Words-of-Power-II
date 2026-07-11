@@ -369,3 +369,58 @@ def test_new_kinds_staged_in_both_producer_known_sets():
     for kind in kinds:
         assert kind in digest._COMPOSER_KNOWN_EVENT_TYPES, kind
         assert kind in crisis._STAGED_CAPTURE_ONLY_KINDS, kind
+
+
+# ---- _payload_death attribution fields (death-attribution feature) ----
+# The payload mirrors the game's own death line inputs (Level.py:4125 reads
+# source.owner) plus the DOT recovery field killing_source_caster.
+
+
+def test_payload_death_direct_hit_carries_owner():
+    from journal import _payload_death
+    aelf = _unit(name="Aelf", player=False)
+    spell = SimpleNamespace(name="Poison Sting", owner=aelf)
+    dmg = SimpleNamespace(damage=9, damage_type=_dtype("Poison"), source=spell)
+    evt = SimpleNamespace(unit=_unit(), damage_event=dmg)
+    p = _payload_death(evt)
+    assert p['killing_source'] == 'Poison Sting'
+    assert p['source_owner_name'] == 'Aelf'
+    assert p['source_is_buff'] is False
+    assert p['killing_source_caster'] is None
+
+
+def test_payload_death_dot_curse_recovers_caster():
+    # Buff.owner is the BEARER (Level.py:1137-1139) — the vanilla death line
+    # names the victim for DOT kills. killing_source_caster recovers the
+    # applier when the effect set buff.source.
+    from journal import _payload_death
+    import Level as _Level
+    wizard = _unit()
+    shaman = _unit(name="Goblin Shaman", player=False)
+    poison = _Level.Buff()
+    poison.name = "Poison"
+    poison.buff_type = _Level.BUFF_TYPE_CURSE
+    poison.owner = wizard
+    poison.source = SimpleNamespace(caster=shaman)
+    dmg = SimpleNamespace(damage=4, damage_type=_dtype("Poison"),
+                          source=poison)
+    evt = SimpleNamespace(unit=wizard, damage_event=dmg)
+    p = _payload_death(evt)
+    assert p['killing_source'] == 'Poison'
+    assert p['source_owner_name'] == 'Wizard'
+    assert p['source_is_buff'] is True
+    assert p['source_buff_type'] == _Level.BUFF_TYPE_CURSE
+    assert p['killing_source_caster'] == 'Goblin Shaman'
+
+
+def test_payload_death_no_damage_event_all_none():
+    # kill() without a damage event: every attribution field is None but
+    # present, so the renderer never KeyErrors.
+    from journal import _payload_death
+    evt = SimpleNamespace(unit=_unit(), damage_event=None)
+    p = _payload_death(evt)
+    assert p['killing_source'] is None
+    assert p['source_owner_name'] is None
+    assert p['source_is_buff'] is False
+    assert p['source_buff_type'] is None
+    assert p['killing_source_caster'] is None

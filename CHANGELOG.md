@@ -6,6 +6,34 @@ an early work-in-progress RW3 port — expect frequent changes.
 ## Unreleased
 
 ### Added
+- **Your death is attributed.** The death line now names what killed you,
+  the way the game's own log does: "Wizard killed by Goblin Shaman Poison
+  Sting" for a direct hit, "killed by Poison, from Goblin Shaman" when a
+  lingering effect finishes you (naming who applied it, where the game's
+  own log line would only name you as the bearer), "killed by own Fire
+  Storm" when it was yours. The whole fatal turn now narrates at the death
+  screen — previously the final turn's events, including the death itself,
+  were silently lost and only a bare "Killed by X" spoke.
+- **The game-over choice is announced.** After the defeat (or victory)
+  summary: press the message-log key for the combat log — available only
+  at that screen — or any other key to continue to the run slideshow,
+  which is one-way. The announcement also tells you where the log lives on
+  disk, and — when Keep Previous Save Files is off — that it only survives
+  until a new run begins, with a pointer to the option that keeps it. Your
+  speech-review keys (`Z`, `[`, `]`) are safe at this screen: re-listening
+  to your death stats no longer risks falling into the slideshow.
+- **Save Preferences and Mods menus speak.** The last two silent screens
+  are voiced. Save Preferences reads each toggle with its current state.
+  The Mods menu reads each mod with its column and position, announces
+  enable/disable and load-order moves (Shift+Up/Down), explains the
+  Escape-with-unapplied-changes jump to Restart, and speaks the upload
+  picker and status messages.
+- **Combat log lines speak clean, with team designation.** The log viewer
+  used to read the game's raw color markup, brackets and all. Lines now
+  speak as words, and each unit carries its team the way sighted players
+  see it as color: "enemy Satyr deals 3 Physical damage to Wizard",
+  "ally Dancing Blade blocked 2 Physical". (A berserk ally announces as
+  enemy while berserk — matching the color the game shows.)
 - **Spring look: hold Ctrl to peek.** From normal play, `Ctrl+direction`
   conjures a look cursor at your feet and steps it one tile — the same press
   both opens and moves. Keep holding Ctrl and every arrow steps the cursor;

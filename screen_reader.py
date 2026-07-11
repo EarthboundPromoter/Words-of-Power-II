@@ -2211,17 +2211,25 @@ def on_death(event):
         if _is_player(unit):
             _cancel_hp_announcement()
             batcher.clear()  # Don't flush stale events after death
-            text = "You died"
-            if event.damage_event and event.damage_event.source:
-                source = event.damage_event.source
-                # DOT/buff deaths: source is a Buff whose .owner is the unit it's ON
-                # (i.e. the player), not the caster.  Use the buff name directly.
-                if isinstance(source, Level.Buff):
-                    text = f"Killed by {_name(source)}"
-                else:
-                    text = f"Killed by {_source_name(source)}"
-            log(f"[Death] {_log_ctx()} {text}")
-            batcher.speak_immediate(text)
+            # LEGACY (retired 2026-07-10, death-attribution feature): the
+            # immediate "Killed by {source}" line is superseded by the
+            # crisis producer's attributed death line ("Wizard killed by
+            # {owner} {source}"), composed by the gameover-frame pipeline
+            # fire in patched_process_level_input. Kept commented for the
+            # RW2 backport, which has no composer pipeline.
+            # text = "You died"
+            # if event.damage_event and event.damage_event.source:
+            #     source = event.damage_event.source
+            #     # DOT/buff deaths: source is a Buff whose .owner is the unit it's ON
+            #     # (i.e. the player), not the caster.  Use the buff name directly.
+            #     if isinstance(source, Level.Buff):
+            #         text = f"Killed by {_name(source)}"
+            #     else:
+            #         text = f"Killed by {_source_name(source)}"
+            # log(f"[Death] {_log_ctx()} {text}")
+            # batcher.speak_immediate(text)
+            log(f"[Death] {_log_ctx()} wizard death; speech owned by the "
+                f"gameover-frame compose")
         else:
             # Digest-covered: deaths in the chain appear in the digest's
             # Killed section. Out-of-chain deaths (status-tick deaths on
@@ -9213,10 +9221,85 @@ if _PyGameView is not None:
     # ---- Gameover / Victory voicing ----
     _gameover_spoken = [False]
 
+    def _combat_log_key_name(view):
+        """Player-facing name of the message-log bind, read live at speech
+        time (it is rebindable — never hardcode M)."""
+        kb_id = getattr(_main, 'KEY_BIND_MESSAGE_LOG', None)
+        binds = None
+        if kb_id is not None:
+            try:
+                binds = view.key_binds[kb_id]
+            except Exception:
+                binds = None
+        for k in (binds or []):
+            if k is None:
+                continue
+            try:
+                name = pygame.key.name(k)
+            except Exception:
+                continue
+            if name:
+                return name.upper() if len(name) == 1 else name
+        return "the combat log key"
+
+    def _gameover_choice_chunks(view):
+        """The post-blackout choice point (owner-ruled phrasing 2026-07-10):
+        combat log now, slideshow on any other key, then the on-disk truth.
+        The disk sentence branches on the live Keep Previous Save Files
+        option — Off (the default) prunes older run folders once a new run
+        begins (RiftWizard3.py:9590-9597, Game.py:121-132), so the
+        durable-copy reassurance is only spoken when it is actually true."""
+        game = view.game
+        chunks = []
+        key_name = _combat_log_key_name(view)
+        chunks.append(f"Press {key_name} for the combat log, available only now.")
+        chunks.append("Any other key continues to the slideshow.")
+        run_no = getattr(game, 'run_number', None)
+        run_part = f", run {run_no}" if run_no is not None else ""
+        opts = getattr(view, 'options', None) or {}
+        if opts.get('save_prev_runs', False):
+            chunks.append(f"The log is saved in the saves folder{run_part}.")
+        else:
+            chunks.append(
+                "The log is saved in the saves folder until a new run "
+                "begins. Turn on Keep Previous Save Files, in Save "
+                "Preferences, to keep it.")
+        return chunks
+
+    def _gameover_review_scan(view):
+        """Speech-review keys stay live during gameover — and are CONSUMED,
+        because once the blackout finishes ANY key reaching the game's
+        handler commits to the slideshow (RiftWizard3.py:2701-2706), and
+        entering it is one-way. Without this, re-listening would cost the
+        player the combat log. Z / [ / ] only; every other key falls
+        through on purpose — the announcement says exactly that."""
+        consumed = []
+        for evt in view.events:
+            if evt.type != pygame.KEYDOWN:
+                continue
+            if evt.key == pygame.K_z:
+                idx = async_tts._cursor
+                hist = async_tts._history
+                if hist:
+                    entry = hist[idx] if idx >= 0 else hist[-1]
+                    async_tts.base_tts.cancel()
+                    async_tts.base_tts.speak(entry)
+                    log(f"[Repeat] (gameover) {entry}")
+                consumed.append(evt)
+            elif evt.key == pygame.K_LEFTBRACKET:
+                async_tts.history_back()
+                consumed.append(evt)
+            elif evt.key == pygame.K_RIGHTBRACKET:
+                async_tts.history_forward()
+                consumed.append(evt)
+        if consumed:
+            view.events = [e for e in view.events if e not in consumed]
+
     def _announce_gameover(view):
         """Speak game outcome with speak_batched for [/] navigation.
         Victory: narrative sentences as individual chunks.
-        Defeat: stats file split by section (turns, spell casts, damage, etc.)."""
+        Defeat: stats file split by section (turns, spell casts, damage, etc.).
+        Ends with the combat-log choice point (see _gameover_choice_chunks)."""
         import re as _re_go
         game = view.game
         if not game:
@@ -9251,7 +9334,7 @@ if _PyGameView is not None:
             except Exception:
                 chunks.append(f"{game.total_turns} total turns.")
 
-        chunks.append("Press any key to continue.")
+        chunks.extend(_gameover_choice_chunks(view))
         async_tts.speak_batched(chunks)
         log(f"[Gameover] {label}: Realm {game.level_num}, {game.total_turns} turns ({len(chunks)} chunks)")
         try:
@@ -9399,10 +9482,36 @@ if _PyGameView is not None:
             _gameover_spoken[0] = False
         elif not _gameover_spoken[0]:
             _gameover_spoken[0] = True
+            # Compose the fatal window BEFORE the summary. The turn-boundary
+            # machinery (container diff + fire_pipeline) never runs after a
+            # death — is_awaiting_input never flips again and the gameover
+            # early-return below skips it — so without this the killing
+            # blow's narration, including the crisis producer's attributed
+            # death line, was never composed at all (field-confirmed
+            # 2026-07-10: the log showed no crisis lines for the final
+            # window). The legacy on_death "Killed by X" immediate line is
+            # retired in favor of this composed path.
+            try:
+                _container_diff.turn_boundary(
+                    getattr(self.game, 'cur_level', None),
+                    telemetry_mod=_telemetry)
+            except Exception as _cd_e:
+                log(f"[ContainerDiff] gameover boundary failed: {_cd_e!r}")
+            try:
+                _pipeline.fire_pipeline(
+                    async_tts, log, cfg, getattr(self.game, 'p1', None),
+                    telemetry=_telemetry,
+                )
+            except Exception as _pipe_e:
+                log(f"[Pipeline] error in gameover fire_pipeline: {_pipe_e}")
             batcher.flush()
             _flush_hp()
             _announce_gameover(self)
         if self.gameover_frames > 0:
+            # Guard the speech-review keys for the whole gameover stretch
+            # (harmless during the tiling blackout, load-bearing once the
+            # any-key-→-slideshow window opens).
+            _gameover_review_scan(self)
             _original_process_level_input(self)
             return
 
@@ -10340,6 +10449,8 @@ if _PyGameView is not None:
     _STATE_ENTER_MUTATOR_VALUE = getattr(_main, 'STATE_ENTER_MUTATOR_VALUE', 14)
     _STATE_HOW_TO_PLAY_NAMED = getattr(_main, 'STATE_HOW_TO_PLAY', 18)
     _STATE_SELECT_LANGUAGE_NAMED = getattr(_main, 'STATE_SELECT_LANGUAGE', 15)
+    _STATE_SAVE_PREFS_NAMED = getattr(_main, 'STATE_SAVE_PREFS', 16)
+    _STATE_MODS_NAMED = getattr(_main, 'STATE_MODS', 17)
 
     # Human-readable state names for announcement
     _STATE_NAMES = {
@@ -10360,6 +10471,8 @@ if _PyGameView is not None:
         _STATE_ENTER_MUTATOR_VALUE: "Enter Mutator Value",
         _STATE_HOW_TO_PLAY_NAMED: "How to Play",
         _STATE_SELECT_LANGUAGE_NAMED: "Language",
+        _STATE_SAVE_PREFS_NAMED: "Save Preferences",
+        _STATE_MODS_NAMED: "Mods",
     }
 
     # States that are NOT YET VOICED — announce "coming soon" on entry
@@ -10385,6 +10498,8 @@ if _PyGameView is not None:
         _STATE_ENTER_MUTATOR_VALUE,
         _STATE_HOW_TO_PLAY_NAMED,  # our process_how_to_play_input hook self-announces
         _STATE_SELECT_LANGUAGE_NAMED,  # our process_language_menu_input hook self-announces
+        _STATE_SAVE_PREFS_NAMED,  # our process_save_preferences_input hook self-announces
+        _STATE_MODS_NAMED,  # our process_mods_input hook self-announces
     }
 
     # KEY_BIND constants for keybind resolution
@@ -11074,6 +11189,175 @@ if _PyGameView is not None:
     _PyGameView.process_options_input = _patched_process_options
     log("  Options menu voicing installed")
 
+    # ---- STATE_SAVE_PREFS (save preferences submenu) ----
+    # Was a silent hole (state 16 absent from the tables): the Options entry
+    # leading here was spoken, then the four-entry toggle menu was mute.
+    _orig_process_save_prefs = _PyGameView.process_save_preferences_input
+    _sr_save_prefs_entered = [False]
+    _SAVE_PREF_AUTOSAVE = getattr(_main, 'SAVE_PREF_AUTOSAVE', 0)
+    _SAVE_PREF_SCREENSHOTS = getattr(_main, 'SAVE_PREF_SCREENSHOTS', 1)
+    _SAVE_PREF_SAVE_RUNS = getattr(_main, 'SAVE_PREF_SAVE_RUNS', 2)
+    _SAVE_PREF_BACK = getattr(_main, 'SAVE_PREF_BACK', 3)
+
+    def _save_pref_label(view, target):
+        """Mirror draw_save_preferences_menu's own strings
+        (RiftWizard3.py:9320-9336) — game-sanctioned labels, value included."""
+        opts = view.options
+        if target == _SAVE_PREF_AUTOSAVE:
+            return f"Autosave: {'On' if opts.get('autosave_progress', False) else 'Off'}"
+        if target == _SAVE_PREF_SCREENSHOTS:
+            return f"Save Screenshots: {'On' if opts.get('save_screenshots', False) else 'Off'}"
+        if target == _SAVE_PREF_SAVE_RUNS:
+            return f"Keep Previous Save Files: {'On' if opts.get('save_prev_runs', False) else 'Off'}"
+        if target == _SAVE_PREF_BACK:
+            return "Back to Options"
+        return ""
+
+    def _patched_process_save_prefs(self):
+        if not _sr_save_prefs_entered[0]:
+            _sr_save_prefs_entered[0] = True
+            label = _save_pref_label(self, self.examine_target)
+            async_tts.speak(f"Save Preferences. {label}" if label
+                            else "Save Preferences")
+            log("[State] SAVE_PREFS entered")
+
+        prev_sel = self.examine_target
+        prev_vals = (self.options.get('autosave_progress', False),
+                     self.options.get('save_screenshots', False),
+                     self.options.get('save_prev_runs', False))
+        _orig_process_save_prefs(self)
+
+        if self.state != _STATE_SAVE_PREFS_NAMED:
+            _sr_save_prefs_entered[0] = False
+        elif self.examine_target != prev_sel and self.examine_target is not None:
+            async_tts.speak(_save_pref_label(self, self.examine_target))
+            log(f"[State] SAVE_PREFS: {_save_pref_label(self, self.examine_target)}")
+        else:
+            cur_vals = (self.options.get('autosave_progress', False),
+                        self.options.get('save_screenshots', False),
+                        self.options.get('save_prev_runs', False))
+            if cur_vals != prev_vals:
+                async_tts.speak(_save_pref_label(self, self.examine_target))
+                log(f"[State] SAVE_PREFS toggled: {_save_pref_label(self, self.examine_target)}")
+
+    _PyGameView.process_save_preferences_input = _patched_process_save_prefs
+    log("  Save preferences voicing installed")
+
+    # ---- STATE_MODS (mod enable/disable menu) ----
+    # The other silent hole (state 17). Three focus groups — disabled mods,
+    # enabled mods, actions — plus an upload sub-list, a dirty-state abort
+    # redirect (Escape with unapplied changes jumps focus to Restart), and a
+    # status line. Focus speech follows examine_target like every other menu.
+    _orig_process_mods = _PyGameView.process_mods_input
+    _sr_mods_entered = [False]
+    _MOD_MENU_BROWSE = getattr(_main, 'MOD_MENU_BROWSE', 0)
+    _MOD_MENU_UPLOAD = getattr(_main, 'MOD_MENU_UPLOAD', 1)
+    _MOD_MENU_BACK = getattr(_main, 'MOD_MENU_BACK', 2)
+    _MOD_MENU_RESET = getattr(_main, 'MOD_MENU_RESET', 3)
+    _MOD_MENU_RESTART = getattr(_main, 'MOD_MENU_RESTART', 4)
+    _MOD_MENU_UPLOAD_CANCEL = getattr(_main, 'MOD_MENU_UPLOAD_CANCEL', 5)
+    # Spoken forms of the game's drawn action texts + its detail-panel lines
+    # (draw_mods_menu, RiftWizard3.py:8241-8285) — same words, case relaxed.
+    _MOD_ACTION_LABELS = {
+        _MOD_MENU_BROWSE: "Browse Workshop",
+        _MOD_MENU_UPLOAD: "Upload Mod",
+        _MOD_MENU_BACK: "Back",
+        _MOD_MENU_RESET: "Reset",
+        _MOD_MENU_RESTART: "Restart",
+        _MOD_MENU_UPLOAD_CANCEL: "Back",
+    }
+    _MOD_ACTION_DETAILS = {
+        _MOD_MENU_BROWSE: "Open the Steam Workshop page.",
+        _MOD_MENU_UPLOAD: "Upload a local mod to Workshop.",
+        _MOD_MENU_BACK: "Return to the title screen.",
+        _MOD_MENU_RESET: "Reset mods to the current run's starting layout.",
+        _MOD_MENU_RESTART: "Restart the game to apply the current mod layout.",
+    }
+
+    def _mods_focus_label(view, target):
+        if target is None:
+            return ""
+        if getattr(view, 'mods_menu_upload_selecting', False):
+            if target == _MOD_MENU_UPLOAD_CANCEL:
+                return "Back"
+            return str(target)
+        if isinstance(target, str):
+            enabled = view.options.get('enabled_mods', [])
+            disabled = getattr(view, 'mods_menu_disabled_names', [])
+            if target in enabled:
+                return (f"{target}, enabled, "
+                        f"{enabled.index(target) + 1} of {len(enabled)}")
+            if target in disabled:
+                return (f"{target}, disabled, "
+                        f"{disabled.index(target) + 1} of {len(disabled)}")
+            return target
+        label = _MOD_ACTION_LABELS.get(target)
+        if label:
+            detail = _MOD_ACTION_DETAILS.get(target, "")
+            return f"{label}. {detail}" if detail else label
+        return ""
+
+    def _patched_process_mods(self):
+        if not _sr_mods_entered[0]:
+            _sr_mods_entered[0] = True
+            label = _mods_focus_label(self, self.examine_target)
+            async_tts.speak(f"Mods. {label}" if label else "Mods")
+            log("[State] MODS entered")
+
+        prev_sel = self.examine_target
+        prev_upload = bool(getattr(self, 'mods_menu_upload_selecting', False))
+        prev_enabled = list(self.options.get('enabled_mods', []))
+        prev_status = getattr(self, 'mods_menu_status', "") or ""
+        # Browse opens the system web browser — detect the confirm BEFORE
+        # delegating, since the action leaves no state behind to diff.
+        browse_hit = (
+            not prev_upload and prev_sel == _MOD_MENU_BROWSE
+            and any(e.type == pygame.KEYDOWN
+                    and e.key in self.key_binds[_KB_CONFIRM]
+                    for e in self.events))
+        _orig_process_mods(self)
+
+        if self.state != _STATE_MODS_NAMED:
+            _sr_mods_entered[0] = False
+            return
+
+        parts = []
+        cur_upload = bool(getattr(self, 'mods_menu_upload_selecting', False))
+        if browse_hit:
+            parts.append("Opened the Steam Workshop page in the web browser.")
+        if cur_upload != prev_upload:
+            parts.append("Select mod to upload." if cur_upload else "Mods.")
+            parts.append(_mods_focus_label(self, self.examine_target))
+        else:
+            tgt = self.examine_target
+            cur_enabled = self.options.get('enabled_mods', [])
+            if isinstance(tgt, str) and tgt == prev_sel:
+                was_in = tgt in prev_enabled
+                now_in = tgt in cur_enabled
+                if was_in != now_in:
+                    # Confirm toggled the mod between columns.
+                    parts.append(f"{tgt} {'enabled' if now_in else 'disabled'}.")
+                elif (was_in and now_in
+                        and prev_enabled.index(tgt) != cur_enabled.index(tgt)):
+                    # Shift+Up/Down load-order reorder.
+                    parts.append(f"{tgt}, position "
+                                 f"{cur_enabled.index(tgt) + 1} of {len(cur_enabled)}.")
+            elif tgt != prev_sel and tgt is not None:
+                # Covers arrow navigation AND the dirty-state abort redirect
+                # (focus teleports to Restart; the Restart label + detail
+                # line explains why Escape didn't exit).
+                parts.append(_mods_focus_label(self, tgt))
+        cur_status = getattr(self, 'mods_menu_status', "") or ""
+        if cur_status != prev_status and cur_status:
+            parts.append(' '.join(cur_status.split()))
+        msg = ' '.join(p for p in parts if p)
+        if msg:
+            async_tts.speak(msg)
+            log(f"[State] MODS: {msg}")
+
+    _PyGameView.process_mods_input = _patched_process_mods
+    log("  Mods menu voicing installed")
+
     # ---- STATE_REMINISCE (post-game slideshow) ----
     _orig_process_reminisce = _PyGameView.process_reminisce_input
     _sr_reminisce_entered = [False]
@@ -11123,10 +11407,19 @@ if _PyGameView is not None:
     def _combat_log_header(view):
         return f"Level {view.combat_log_level}, Turn {view.combat_log_turn}"
 
+    from helpers import _log_line_speakable
+
     def _combat_log_current_line(view):
         """Get the line at the current scroll offset — from the list the
         screen is actually showing: filtered matches while a query is active
-        (draw_combat_log, RiftWizard3.py:9922), full page lines otherwise."""
+        (draw_combat_log, RiftWizard3.py:9922), full page lines otherwise.
+
+        Lines carry the game's color markup ("[Wizard:wizard] killed by
+        [Satyr:enemy] Melee Attack") — the game's renderer eats it for
+        display, so speech must transcode it too (field specimen
+        2026-07-10: NVDA read the brackets literally). _log_line_speakable
+        keeps the label, speaks the unit team tints as enemy/ally prefixes
+        (owner ruling same day), and drops the redundant styles."""
         try:
             if getattr(view, 'combat_log_query', ""):
                 lines = getattr(view, 'combat_log_match_lines', None) or []
@@ -11135,7 +11428,7 @@ if _PyGameView is not None:
                 lines = view.combat_log_lines
                 idx = 1 + view.combat_log_offset
             if 0 <= idx < len(lines):
-                return lines[idx]
+                return _log_line_speakable(lines[idx])
         except Exception:
             pass
         return ""

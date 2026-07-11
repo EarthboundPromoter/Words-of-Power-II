@@ -1424,3 +1424,37 @@ def test_dedupe_unit_members_missing_ids_never_merge():
     x = {'name': 'X'}
     out = dedupe_unit_members([x, x])
     assert out == [(x, 1), (x, 1)]
+
+
+# ---- _log_line_speakable (combat-log viewer, field specimen 2026-07-10) ----
+# The viewer spoke raw markup ("[Wizard:wizard] killed by [Satyr:enemy] Melee
+# Attack"). _combat_log_current_line routes through _log_line_speakable:
+# labels kept, unit team tints spoken as enemy/ally prefixes (owner ruling),
+# wizard unprefixed, other styles (damage-type tints) dropped as redundant.
+
+
+def test_log_line_death_specimen_with_team():
+    from helpers import _log_line_speakable
+    raw = "[Wizard:wizard] killed by [Satyr:enemy] Melee Attack"
+    assert _log_line_speakable(raw) == \
+        "Wizard killed by enemy Satyr Melee Attack"
+
+
+def test_log_line_damage_specimen_with_team():
+    from helpers import _log_line_speakable
+    raw = ("[Satyr:enemy] deals [3 Physical:physical] damage to "
+           "[Wizard:wizard] with Melee Attack")
+    assert _log_line_speakable(raw) == \
+        "enemy Satyr deals 3 Physical damage to Wizard with Melee Attack"
+
+
+def test_log_line_ally_prefix():
+    from helpers import _log_line_speakable
+    raw = "[Dancing Blade:ally] blocked [2 Physical:physical] from Melee Attack"
+    assert _log_line_speakable(raw) == \
+        "ally Dancing Blade blocked 2 Physical from Melee Attack"
+
+
+def test_log_line_plain_text_passthrough():
+    from helpers import _log_line_speakable
+    assert _log_line_speakable("Wizard takes a step") == "Wizard takes a step"

@@ -614,13 +614,26 @@ def _payload_pre_damaged(event):
 def _payload_death(event):
     """EventOnDeath(unit, damage_event). Inline the killing damage details
     rather than capturing the live damage_event reference (which would
-    keep a Unit object alive past death and not pickle-clean)."""
+    keep a Unit object alive past death and not pickle-clean).
+
+    The attribution fields mirror the game's own death line
+    (Level.py:4125: KILLED_BY_UNIT reads source.owner). For a DOT kill the
+    game's line degrades — Buff.owner is the afflicted unit, so the vanilla
+    log prints "Wizard killed by Wizard Poison" — hence
+    `killing_source_caster`: the buff's applier when the effect set
+    buff.source, recovered the same way buff snapshots do."""
     dmg = event.damage_event
+    source = getattr(dmg, 'source', None)
     return {
         'target': _snapshot_unit(event.unit),
         'killing_damage': getattr(dmg, 'damage', None),
         'killing_dtype': _name_or(getattr(dmg, 'damage_type', None)),
-        'killing_source': _name_or(getattr(dmg, 'source', None)),
+        'killing_source': _name_or(source),
+        'killing_source_caster': (
+            _buff_source_caster(source)
+            if isinstance(source, Level.Buff) else None
+        ),
+        **_source_attribution(source),
     }
 
 
@@ -1918,6 +1931,8 @@ def install_hooks():
                 'killing_damage': None,
                 'killing_dtype': None,
                 'killing_source': None,
+                'killing_source_caster': None,
+                **_source_attribution(None),
                 'is_silent_kill': True,
             })
         return original_unit_kill(self, damage_event=damage_event,

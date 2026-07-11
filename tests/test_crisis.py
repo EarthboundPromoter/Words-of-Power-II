@@ -484,14 +484,21 @@ def test_buff_faded_skips_enemy():
 # ---- _render_wizard_death ----
 
 
-def test_wizard_death():
-    rec = {
-        'sequence': 30, 'parent': None,
+def _death_record(payload_extra=None, parent=None):
+    payload = {'target': _wizard_snap()}
+    if payload_extra:
+        payload.update(payload_extra)
+    return {
+        'sequence': 30, 'parent': parent,
         'event_type': 'EventOnDeath',
-        'payload': {'target': _wizard_snap()},
+        'payload': payload,
         'marks': [],
     }
-    assert _render_wizard_death(rec) == "Wizard died."
+
+
+def test_wizard_death_unattributed_floor():
+    """No killing fields, no chain: the pre-attribution form survives."""
+    assert _render_wizard_death(_death_record()) == "Wizard died."
 
 
 def test_wizard_death_skips_enemy():
@@ -502,6 +509,120 @@ def test_wizard_death_skips_enemy():
         'marks': [],
     }
     assert _render_wizard_death(rec) is None
+
+
+def test_wizard_death_direct_hit_named_owner():
+    """The game's KILLED_BY_UNIT juxtaposition: owner then source."""
+    rec = _death_record({
+        'killing_damage': 9, 'killing_dtype': 'Lightning',
+        'killing_source': 'Poison Sting',
+        'source_owner_name': 'Goblin Shaman',
+        'source_is_buff': False, 'source_buff_type': None,
+        'killing_source_caster': None,
+    })
+    assert _render_wizard_death(rec) == \
+        "Wizard killed by Goblin Shaman Poison Sting."
+
+
+def test_wizard_death_environmental_no_owner():
+    rec = _death_record({
+        'killing_source': 'Lava',
+        'source_owner_name': None,
+        'source_is_buff': False, 'source_buff_type': None,
+        'killing_source_caster': None,
+    })
+    assert _render_wizard_death(rec) == "Wizard killed by Lava."
+
+
+def test_wizard_death_dot_curse_with_recovered_caster():
+    """DOT recovery: Buff.owner is the bearer (the wizard), so the actor
+    is the recovered applier — never the vanilla bearer-as-owner form."""
+    rec = _death_record({
+        'killing_source': 'Poison',
+        'source_owner_name': 'Wizard',
+        'source_is_buff': True, 'source_buff_type': 2,
+        'killing_source_caster': 'Goblin Shaman',
+    })
+    assert _render_wizard_death(rec) == \
+        "Wizard killed by Poison, from Goblin Shaman."
+
+
+def test_wizard_death_dot_curse_anonymous():
+    """Curse with no recovered applier stays anonymous, not bearer-named."""
+    rec = _death_record({
+        'killing_source': 'Poison',
+        'source_owner_name': 'Wizard',
+        'source_is_buff': True, 'source_buff_type': 2,
+        'killing_source_caster': None,
+    })
+    assert _render_wizard_death(rec) == "Wizard killed by Poison."
+
+
+def test_wizard_death_own_item_buff():
+    """buff_type 3 = item: the wizard's own gear. Self-kills stay
+    attributed (deliberate divergence from B4's wizard suppression)."""
+    rec = _death_record({
+        'killing_source': 'Death Dice',
+        'source_owner_name': 'Wizard',
+        'source_is_buff': True, 'source_buff_type': 3,
+        'killing_source_caster': None,
+    })
+    assert _render_wizard_death(rec) == "Wizard killed by own Death Dice."
+
+
+def test_wizard_death_own_spell_direct():
+    rec = _death_record({
+        'killing_source': 'Fire Storm',
+        'source_owner_name': 'Wizard',
+        'source_is_buff': False, 'source_buff_type': None,
+        'killing_source_caster': None,
+    })
+    assert _render_wizard_death(rec) == "Wizard killed by own Fire Storm."
+
+
+def test_wizard_death_chain_root_enemy_cast():
+    """No killing fields but a within-turn chain: name the root cast."""
+    cast = {
+        'sequence': 1, 'parent': None,
+        'event_type': 'cast_begin',
+        'payload': {
+            'caster': _enemy_snap(name='Aelf'),
+            'spell': {'name': 'Lightning Bolt'},
+        },
+        'marks': [],
+    }
+    rec = _death_record(parent=1)
+    idx = {1: cast, 30: rec}
+    assert _render_wizard_death(rec, idx) == \
+        "Wizard killed by Aelf Lightning Bolt."
+
+
+def test_wizard_death_chain_root_own_buff_tick():
+    """buff_tick root owned by the player: own-effect form."""
+    tick = {
+        'sequence': 2, 'parent': None,
+        'event_type': 'buff_tick',
+        'payload': {
+            'owner': _wizard_snap(),
+            'buff': {'name': 'Searing Aura'},
+        },
+        'marks': [],
+    }
+    rec = _death_record(parent=2)
+    idx = {2: tick, 30: rec}
+    assert _render_wizard_death(rec, idx) == \
+        "Wizard killed by own Searing Aura."
+
+
+def test_wizard_death_silent_kill_floor():
+    """Synthesized silent-kill record: all attribution None, no chain."""
+    rec = _death_record({
+        'killing_damage': None, 'killing_dtype': None,
+        'killing_source': None, 'killing_source_caster': None,
+        'source_owner_name': None, 'source_is_buff': False,
+        'source_buff_type': None, 'is_silent_kill': True,
+    })
+    assert _render_wizard_death(rec, {30: rec}) == "Wizard died."
 
 
 # ---- _render_displaced ----

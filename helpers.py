@@ -266,6 +266,30 @@ def _clean_desc(text):
         return content.replace('_', ' ')
     return re.sub(r'\[([^\]]*)\]', _clean_tag, text)
 
+def _log_line_speakable(text):
+    """Combat-log line transcode with team designation (owner ruling
+    2026-07-10). The game's unit color keys are exactly wizard/enemy/ally
+    (log_color, Level.py:4520) and carry team information a sighted player
+    reads as tint: '[Satyr:enemy]' speaks as 'enemy Satyr',
+    '[Dancing Blade:ally]' as 'ally Dancing Blade'. The wizard needs no
+    prefix — the name already says it. Every other style (damage-type
+    tints etc.) is redundant with its label and drops, as in _clean_desc.
+    Berserk quirk inherited faithfully: log_color tints a berserked ally
+    'enemy' while the buff lasts, so speech calls it enemy — matching the
+    tint the sighted player sees, not the underlying team."""
+    def _tag(m):
+        content = m.group(1)
+        if ':' in content:
+            label, style = content.rsplit(':', 1)
+            label = label.replace('_', ' ')
+            if style == 'enemy':
+                return f"enemy {label}"
+            if style == 'ally':
+                return f"ally {label}"
+            return label
+        return content.replace('_', ' ')
+    return re.sub(r'\[([^\]]*)\]', _tag, text)
+
 def _split_message_for_speech(msg):
     """Split message text into buffer-navigable chunks.
     Keybinding lines and status effects become individual entries.

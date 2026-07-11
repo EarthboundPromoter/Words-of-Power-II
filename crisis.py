@@ -256,14 +256,83 @@ def _render_buff_faded(record):
     return f"Wizard's {name} faded."
 
 
-def _render_wizard_death(record):
-    """EventOnDeath where target is wizard. Terminal event."""
+def _render_wizard_death(record, idx=None):
+    """EventOnDeath where target is wizard. Terminal event.
+
+    Attribution is within-turn causal ONLY (owner ruling 2026-07-10): the
+    payload's killing fields first, then a walk to this record's own chain
+    root — never a cross-turn history search. The forms follow the game's
+    death line ("{unit} killed by {owner} {source}", text.py:247), with two
+    deliberate corrections:
+
+    - DOT recovery: Buff.owner is the afflicted unit (Level.py:1137-1139),
+      so the vanilla log prints "Wizard killed by Wizard Poison" for a DOT
+      kill. A curse on the wizard renders as its applier when capture
+      recovered one ("killed by Poison, from Goblin Shaman"), anonymous
+      otherwise — never the bearer-as-actor form.
+    - Self-kills stay attributed: unlike B4's _chain_caster_name, this path
+      DOES name the wizard as the actor ("killed by own Fire Storm") — the
+      game's own line attributes self-kills, and hiding that would suppress
+      game-shown truth.
+    """
     if record.get('event_type') != 'EventOnDeath':
         return None
     payload = record.get('payload') or {}
     target = payload.get('target') or {}
     if not _is_wizard_snap(target):
         return None
+
+    source = payload.get('killing_source')
+    owner = payload.get('source_owner_name')
+    wiz_name = target.get('name')
+
+    if source:
+        # Buff sitting on the wizard: owner is the bearer, not an actor.
+        if payload.get('source_is_buff') and owner == wiz_name:
+            # buff_type 2 = curse / debuff: enemy-applied.
+            if payload.get('source_buff_type') == 2:
+                caster = payload.get('killing_source_caster')
+                if caster:
+                    return f"Wizard killed by {source}, from {caster}."
+                return f"Wizard killed by {source}."
+            # bless / passive / item on the wizard: the wizard's own effect.
+            return f"Wizard killed by own {source}."
+        if owner == wiz_name:
+            # Own spell, direct (game: "Wizard killed by Wizard X").
+            return f"Wizard killed by own {source}."
+        if owner:
+            # Direct hit: the game's KILLED_BY_UNIT juxtaposition.
+            return f"Wizard killed by {owner} {source}."
+        # Ownerless source: environmental (game: KILLED_BY_ENV).
+        return f"Wizard killed by {source}."
+
+    # No killing fields (kill() without a damage event, or legacy record).
+    # A within-turn chain root, when one exists, still names the actor whose
+    # action the log showed this turn.
+    if idx is not None:
+        root = _walk_to_root(record, idx)
+        if root is not None and root is not record:
+            et = root.get('event_type')
+            rp = root.get('payload') or {}
+            if et == 'cast_begin':
+                cname = (rp.get('caster') or {}).get('name')
+                sname = (rp.get('spell') or {}).get('name')
+                if sname:
+                    if (rp.get('caster') or {}).get('is_player_controlled'):
+                        return f"Wizard killed by own {sname}."
+                    if cname:
+                        return f"Wizard killed by {cname} {sname}."
+                    return f"Wizard killed by {sname}."
+            if et in ('buff_tick', 'equipment_tick'):
+                rowner = rp.get('owner') or {}
+                bname = (rp.get('buff') or {}).get('name')
+                if bname:
+                    if rowner.get('is_player_controlled'):
+                        return f"Wizard killed by own {bname}."
+                    if rowner.get('name'):
+                        return f"Wizard killed by {rowner['name']} {bname}."
+                    return f"Wizard killed by {bname}."
+
     return "Wizard died."
 
 
@@ -675,7 +744,7 @@ class _CrisisProducer:
                 lines.append(line)
                 categories_present.add('buff_faded')
                 continue
-            line = _render_wizard_death(rec)
+            line = _render_wizard_death(rec, _idx)
             if line:
                 lines.append(line)
                 categories_present.add('wizard_death')
