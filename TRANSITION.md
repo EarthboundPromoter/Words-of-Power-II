@@ -1,6 +1,7 @@
 # The Cursor Update — Transition Guide
 
-**Applies to:** version 0.5.0, coming from 0.3.4 (drafted 2026-07-07). This guide is
+**Applies to:** versions 0.5.0 through 0.6.0, coming from 0.3.4 (drafted 2026-07-07,
+updated 2026-07-11). This guide is
 for players of the previous version: it covers what moved, what changed, and what's new.
 If you're new to the mod entirely, read [README.md](README.md) instead — it describes
 everything as it now is.
@@ -104,22 +105,32 @@ is always deliberate). If the target died or was collected since it spoke, J say
 "gone" and stays put. **Shift + J** bounces back to where the cursor was before the
 jump; a second press bounces forward again.
 
-### Ctrl + direction — the axis jump
+### Ctrl + Shift + direction — the axis jump
 
-New. In any cursor mode, Ctrl plus a direction skims the cursor along that line until
-what you'd hear changes — across open floor to the next unit, item, wall, or cloud in
-one keypress. It speaks the landing tile, then the distance ("6 east"), and says
-"Edge" when the map ends the run. Either Ctrl works, and it composes with everything:
-Ctrl + arrow straight, Ctrl + two arrows diagonal, Ctrl + numpad free. Your wizard
-never jumps — this is cursor-only.
+New in 0.5.0 as Ctrl + direction; **0.6.0 moved it to Ctrl + Shift + direction** —
+bare Ctrl + direction became the spring look, below. If you learned Ctrl as the jump,
+add Shift. In any cursor mode, the chord skims the cursor along that line until what
+you'd hear changes — across open floor to the next unit, item, wall, or cloud in one
+keypress. It speaks the span crossed, then the landing ("4 floor east, Imp"), and
+says "Edge" when the map ends the run. Arrow row only — with NumLock on, Windows
+strips Shift from numpad presses. Your wizard never jumps — this is cursor-only.
+
+### Spring look — hold Ctrl to peek (new in 0.6.0)
+
+From normal play, hold Ctrl and press a direction: a look cursor opens at your feet
+and steps. Every further press steps it (add Shift to jump), and releasing Ctrl puts
+you back in play, cursor gone. Press Enter or V mid-peek to stay in Look mode, or a
+spell hotkey to aim that spell where you were looking. Ctrl + Shift + direction from
+normal play opens and jumps in one gesture.
 
 ### Diagonals are two-arrow chords; Right Ctrl retired
 
 Before, Right Ctrl + arrow stepped diagonally (with an AltGr variant). That's gone:
 press **two orthogonal arrows together** — Up+Right is northeast — as one gesture.
-Add Shift for the 4-tile diagonal, Ctrl for the diagonal axis jump. A lone arrow
-still steps normally, and held arrows still auto-walk exactly as the game intends.
-Ctrl now means one thing on either side: bare press cancels speech, chords jump. If
+Add Shift for the 4-tile diagonal, Ctrl + Shift for the diagonal axis jump. A lone
+arrow still steps normally, and held arrows still auto-walk exactly as the game
+intends. Ctrl means one thing on either side: bare press cancels speech, chords move
+the cursor. If
 pressing two arrows at once isn't physically comfortable, the numpad diagonals remain
 the modifier-free path.
 

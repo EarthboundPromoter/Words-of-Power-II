@@ -1,6 +1,6 @@
 # Words of Power: RW3
 
-**Version 0.5.1 — beta**
+**Version 0.6.0 — beta**
 
 A screen-reader mod for **Rift Wizard 3**: it speaks the game's state and events
 through NVDA or JAWS (via Tolk) so the game can be played without sight. It's the Rift
@@ -10,8 +10,8 @@ Early beta — core play, combat narration, and the crafting interface all work,
 some features are lightly tested. Please report anything that sounds wrong or stays
 silent when it shouldn't.
 
-**Coming from an earlier version?** [TRANSITION.md](TRANSITION.md) — the Cursor
-Update transition guide — covers what moved, what changed, and what's new, with a
+**Coming from an earlier version?** [TRANSITION.md](TRANSITION.md) — the transition
+guide, current through 0.6.0 — covers what moved, what changed, and what's new, with a
 five-minute quick start. Useful to anyone, but written primarily for returning
 players.
 
@@ -74,7 +74,7 @@ any speech is running is a catch-22. A bundled program handles it:
 2. Run `screen_reader/bin/enable_screen_reader.exe` (or `python enable_screen_reader.py`
    from the folder). Windows may warn the program is unsigned — choose *Run anyway*.
    `--disable` turns the mod back off.
-3. Launch the game. You'll hear "Words of Power version 0.5.1" if it's working. A debug
+3. Launch the game. You'll hear "Words of Power version 0.6.0" if it's working. A debug
    log is written to `screen_reader_debug.log` in the mod folder.
 
 The very first screen on launch is **Language select** (voiced, English only) — just
@@ -127,7 +127,7 @@ every line.
 Two sets of keys: the ones the mod adds, and Rift Wizard 3's own. A few things first:
 
 - **Rift Wizard 3 uses `E` for crafting**, so the mod's enemy scan (was `E` in the
-  Rift Wizard 2 mod) is now on **`J`**.
+  Rift Wizard 2 mod) is now on **`I`**, riding the game's Highlight Enemies key.
 - On first launch the mod moves **tooltip cycling** to **Backslash** (previous) and
   **Backspace** (next) for screen-reader use, keeping PgUp/PgDn as secondary and
   unbinding Fast Forward to free Backspace. Change any of this in Options.
@@ -183,7 +183,8 @@ else the cursor is your aim and scans leave it alone — J is the deliberate jum
 | **Shift + J** | Jump back to where the cursor was before the last J (a second press bounces forward again). |
 | **Shift + Tab** | Previous target while targeting, walking, or looking (reverse of the game's Tab cycle). A fresh press starts from the far end of the list — in walk mode that jumps straight to the rifts. Needs the Steam overlay turned off for this game (see setup above). |
 | **Two arrows together** | Diagonal movement: Up+Right = NE, Down+Left = SW, and so on. Press the pair as one gesture; a lone press still steps normally. |
-| **Ctrl + direction** | Axis jump: skim the cursor along that line until what you'd hear changes — past open floor to the next unit, item, wall, or cloud. Speaks the landing tile, then the distance ("6 east"; "Edge" when the map ends the run). Either Ctrl; arrows, pairs, and numpad all work. Setting `jump_coalesce_units` (default off) strides same-name unit clusters instead of stopping at each. |
+| **Ctrl + direction** | Spring look: press once to open a look cursor at your feet and step it; keep holding Ctrl and every direction steps (add Shift to jump). Release Ctrl and you're back in play, cursor gone. Enter or V mid-peek stays in Look mode; a spell hotkey aims that spell where you were looking. |
+| **Ctrl + Shift + direction** | Axis jump: skim the cursor along that line until what you'd hear changes — past open floor to the next unit, item, wall, or cloud. Speaks the span crossed, then the landing ("4 floor east, Imp"; "Edge" when the map ends the run). From normal play the same chord opens the spring look and jumps in one gesture. Arrow row only — with NumLock on, Windows strips Shift from numpad presses. Settings: `jump_coalesce_units` (default off) strides same-name unit clusters; `jump_count_open_space`, `jump_compass`, and `jump_landing_first` tune the receipt. |
 | **Shift + Arrow** | Move the cursor 4 tiles. Speaks the landing tile plus a short "Crossed:" summary of everything skimmed past, floor included. Says "Edge" when the map edge cuts the move short. Shift + a pair does the 4-tile diagonal. |
 | **Numpad** | Keep NumLock on: bare numpad moves and diagonals work. Shift+numpad 4-tile moves work only **without** NVDA running — the mod repairs a Windows keyboard legacy ("fake shift") that broke the chord for everyone including sighted players, but NVDA's keyboard hook swallows the keypress before any application can see it. Under NVDA, use the arrow gestures, which are immune. NumLock off leaves the numpad to NVDA review, as usual. |
 
@@ -278,7 +279,7 @@ the game's native help.
 | **Tab** | Cycle which filter category is active. |
 | Letter keys | Toggle filters in the active category — element/school tags (Fire, Ice, Arcane…) or spell attributes (Damage, Range, Duration…). The same letter means different things per category, so use the mod's **Comma** readout to hear the live set. |
 | **`** (backtick) | Toggle the "can afford" filter. |
-| **Q** | Open the search box to filter by name (not yet supported by the mod — see Known Issues). |
+| **Q** | Search box — type to filter by name; the mod speaks the live result count as you type. Enter keeps the filter and reads the first result, Escape clears it, Down arrow reads back the query. The shop search also matches descriptions, tags, and upgrade text. Setting `search_key_echo` (default off) speaks each typed character. |
 
 In the crafting screen, confirming a craftable blueprint opens **component selection**,
 where **Enter** adds or removes the highlighted component and the mod's **I** / **R**
@@ -300,19 +301,12 @@ the game folder) helps too.
 
 Expect rough edges in an early beta:
 
-- **In-shop name search isn't supported yet.** The game's **Q** search box (type to
-  filter items by name) isn't handled by the mod, so typed search isn't usable yet.
 - **Lightly tested narration.** Several newer features are built but not yet heard
   across many real situations; they may not fire in every case, or may sound off when
   they do. Reports welcome.
 - **Crafting depth.** The core loop works (browse, filter, pick components, confirm,
   equip), but some extras aren't in — for instance per-component keyboard browsing of
   your bank.
-- **The Mods list isn't voiced yet.** Every other screen reads — the main menu,
-  options, shops, character sheet, key rebinding, combat log, game-mode/trial/custom-run
-  setup, **How to Play**, **Language** select, and so on. The **Mods** screen is the one
-  holdout (the bundled enabler program above covers turning this mod on, so you don't
-  need that screen to get running).
 - **Some mouse-only base-game controls aren't wired up yet.** A few parts of Rift
   Wizard 3's interface are mouse-driven; keyboard and speech support for them is doable
   and simply isn't in yet.

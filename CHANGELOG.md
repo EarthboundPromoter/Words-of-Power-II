@@ -3,7 +3,7 @@
 All notable changes to **Words of Power II** are listed here, newest first. This is
 an early work-in-progress RW3 port — expect frequent changes.
 
-## Unreleased
+## 2026-07-11 — 0.6.0 — Good Looking
 
 ### Added
 - Death line names the killer — direct hit, lingering effect with its source,
@@ -30,10 +30,10 @@ an early work-in-progress RW3 port — expect frequent changes.
   into a search box.
 - Frame heartbeat probe (diagnostic): the debug log records frame gaps over
   50ms, a per-minute summary, and garbage-collector pauses. Setting
-  `frame_probe_enabled` (default true).
+  `frame_probe_enabled` (default false).
 - Object census (diagnostic): every five minutes the debug log records object
   counts and growth, briefly stalling the game. Setting `frame_probe_census`
-  (default true).
+  (default false).
 - New setting `deploy_scan_routing` (default true): set false to keep the
   deploy cursor parked while scanning; `J` jumps to the last spoken result,
   `Shift+J` returns.

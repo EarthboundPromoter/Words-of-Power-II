@@ -1,5 +1,5 @@
 # Rift Wizard 3 Screen Reader Mod — Words of Power II
-MOD_VERSION = "0.5.1"
+MOD_VERSION = "0.6.0"
 
 import sys
 import os
@@ -304,22 +304,22 @@ _SETTINGS_SCHEMA = [
      "# mouse without meaning it. Set false for native mouse behavior at\n"
      "# all times.\n"
      "# Default: true"),
-    ('words_of_power', 'frame_probe_enabled', 'true',
+    ('words_of_power', 'frame_probe_enabled', 'false',
      "# Frame heartbeat probe: log a one-line frame-time summary each\n"
      "# minute, plus an immediate line for any frame gap over 50ms (with\n"
      "# game state, latch, and garbage-collector context) and any GC pause\n"
      "# over 10ms. Diagnostic for intermittent stalls - audio cutouts,\n"
-     "# animation hitches - during long sessions. Cheap; set false to\n"
-     "# silence it.\n"
-     "# Default: true"),
-    ('words_of_power', 'frame_probe_census', 'true',
+     "# animation hitches - during long sessions. Cheap; set true when\n"
+     "# hunting one, or when asked for it in a bug report.\n"
+     "# Default: false"),
+    ('words_of_power', 'frame_probe_census', 'false',
      "# Object census riding the frame probe: every 5 minutes, walk the\n"
      "# Python heap and log which object types grew (leak hunting). The\n"
      "# walk itself stalls the game for up to a second or two - the log\n"
      "# line says so and reports its own duration, so it can't be mistaken\n"
-     "# for the bug being hunted. Heavier than the probe proper; set false\n"
-     "# for normal play. Does nothing unless frame_probe_enabled is true.\n"
-     "# Default: true"),
+     "# for the bug being hunted. Heavier than the probe proper. Does\n"
+     "# nothing unless frame_probe_enabled is true.\n"
+     "# Default: false"),
     ('words_of_power', 'threat_enumeration_legacy', 'false',
      "# Restore the old global T readout verbatim: count, names, and\n"
      "# directions of everything threatening the tile. The default answer is\n"
@@ -510,8 +510,8 @@ class _Cfg:
     key_trace_enabled = _settings.getboolean('words_of_power', 'key_trace_enabled', fallback=False)
     search_key_echo = _settings.getboolean('words_of_power', 'search_key_echo', fallback=False)
     mouse_attention_arbitration = _settings.getboolean('words_of_power', 'mouse_attention_arbitration', fallback=True)
-    frame_probe_enabled = _settings.getboolean('words_of_power', 'frame_probe_enabled', fallback=True)
-    frame_probe_census = _settings.getboolean('words_of_power', 'frame_probe_census', fallback=True)
+    frame_probe_enabled = _settings.getboolean('words_of_power', 'frame_probe_enabled', fallback=False)
+    frame_probe_census = _settings.getboolean('words_of_power', 'frame_probe_census', fallback=False)
     digest_enabled = _settings.getboolean('words_of_power', 'digest_enabled', fallback=True)
     # [Composer] — pipeline flags. As of 0.3.2 the composer pipeline is the
     # shipped speech engine: producers on, legacy combat narration off.
