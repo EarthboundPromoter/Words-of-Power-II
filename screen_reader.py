@@ -3946,27 +3946,19 @@ if _PyGameView is not None:
         for the future tooltip buffer/composer."""
         return ". ".join(t for _lbl, t in _describe_spell_segments(spell))
 
-    def _describe_shop_target(target):
-        """Shop items are Spells in the learn-spell shop but Upgrades in the
-        spell-upgrade and skill shops. Route upgrades through the game-order
-        upgrade body (draw_examine_upgrade), not the spell-shaped reading,
-        which invented range/shape lines for upgrades and dropped bonus-only
-        upgrades' whole content (the Blood Horizon bug). Name alone heads the
-        item, as in the game's panel — the shop header already gives context."""
-        if isinstance(target, Level.Upgrade):
-            body = [t for _lbl, t in _describe_upgrade_body(target)]
-            return ". ".join([_name(target)] + body)
-        return _describe_spell(target)
-
     _original_shop_sel_adjust = _PyGameView.shop_selection_adjust
     _original_shop_page_adjust = _PyGameView.shop_page_adjust
     _original_open_shop = _PyGameView.open_shop
 
     def _shop_item_cost(view, target):
-        """Get cost info for a shop item, handling different currency types."""
+        """(cost, owned) texts for a shop item, by currency type — at most
+        one is non-empty today (ownership replaces price, as in the game's
+        panel); two slots so the composable row addresses them
+        independently (owner-ruled 2026-07-10). Locked rides the cost
+        slot: it explains the missing price."""
         game = getattr(view, 'game', None)
         if game is None:
-            return ""
+            return "", ""
         try:
             # Level shops (SHOP_TYPE_SHOP) use shop-specific currencies
             if getattr(view, 'shop_type', -1) == getattr(_main, 'SHOP_TYPE_SHOP', 3):
@@ -3974,18 +3966,18 @@ if _PyGameView is not None:
                 if shop:
                     currency = getattr(shop, 'currency', 0)
                     if currency == Level.CURRENCY_PICK:
-                        return ""  # Free pick-one shops — no cost to announce
+                        return "", ""  # Free pick-one shops — no cost to announce
                     elif currency == Level.CURRENCY_MAX_HP:
                         item_cost = getattr(target, 'cost', 0)
                         affordable = shop.can_shop(game.p1, target)
                         suffix = "" if affordable else ", cannot afford"
-                        return f"Cost {item_cost} max HP{suffix}"
+                        return f"Cost {item_cost} max HP{suffix}", ""
                     else:
                         # CURRENCY_GOLD or unknown
                         item_cost = getattr(target, 'cost', 0)
                         affordable = shop.can_shop(game.p1, target)
                         suffix = "" if affordable else ", cannot afford"
-                        return f"Cost {item_cost} gold{suffix}"
+                        return f"Cost {item_cost} gold{suffix}", ""
             # SP-based shops (SPELLS, UPGRADES, SPELL_UPGRADES)
             cost = game.get_upgrade_cost(target)
             affordable = game.can_buy_upgrade(target)
@@ -3993,15 +3985,15 @@ if _PyGameView is not None:
             if owned:
                 # In Learn Spell shop, owned spells open upgrades on confirm
                 if getattr(view, 'shop_type', -1) == _SHOP_TYPE_SPELLS:
-                    return "Owned, enter to view upgrades"
-                return "Owned"
+                    return "", "Owned, enter to view upgrades"
+                return "", "Owned"
             if not affordable and isinstance(target, Level.Upgrade) and getattr(target, 'prereq', None):
                 if game.spell_is_upgraded(target.prereq):
-                    return "Locked, 1 upgrade per spell"
+                    return "Locked, 1 upgrade per spell", ""
             suffix = "" if affordable else ", cannot afford"
-            return f"Cost {cost} SP{suffix}"
+            return f"Cost {cost} SP{suffix}", ""
         except Exception:
-            return ""
+            return "", ""
 
     _last_shop_target = [None]
 
@@ -4127,9 +4119,35 @@ if _PyGameView is not None:
         async_tts.speak(text)
         log(f"[Craft] Progress: {text}")
 
+    # Composable shop row (owner-ruled 2026-07-10): four parts — name,
+    # cost, owned, details — joined in _SHOP_ROW_ORDER, empty parts
+    # dropped. The order tuple is the future config surface (a settings
+    # key could reorder or filter it); no key ships yet.
+    _SHOP_ROW_ORDER = ('name', 'cost', 'owned', 'details')
+
+    def _shop_row_parts(view, target):
+        """The four composable shop-row parts, '' when inapplicable.
+        Upgrades route through the game-order upgrade body
+        (draw_examine_upgrade), not the spell-shaped reading, which
+        invented range/shape lines for upgrades and dropped bonus-only
+        upgrades' whole content (the Blood Horizon bug). Spell details
+        are the describe segments minus the name — the name is its own
+        slot now."""
+        cost, owned = _shop_item_cost(view, target)
+        if isinstance(target, Level.Upgrade):
+            details = ". ".join(t for _lbl, t in _describe_upgrade_body(target))
+        else:
+            details = ". ".join(t for _lbl, t in _describe_spell_segments(target)
+                                if _lbl != 'name')
+        return {'name': _name(target), 'cost': cost, 'owned': owned,
+                'details': details}
+
     def _describe_shop_row(view, target):
-        """Full row describer for a shop option, by shop type — shared by
-        selection navigation and the search landing read."""
+        """Full row describer for a shop option, by shop type — the ONE
+        composition seam, shared by selection navigation, page turns, the
+        open-shop header reads, and the search landing. Cost-bearing rows
+        compose from the four-part registry: name leads (was cost-first
+        until 2026-07-10 — the name is what you're scanning for)."""
         st = getattr(view, 'shop_type', -1)
         if st == _SHOP_TYPE_BESTIARY:
             # Bestiary: unit description, no cost
@@ -4138,9 +4156,8 @@ if _PyGameView is not None:
             return _describe_craft_blueprint(view, target)
         if st == _SHOP_TYPE_COMPONENT_SELECTION:
             return _describe_component(view, target)
-        cost = _shop_item_cost(view, target)
-        desc = _describe_shop_target(target)
-        return f"{cost}. {desc}" if cost else desc
+        parts = _shop_row_parts(view, target)
+        return ". ".join(parts[p] for p in _SHOP_ROW_ORDER if parts[p])
 
     def _shop_search_landing(view):
         """What the kept filter landed on (reset_shop_page selects the first
@@ -4173,18 +4190,7 @@ if _PyGameView is not None:
             target = self._examine_target
             page = getattr(self, 'shop_page', 0) + 1
             if target is not None:
-                st = getattr(self, 'shop_type', -1)
-                if st == _SHOP_TYPE_BESTIARY:
-                    desc = _describe_bestiary_entry(target)
-                    text = f"Page {page}. {desc}"
-                elif st == _SHOP_TYPE_CRAFTING:
-                    text = f"Page {page}. {_describe_craft_blueprint(self, target)}"
-                elif st == _SHOP_TYPE_COMPONENT_SELECTION:
-                    text = f"Page {page}. {_describe_component(self, target)}"
-                else:
-                    cost = _shop_item_cost(self, target)
-                    desc = _describe_shop_target(target)
-                    text = f"Page {page}. {cost}. {desc}" if cost else f"Page {page}. {desc}"
+                text = f"Page {page}. {_describe_shop_row(self, target)}"
             else:
                 text = f"Page {page}, empty"
             async_tts.speak(text)
@@ -4205,7 +4211,7 @@ if _PyGameView is not None:
                 num_slain = _SteamAdapter.get_num_slain() if _SteamAdapter else 0
                 total = len(self.get_shop_options())
                 header = f"Bestiary, {num_slain} of {total} slain"
-                desc = _describe_bestiary_entry(target) if target else None
+                desc = _describe_shop_row(self, target) if target else None
                 text = f"{header}. {desc}" if desc else header
 
             elif shop_type == _SHOP_TYPE_SPELL_UPGRADES:
@@ -4215,9 +4221,7 @@ if _PyGameView is not None:
                 sp_total = getattr(game.p1, 'xp', 0) if game and game.p1 else 0
                 header = f"Upgrade {spell_name}, {sp_total} SP available"
                 if target is not None:
-                    cost = _shop_item_cost(self, target)
-                    desc = _describe_shop_target(target)
-                    text = f"{header}. {cost}. {desc}" if cost else f"{header}. {desc}"
+                    text = f"{header}. {_describe_shop_row(self, target)}"
                 else:
                     text = header
 
@@ -4230,9 +4234,7 @@ if _PyGameView is not None:
                 if shop_desc and shop_desc.strip():
                     header += f". {shop_desc.strip()}"
                 if target is not None:
-                    cost = _shop_item_cost(self, target)
-                    desc = _describe_shop_target(target)
-                    text = f"{header}. {cost}. {desc}" if cost else f"{header}. {desc}"
+                    text = f"{header}. {_describe_shop_row(self, target)}"
                 else:
                     text = header
 
@@ -4262,9 +4264,7 @@ if _PyGameView is not None:
                 sp_total = getattr(game.p1, 'xp', 0) if game and game.p1 else 0
                 header = f"Learn Spell, {sp_total} SP available"
                 if target is not None:
-                    cost = _shop_item_cost(self, target)
-                    desc = _describe_shop_target(target)
-                    text = f"{header}. {cost}. {desc}" if cost else f"{header}. {desc}"
+                    text = f"{header}. {_describe_shop_row(self, target)}"
                 else:
                     text = f"{header}, empty"
 

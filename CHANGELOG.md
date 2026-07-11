@@ -111,6 +111,10 @@ an early work-in-progress RW3 port — expect frequent changes.
   reproduce.
 
 ### Changed
+- **Spell listings: metadata reordered for the unrefined.** Name first,
+  then cost, then everything else, on every shop screen. The four parts are
+  independently composable now; configs for the cultivated will follow in
+  due course. This one's for you, Chaosbringer216 and company.
 - **The axis jump is now `Ctrl+Shift+direction` — a rebind, not a fix.**
   Bare `Ctrl+direction` needed to step so the spring look can creep, so the
   jump takes the heavier chord. One grammar everywhere a cursor exists:
