@@ -6,178 +6,72 @@ an early work-in-progress RW3 port — expect frequent changes.
 ## Unreleased
 
 ### Added
-- **Your death is attributed.** The death line now names what killed you,
-  the way the game's own log does: "Wizard killed by Goblin Shaman Poison
-  Sting" for a direct hit, "killed by Poison, from Goblin Shaman" when a
-  lingering effect finishes you (naming who applied it, where the game's
-  own log line would only name you as the bearer), "killed by own Fire
-  Storm" when it was yours. The whole fatal turn now narrates at the death
-  screen — previously the final turn's events, including the death itself,
-  were silently lost and only a bare "Killed by X" spoke.
-- **The game-over choice is announced.** After the defeat (or victory)
-  summary: press the message-log key for the combat log — available only
-  at that screen — or any other key to continue to the run slideshow,
-  which is one-way. The announcement also tells you where the log lives on
-  disk, and — when Keep Previous Save Files is off — that it only survives
-  until a new run begins, with a pointer to the option that keeps it. Your
-  speech-review keys (`Z`, `[`, `]`) are safe at this screen: re-listening
-  to your death stats no longer risks falling into the slideshow.
-- **Save Preferences and Mods menus speak.** The last two silent screens
-  are voiced. Save Preferences reads each toggle with its current state.
-  The Mods menu reads each mod with its column and position, announces
-  enable/disable and load-order moves (Shift+Up/Down), explains the
-  Escape-with-unapplied-changes jump to Restart, and speaks the upload
-  picker and status messages.
-- **Combat log lines speak clean, with team designation.** The log viewer
-  used to read the game's raw color markup, brackets and all. Lines now
-  speak as words, and each unit carries its team the way sighted players
-  see it as color: "enemy Satyr deals 3 Physical damage to Wizard",
-  "ally Dancing Blade blocked 2 Physical". (A berserk ally announces as
-  enemy while berserk — matching the color the game shows.)
-- **Spring look: hold Ctrl to peek.** From normal play, `Ctrl+direction`
-  conjures a look cursor at your feet and steps it one tile — the same press
-  both opens and moves. Keep holding Ctrl and every arrow steps the cursor;
-  add Shift to jump. Release Ctrl and you're back in control ("Cancelled"),
-  cursor gone — the mode lives in your finger, so there's nothing to forget.
-  To keep what you found: press `Enter` (or `V`) mid-peek to stay in look
-  mode after release — Enter and numpad Enter sit under your hands where V
-  is a reach with Ctrl held, and the conversion announces "Look mode" — or
-  a spell hotkey to aim that spell exactly where you were looking (the game
-  keeps the cursor position when switching spells — review flows straight
-  into casting). `Ctrl+Shift+direction` from normal play
-  conjures and jumps in one gesture: the "what's out there to the east?"
-  glance. Focus loss with Ctrl held can't strand the mode; the hold is
-  re-checked every frame.
-- **Jump receipts say what you crossed.** The axis jump now speaks the span
-  it skimmed, not just a number: "4 floor east, Imp" instead of "4 east".
-  Spans are uniform by construction, so one word covers the crossing
-  truthfully — "3 chasm east", "2 Poison Gas north". A jump that moves one
-  tile speaks like a step: landing only. Three new settings:
-  `jump_count_open_space` (default false: the number is the distance to the
-  landing tile — an immediate range check; true counts the open span
-  itself), `jump_compass` (default true: drop the direction word if you
-  don't want it — it mainly confirms diagonal chords), and
-  `jump_landing_first` (default false: receipt then landing; true flips to
-  "Imp ... Moved 4 floor east"). Beings and items are never miscounted:
-  with `jump_coalesce_units` on, a strided cluster speaks its true census
-  ("past 3 Goblins"), in both count modes.
-- **Edge answers every time.** Any blocked cursor gesture at the map
-  boundary now says "Edge" on every fresh press — single steps included,
-  which used to clamp silently — in look, targeting, and deploy alike.
-  Holding a key against the boundary says it once per press, not per
-  autowalk repeat.
-- **Search boxes speak** — the game's search bars in the shops (spells,
-  crafting, bestiary) and the combat log are now fully usable by ear. `Q` (the
-  game's own binding) focuses the box and the mod announces it; as you type,
-  the live result count speaks with each edit, cutting off the previous count
-  so fast typing never queues a backlog. `Enter` keeps the filter ("Search:
-  fireball. 4 results"), `Escape` clears it, and `Down arrow` reads back the
-  current query and count while the box has focus (the game ignores arrows
-  there). The shop search matches names, descriptions, tags, and upgrade text
-  — typing "fireball" also finds spells whose upgrades cast it. The combat
-  log search filters the displayed page's lines; paging to another turn
-  clears it, and the mod says so. The comma filter guide now mentions the
-  search key.
-- **`search_key_echo` setting** (default false): speak each character typed
-  into a search box. Off by default — the live count already voices every
-  edit, and screen readers with their own typed-character echo would say each
-  key twice.
-- **Frame heartbeat probe** (diagnostic): the debug log gains `[Probe]` lines —
-  an immediate line for any frame gap over 50ms (with game state, latch, and
-  garbage-collector context), a one-line per-minute summary (frame count,
-  average, max, spikes, process memory), and attributed timing for any
-  garbage-collector pause over 10ms. For hunting intermittent stalls reported
-  as audio cutouts, animation hitches, and menu double-scrolls during long
-  sessions. New setting `frame_probe_enabled` (default true); set false to
-  silence it.
-- **Object census** riding the probe (leak hunting): every five minutes the
-  debug log records how many Python objects exist and which types grew since
-  the last look. The walk itself deliberately stalls the game for a second or
-  two and its log line says so, reporting its own duration. New setting
-  `frame_probe_census` (default true); set false for normal play.
-- **`deploy_scan_routing` setting** (default true, the current behavior): set
-  false to keep the deploy cursor parked while scanning. Scans and the pin
-  cycle then speak results with distances from the square you chose, and `J`
-  jumps to the last spoken one only on your command (`Shift+J` bounces back).
-  Deployment only — Look mode and teleport aim on levels route as before. For
-  players who evaluate drop tiles from a fixed reference point.
-- **`key_trace_enabled` setting** (default false): input diagnostics. The
-  debug log records game-window key presses and releases — millisecond
-  spacing between presses, hold durations with autowalk repeat counts — and
-  the diagonal-chord classifier's decisions (buffered, chorded, released as a
-  single step). Local log only, game keys only; nothing is sent anywhere.
-  Since it ships off, reporting a control bug (keys that "don't register",
-  diagonals that step twice) may come with the ask to turn it on and
-  reproduce.
+- Death line names the killer — direct hit, lingering effect with its source,
+  or your own spell. The fatal turn's events now narrate at the death screen.
+- Game-over screen announces its choice: the message-log key opens the combat
+  log, any other key continues to the slideshow. Speech-review keys (`Z`,
+  `[`, `]`) are safe there.
+- Save Preferences and Mods menus speak: toggle states, mod positions,
+  enable/disable and load-order moves (Shift+Up/Down), and the upload picker.
+- Combat log lines speak as words, not raw color markup, and each unit is
+  tagged ally or enemy as its color shows (a berserk ally announces as enemy).
+- Spring look: hold `Ctrl+direction` to step a temporary look cursor (add
+  Shift to jump); release Ctrl to return. Enter or V mid-peek keeps Look
+  mode; a spell hotkey aims there.
+- Axis jumps speak the span they crossed: "4 floor east, Imp". New settings:
+  `jump_count_open_space` (default false), `jump_compass` (true),
+  `jump_landing_first` (false).
+- Blocked cursor moves at the map boundary say "Edge" on every fresh press —
+  single steps included — in look, targeting, and deploy.
+- Shop and combat-log search boxes speak: `Q` focuses, the result count
+  speaks live as you type, `Enter` keeps the filter, `Escape` clears it,
+  `Down arrow` reads back the query.
+- New setting `search_key_echo` (default false): speak each character typed
+  into a search box.
+- Frame heartbeat probe (diagnostic): the debug log records frame gaps over
+  50ms, a per-minute summary, and garbage-collector pauses. Setting
+  `frame_probe_enabled` (default true).
+- Object census (diagnostic): every five minutes the debug log records object
+  counts and growth, briefly stalling the game. Setting `frame_probe_census`
+  (default true).
+- New setting `deploy_scan_routing` (default true): set false to keep the
+  deploy cursor parked while scanning; `J` jumps to the last spoken result,
+  `Shift+J` returns.
+- New setting `key_trace_enabled` (default false): logs key timing and
+  diagonal-chord decisions to the local debug log, for diagnosing control
+  bugs.
 
 ### Changed
 - **Spell listings: metadata reordered for the unrefined.** Name first,
   then cost, then everything else, on every shop screen. The four parts are
   independently composable now; configs for the cultivated will follow in
   due course. This one's for you, Chaosbringer216 and company.
-- **The axis jump is now `Ctrl+Shift+direction` — a rebind, not a fix.**
-  Bare `Ctrl+direction` needed to step so the spring look can creep, so the
-  jump takes the heavier chord. One grammar everywhere a cursor exists:
-  arrow steps, `Shift+arrow` strides 4, `Ctrl+arrow` steps (and holds the
-  spring from normal play), `Ctrl+Shift+arrow` jumps. If you'd learned
-  `Ctrl+arrow` as the jump, add Shift. Numpad jump chords are intentionally
-  unsupported — with NumLock on (which NVDA users need), Windows strips
-  Shift from numpad presses and the chord would silently degrade to a step;
-  jumps live on the arrow row. The jump's landing announcement also moved:
-  the receipt now speaks before the landing by default (`jump_landing_first`
-  restores the old order, with a "Moved" prefix so the trailing number
-  reads as a receipt, not a new contact). Shift+move
-  landings now speak the tile's contents by name (unit, prop, cloud, or
-  terrain) instead of the full tile read — a rift landing no longer recites
-  the whole portal tooltip mid-sprint. Coordinates, the latch token, and
-  targeting's range and area warnings still speak. Press D on arrival for
-  the full detail. The crossed summary is unchanged.
-- **Threat wording unified: threatened or safe, everywhere**: the latched
-  threat overlay's cursor tokens now say "safe" where they said "clear",
-  matching the T query's "Threatened"/"Safe". One word pair for the same
-  fact across every threat readout.
-- **Tooltip page counter moved to the end**: PgUp/PgDn tooltip pages now speak
-  their content first and the "2 of 5" position last, instead of leading every
-  page with it (player feedback — the counter-first read was fatiguing).
+- The axis jump is now `Ctrl+Shift+direction`; bare `Ctrl+direction` is the
+  spring-look step. Numpad jump chords are unsupported — NumLock strips Shift
+  from numpad presses.
+- Jump receipts speak before the landing (`jump_landing_first` restores the
+  old order); Shift+move landings name the tile's contents, not the full
+  read. D on arrival for detail.
+- Latched threat overlay tokens say "safe" instead of "clear", matching the
+  T query's "Threatened"/"Safe".
+- Tooltip page counter ("2 of 5") moved from the start of each page to the
+  end (player feedback).
 
 ### Fixed
-- **Ally reach speaks — as reach, never threat**: the game draws an examined
-  ally's attack range in the same red overlay as enemy threat, but the mod
-  had no spoken path to it — examine + `T` fell through to the global
-  answer, and `Alt+T` silently latched the whole threat zone instead of the
-  ally. Both now work for allies, in their own vocabulary: examine + `T`
-  answers "You're in its reach"/"Out of its reach", and an ally's latch
-  announces and tokens as "reach"/"in reach"/"out of reach" — so knowing
-  where your minions can act (and where their splash could catch you) never
-  masquerades as enemy danger. An ally in whose reach you stand genuinely is
-  just that; whether it could actually hurt you there is what its abilities
-  panel tells you. If an ally turns on you — berserk, charm — every one of
-  these surfaces flips to threat wording on its own. Global "Threatened"/
-  "Safe" answers are unchanged: they were always enemies-only, and an
-  overlapping ally reach never softens them.
-- **Bonus lines say what the game says: "spells and equipment"**: grouped
-  bonus readouts said "Blood spells gain…" and "All spells gain…" where the
-  game's own text is "Blood spells **and equipment** gain…" — these bonuses
-  apply to your gear too, and the readout was underselling their scope.
-- **Multi-line descriptions no longer run together**: spell, upgrade, and
-  equipment descriptions written as several lines (Moon Glaive, Knightly
-  Oath, and many more) reached the synthesizer with bare line breaks, which
-  most voices read straight through without a pause. Line breaks now become
-  sentence boundaries, everywhere descriptions are spoken — shop navigation,
-  tooltips, examine, the character sheet.
-- **A kept search now reads what it landed on**: pressing Enter to keep a
-  search filter announces the first result after the count ("Search:
-  fireball. 4 results. Cost 3 SP. Fireball. …"). Before, the first result —
-  and in the combat log, a single matching line, which the scroll keys can't
-  even reach — was never spoken.
-- **Combat log speech follows the filtered view**: with a search active, the
-  line reader spoke from the unfiltered page while the screen showed only
-  matches.
-- **Examine + T now answers about you**: with the cursor on a hostile in Look
-  mode, `T` said "Can't hit you" even for an adjacent melee enemy — the check
-  tested the enemy's own tile instead of the wizard's. It now always answers
-  "Threatens you"/"Can't hit you" for your square, and drops the misleading
-  "From cursor" prefix on that answer (field report 2026-07-08, yujin0986).
+- Ally attack range now speaks, as reach not threat: examine + `T` answers
+  "You're in its reach"; `Alt+T` latches with reach wording. Berserk or
+  charmed allies flip to threat wording.
+- Grouped bonus readouts now say "spells and equipment gain…", matching the
+  game's text — these bonuses apply to gear too.
+- Multi-line descriptions (spells, upgrades, equipment) now pause at line
+  breaks everywhere they're spoken, instead of running together.
+- Keeping a search with Enter now reads the first result after the count; it
+  was previously never spoken.
+- The combat log line reader now follows the filtered view while a search is
+  active.
+- Examine + `T` on a hostile now answers for your square ("Threatens
+  you"/"Can't hit you"); it was testing the enemy's own tile (field report
+  2026-07-08, yujin0986).
 
 ## 2026-07-07 — 0.5.1 — Hotfix: the mouse yields to the keyboard
 
