@@ -422,6 +422,32 @@ def test_shift_p_targets_focused_pin():
     assert "_query_path_to_marked_target" not in _src
 
 
+def test_bare_p_falls_back_to_last_scanned_read_only():
+    # Dispatch stays two-way: Shift to the focused pin, plain to the cursor
+    # query — the last-scanned fallback lives inside the cursor query, not
+    # on its own chord (Ctrl+P was built then retired pre-ship, 2026-07-13).
+    assert "elif evt.key == pygame.K_p:" in _src
+    p_branch = _src[_src.index("elif evt.key == pygame.K_p:"):]
+    p_branch = p_branch[:p_branch.index("\n                elif ")]
+    assert "_query_path_to_focused_pin(self)" in p_branch
+    assert "_query_path_to_cursor(self)" in p_branch
+    assert "_query_path_to_last_scanned(self)" not in p_branch
+    # No cursor = fall through to the last spoken scan result, not a
+    # dead-end error line.
+    cur = _src[_src.index("def _query_path_to_cursor(view):"):]
+    cur = cur[:cur.index("\n    def ")]
+    assert "_query_path_to_last_scanned(view)" in cur
+    assert "No cursor target" not in cur
+    # Read-only contract: the fallback never pins, never moves the cursor.
+    fn = _src[_src.index("def _query_path_to_last_scanned(view):"):]
+    fn = fn[:fn.index("\n    def ")]
+    assert "_make_pin" not in fn
+    assert "_set_focus" not in fn
+    assert "cur_spell_target" not in fn
+    assert "choose_spell" not in fn
+    assert "_announce_mark_full_path(view, target)" in fn
+
+
 def test_pin_speak_all_setting_declared():
     assert "'pin_speak_all', 'false'" in _src
     assert "pin_speak_all = _settings.getboolean" in _src

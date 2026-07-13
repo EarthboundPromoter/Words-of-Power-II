@@ -8027,8 +8027,9 @@ if _PyGameView is not None:
         allies — path arrives on tile) and non-ally units (path resolves to cheapest
         walkable adjacent neighbor, since the unit tile is impassable).
 
-        Skipped during deploy (cross-level pathing makes no sense). When the level has
-        no active cursor (e.g. normal play mode), tells the player so."""
+        Skipped during deploy (cross-level pathing makes no sense). With no active
+        cursor (normal play), falls through to the last spoken scan result — P is
+        one verb everywhere: path to the attention point (owner-ruled 2026-07-13)."""
         try:
             game = view.game
             if game is None or game.p1 is None:
@@ -8039,8 +8040,9 @@ if _PyGameView is not None:
                 return
             point = getattr(view, 'cur_spell_target', None)
             if point is None:
-                async_tts.speak("No cursor target")
-                log("[Path] P pressed with no cursor")
+                # Active control: no cursor exists, so the attention point
+                # is whatever the scanner last spoke.
+                _query_path_to_last_scanned(view)
                 return
             level = game.cur_level
             if level is None or not level.is_point_in_bounds(point):
@@ -8139,6 +8141,59 @@ if _PyGameView is not None:
             log(f"[Path] Shift+P: {line}")
         except Exception as e:
             log(f"[Path] Shift+P error: {e}")
+
+    def _query_path_to_last_scanned(view):
+        """Bare P's no-cursor branch: one-shot path readout to the last
+        scanner-announced target — no pin, no cursor move, no Look entry,
+        nothing to undo. In cursor contexts the scanners route the cursor
+        onto their result, so plain P already answers there; this branch
+        extends the same verb to active control, for the within-turn survey
+        flow (scan, hear, P, scan on) where pinning every candidate would
+        flood the K cycle. Liveness rules mirror J: nothing spoken yet =
+        'Nothing scanned'; target died/collected since it spoke = 'gone'
+        (never path to stale truth)."""
+        try:
+            game = getattr(view, 'game', None)
+            if game is None or game.p1 is None:
+                return
+            if getattr(game, 'deploying', False):
+                async_tts.speak("Pathfinding not available during deploy")
+                log("[Path] P pressed during deploy")
+                return
+            level = game.cur_level
+            if level is None:
+                return
+            target = _last_scanned_target[0]
+            if target is None:
+                async_tts.speak("Nothing scanned")
+                log("[Path] P with no cursor and nothing scanned")
+                return
+            if isinstance(target, tuple):
+                name = target[0]
+                try:
+                    alive = level.tiles[target[1]][target[2]].prop is not None
+                except Exception:
+                    alive = False
+                if not alive:
+                    async_tts.speak(f"{name} gone")
+                    log(f"[Path] P target gone: {name}")
+                    return
+            else:
+                name = _name(target)
+                if target not in level.units:
+                    async_tts.speak(f"{name} gone")
+                    log(f"[Path] P target gone: {name}")
+                    return
+            msg = _announce_mark_full_path(view, target)
+            if msg is None:
+                async_tts.speak("Path unavailable")
+                log(f"[Path] P unavailable for {name}")
+                return
+            line = f"{name}. {msg}"
+            async_tts.speak(line)
+            log(f"[Path] P to last scanned: {line}")
+        except Exception as e:
+            log(f"[Path] P fallback error: {e}")
 
     def _unit_threatens_point(unit, x, y):
         """Check if a unit can threaten a given point via any spell or custom-threatening buff."""
@@ -10070,6 +10125,10 @@ if _PyGameView is not None:
                 elif evt.key == pygame.K_d:
                     _query_detail(self)
                 elif evt.key == pygame.K_p:
+                    # P = path to the attention point: the cursor when one
+                    # exists, else the last spoken scan result (the cursor
+                    # query falls through; owner-ruled 2026-07-13). Shift+P
+                    # = path to focused pin.
                     if pygame.key.get_mods() & pygame.KMOD_SHIFT:
                         _query_path_to_focused_pin(self)
                     else:

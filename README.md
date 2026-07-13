@@ -177,7 +177,7 @@ else the cursor is your aim and scans leave it alone — J is the deliberate jum
 | **K** | Pin cycle — walk your pinned targets in category blocks (enemies, allies, landmarks, bookmarks), nearest first within each block. Shift+K reverses; **Ctrl+K** jumps block to block (Shift+Ctrl+K jumps back). |
 | **Alt + K** | Pin or unpin the last spoken target; with nothing spoken, bookmark the tile you're on or looking at (works from the deploy cursor too — the pin carries into the level). The newest pin is the *focused* pin: it speaks a step toward it each turn, and every pin announces when it dies or is collected. Setting `pin_speak_all` (default off) speaks every pin's update each turn. |
 | **Alt + I / N / O / U** | The same pin toggle, straight off a scan. |
-| **P** | Path to the look-mode cursor — full route to whatever it's on. |
+| **P** | Path to your attention point: the look-mode cursor when one is up — full route to whatever it's on — otherwise the last spoken scan result, with nothing pinned and nothing moved. Scan, hear a target, P for the route, keep scanning. |
 | **Shift + P** | Re-announce the path to the focused pin. |
 | **J** | Jump the cursor to the last spoken scan or pin result. From normal play, opens Look mode on it; while aiming a spell, moves the aim (any spell — J is deliberate). Says "gone", and stays put, if the target died or was collected since it spoke. |
 | **Shift + J** | Jump back to where the cursor was before the last J (a second press bounces forward again). |

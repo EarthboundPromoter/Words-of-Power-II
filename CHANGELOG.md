@@ -3,6 +3,12 @@
 All notable changes to **Words of Power II** are listed here, newest first. This is
 an early work-in-progress RW3 port — expect frequent changes.
 
+## Unreleased
+
+### Added
+- `P` with no cursor up speaks the path to the last spoken scan result — no
+  pin set, no cursor moved. Scan, hear a target, P for the route, keep scanning.
+
 ## 2026-07-11 — 0.6.0 — Good Looking
 
 ### Added
