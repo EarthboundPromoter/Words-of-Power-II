@@ -3,7 +3,7 @@
 All notable changes to **Words of Power II** are listed here, newest first. This is
 an early work-in-progress RW3 port — expect frequent changes.
 
-## 2026-07-14 — 0.6.3
+## 2026-07-14 — 0.6.3 — Pathfinder
 
 ### Added
 - Blood Bullet says "Obstructed by X" when the shot won't reach the aim — the
