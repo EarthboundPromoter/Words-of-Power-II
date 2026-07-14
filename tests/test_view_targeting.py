@@ -43,7 +43,7 @@ def _extract(marker, terminator, dedent):
     return textwrap.dedent(block) if dedent else block
 
 
-_cfg = types.SimpleNamespace(aoe_group_names=True)
+_cfg = types.SimpleNamespace(aoe_group_names=True, show_coordinates=True)
 _ns = {
     'Level': Level,
     '_pluralize': _pluralize,
@@ -222,3 +222,61 @@ def test_tile_dynamic_reason_at_own_tile_still_speaks():
     fb.can_target_self = True
     fb.must_target_empty = True
     assert _twice(_view(lvl, wiz, fb, 7, 7)) == ("Tile occupied. ", "", "")
+
+
+# ---- Blood Bullet obstruction (owner-ruled 2026-07-14) ----
+# The mod's first per-spell stop rule. Pins: the first unit that would
+# actually eat the shot is named problems-first, Ally-tagged when friendly
+# (friendly fire); the cursor's own unit never counts as an obstruction;
+# Blessed Blood passes Dark/Demon/Undead; spells without a stop rule can
+# never borrow the warning (the disjointness pin).
+
+
+def test_blood_bullet_ally_obstruction_named():
+    # Wolf (4,7) stands on the line to Orc (3,7): the bullet stops there.
+    lvl, wiz = _world()
+    bb = _give(wiz, Spells.BloodBullet())
+    rw, _info, _suffix = _twice(_view(lvl, wiz, bb, 3, 7))
+    assert rw == "Obstructed by Ally Wolf (4,7). "
+
+
+def test_blood_bullet_cursor_on_first_unit_is_clean():
+    lvl, wiz = _world()
+    ghost = _unit("Ghost")
+    ghost.tags = [Level.Tags.Dark]
+    lvl.add_obj(ghost, 5, 7)
+    bb = _give(wiz, Spells.BloodBullet())
+    rw, _info, _suffix = _twice(_view(lvl, wiz, bb, 5, 7))
+    assert rw == ""
+
+
+def test_blood_bullet_clear_line_no_warning():
+    lvl, wiz = _world()
+    bb = _give(wiz, Spells.BloodBullet())
+    rw, _info, _suffix = _twice(_view(lvl, wiz, bb, 7, 3))
+    assert rw == ""
+
+
+def test_blessed_blood_passes_dark_units():
+    # Blessed Blood penetrates Dark/Demon/Undead (Spells.py:15558-15560):
+    # blessed, the Dark Ghost at (5,7) no longer obstructs — the Wolf
+    # behind it becomes the true stopper.
+    lvl, wiz = _world()
+    ghost = _unit("Ghost")
+    ghost.tags = [Level.Tags.Dark]
+    lvl.add_obj(ghost, 5, 7)
+    bb = _give(wiz, Spells.BloodBullet())
+    rw, _info, _suffix = _twice(_view(lvl, wiz, bb, 3, 7))
+    assert rw == "Obstructed by Ghost (5,7). "
+    bb.blessed = 1
+    rw, _info, _suffix = _twice(_view(lvl, wiz, bb, 3, 7))
+    assert rw == "Obstructed by Ally Wolf (4,7). "
+
+
+def test_other_line_spells_never_obstructed():
+    # Disjointness pin: hit-everything beams must not borrow the rule —
+    # the table keys by name, never by "footprint is a line".
+    lvl, wiz = _world()
+    fb = _give(wiz, Spells.FireballSpell())
+    rw, _info, _suffix = _twice(_view(lvl, wiz, fb, 3, 7))
+    assert "Obstructed" not in rw

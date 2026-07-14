@@ -418,10 +418,13 @@ def _deaths_in_chain(chain):
     for r in chain:
         if r.get('event_type') != 'EventOnDeath':
             continue
-        t = (r.get('payload') or {}).get('target') or {}
+        p = r.get('payload') or {}
+        t = p.get('target') or {}
         tid = t.get('id')
         if tid is not None:
-            deaths[tid] = t
+            # Carry the expiry flag on a copy so the leftover death line
+            # can say "expired" — the snapshot itself stays untouched.
+            deaths[tid] = dict(t, _is_expired=bool(p.get('is_expired')))
     return deaths
 
 
@@ -645,7 +648,8 @@ def _render_action_chain(chain, wizard_team, show_coords, movement_verbose,
         if tid is not None:
             covered.add(tid)
     death_lines = [
-        f"{_name_with_coord(snap, wizard_team, show_coords)} died."
+        f"{_name_with_coord(snap, wizard_team, show_coords)} "
+        f"{'expired' if snap.get('_is_expired') else 'died'}."
         for tid, snap in deaths.items()
         if tid not in covered and not _is_wizard_snap(snap)
     ]
@@ -1289,11 +1293,16 @@ def _render_standalone_deaths(records, wizard_team, show_coords):
             continue
         if _is_claimed_by_other(r) or _has_mark(r, ORPHAN_MARK):
             continue
-        t = (r.get('payload') or {}).get('target') or {}
+        p = r.get('payload') or {}
+        t = p.get('target') or {}
         if _is_wizard_snap(t):
             continue
         name_str = _name_with_coord(t, wizard_team, show_coords)
-        out_items.append(_make_item(RANK_STATUS, [t], f"{name_str} died."))
+        # Duration expiry speaks its own verb (journal is_expired; the
+        # legacy announcer and grouped speech already say "expired") —
+        # "died" implied a kill the game never showed.
+        verb = "expired" if p.get('is_expired') else "died"
+        out_items.append(_make_item(RANK_STATUS, [t], f"{name_str} {verb}."))
         _claim(r)
         claimed.append(r)
     return out_items, claimed

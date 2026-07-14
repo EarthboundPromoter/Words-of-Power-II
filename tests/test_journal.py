@@ -424,3 +424,44 @@ def test_payload_death_no_damage_event_all_none():
     assert p['source_is_buff'] is False
     assert p['source_buff_type'] is None
     assert p['killing_source_caster'] is None
+
+
+# ---- _payload_death is_expired (duration expiry vs dismissal vs kill) ----
+# The game's expiry kill is exactly: no damage event AND turns_to_death <= 0
+# at kill time (Level.py:2167-2170). Renderers speak "expired" on the flag.
+
+
+def test_payload_death_expiry_flagged():
+    from journal import _payload_death
+    u = _unit(name="Sword of Light", player=False)
+    u.turns_to_death = 0
+    evt = SimpleNamespace(unit=u, damage_event=None)
+    assert _payload_death(evt)['is_expired'] is True
+
+
+def test_payload_death_midlife_dismissal_not_expiry():
+    # A dismissal/transformation of a temporary unit mid-life is causeless
+    # but NOT an expiry — turns_to_death is still positive.
+    from journal import _payload_death
+    u = _unit(name="Wolf", player=False)
+    u.turns_to_death = 4
+    evt = SimpleNamespace(unit=u, damage_event=None)
+    assert _payload_death(evt)['is_expired'] is False
+
+
+def test_payload_death_damage_kill_never_expiry():
+    # A damage kill on the unit's final turn is still a kill.
+    from journal import _payload_death
+    u = _unit(name="Wolf", player=False)
+    u.turns_to_death = 0
+    spell = SimpleNamespace(name="Fireball", owner=None)
+    dmg = SimpleNamespace(damage=9, damage_type=_dtype("Fire"), source=spell)
+    evt = SimpleNamespace(unit=u, damage_event=dmg)
+    assert _payload_death(evt)['is_expired'] is False
+
+
+def test_payload_death_permanent_unit_not_expiry():
+    # Permanent units (turns_to_death None, the default stub) never flag.
+    from journal import _payload_death
+    evt = SimpleNamespace(unit=_unit(), damage_event=None)
+    assert _payload_death(evt)['is_expired'] is False

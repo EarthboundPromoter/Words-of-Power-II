@@ -147,3 +147,77 @@ def test_non_cost_shop_types_route_untouched():
     assert _row(_view(shop_type=7), _spell("Imp")) == "bestiary:Imp"
     assert _row(_view(shop_type=8), _spell("Helm")) == "blueprint:Helm"
     assert _row(_view(shop_type=9), _spell("Fang")) == "component:Fang"
+
+
+# ---- active filters spoken on shop open (owner-ruled 2026-07-14) ----
+# Filters persist across open_shop by game design (cleared only when
+# backing out to level/char sheet); the game shows them as chips + a
+# white-lit global. _active_filter_text names them under the game's own
+# panel title word ("Filters:"), gated exactly as the game gates the
+# draw: spell/crafting shops only, Can Afford crafting-only.
+
+_filter_ns = {
+    '_SHOP_TYPE_SPELLS': 0,
+    '_SHOP_TYPE_CRAFTING': 8,
+    '_shop_filter_category_names': {'tags': 'Tags', 'attr': 'Attributes'},
+    '_shop_global_filter_names': {
+        'can_afford': 'Can Afford',
+        'unused': 'Never Purchased',
+        'unvictoried': 'Never Won With',
+    },
+    '_main': types.SimpleNamespace(SHOP_FILTER_CAN_AFFORD='can_afford'),
+    'read_text': lambda v, fmt=None: v,
+}
+exec(_extract("    def _active_filter_text(view):",
+              "    def _active_filter_labels(view, category):"), _filter_ns)
+
+
+class _FilterView:
+    def __init__(self, shop_type, chips=(), active_globals=()):
+        self.shop_type = shop_type
+        self._chips = list(chips)
+        self._active = set(active_globals)
+
+    def get_active_shop_filter_chips(self):
+        return self._chips
+
+    def get_shop_filter_value_label(self, category, value):
+        return value
+
+    def is_shop_global_filter_active(self, fid):
+        return fid in self._active
+
+
+def _filters(view):
+    return _filter_ns['_active_filter_text'](view)
+
+
+def test_filter_text_empty_when_nothing_active():
+    assert _filters(_FilterView(8)) == ""
+
+
+def test_filter_text_can_afford_on_crafting():
+    assert _filters(_FilterView(8, active_globals=('can_afford',))) == \
+        "Filters: Can Afford"
+
+
+def test_filter_text_chip_uses_game_chip_naming():
+    v = _FilterView(8, chips=[('tags', 'Fire')],
+                    active_globals=('can_afford',))
+    assert _filters(v) == "Filters: Tags: Fire, Can Afford"
+
+
+def test_filter_text_can_afford_skipped_for_spell_shop():
+    # The game neither draws nor applies Can Afford in the spell shop
+    # (RiftWizard3.py:4534-4536; is_valid_shop_option gates on Equipment)
+    # — lingering state must not speak there.
+    assert _filters(_FilterView(0, active_globals=('can_afford',))) == ""
+    v = _FilterView(0, active_globals=('can_afford', 'unused'))
+    assert _filters(v) == "Filters: Never Purchased"
+
+
+def test_filter_text_silent_outside_filter_shops():
+    # No filter panel exists for bestiary/level shops (RiftWizard3.py:4517).
+    v = _FilterView(4, chips=[('tags', 'Fire')],
+                    active_globals=('can_afford',))
+    assert _filters(v) == ""

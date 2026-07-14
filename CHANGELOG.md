@@ -3,25 +3,38 @@
 All notable changes to **Words of Power II** are listed here, newest first. This is
 an early work-in-progress RW3 port — expect frequent changes.
 
-## Unreleased
+## 2026-07-14 — 0.6.3
 
 ### Added
+- Blood Bullet says "Obstructed by X" when the shot won't reach the aim — the
+  first unit in the path, allies included. Blessed Blood's pass-through is respected.
+- Continue Run greets you with a briefing: realm, HP, shields, SP, active
+  statuses, adjacent enemies with directions, ally count, and what remains.
+- Shop and crafting screens name still-active filters when they open —
+  filters survive menu round trips, so a shortened list now says why.
 - `P` with no cursor up speaks the path to the last spoken scan result — no
   pin set, no cursor moved. Scan, hear a target, P for the route, keep scanning.
 - `P` with a cursor up names what it pathed to: "path to cursor" in Look mode,
   "path to aim" while aiming a spell, "path to destination" for teleports.
-- One word per thing, everywhere: scanned things are targets, the Look cursor
-  is the cursor, a spell's cursor is the aim (scans mid-aim now say "From
-  aim", not "From target"), teleports have a destination, pins are pins.
+- One word per referent: scanned things are targets, Look's cursor is the
+  cursor, a spell's is the aim — scans mid-aim say "From aim", not "From target".
 - `J` joined the spoken keybind reference (Shift+/), including that it moves
   your aim while a spell is up.
 - TUTORIAL.md: a new-player guide to the game and the mod, from first scan to
   first deploy. Linked at the top of the README.
 
 ### Fixed
+- Summoned allies whose time runs out are "expired", not "died" — a kill
+  the game never showed.
+- Enter while in Look mode says "Cancelled" (it closes the cursor, same as
+  Escape) instead of the false "look: can't target self".
+- Item pickups and on-death warnings speak markup as words ("50 HP", not
+  "bracket 50 HP colon heal bracket").
+- Minion self-heals are tagged Ally, matching their spawn announcements.
+- Deploy-screen tiles say the coordinate right after the unit's name, not
+  glued to its last ability.
 - `P` no longer says "already at target" after leaving Look mode or casting
-  without moving — a stale game-side cursor was shadowing the last-scanned
-  fallback.
+  without moving.
 
 ## 2026-07-11 — 0.6.0 — Good Looking
 

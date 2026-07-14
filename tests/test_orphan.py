@@ -1060,6 +1060,25 @@ def test_standalone_causeless_death_renders_died():
     assert section[1] == "Imp (6,6) died."
 
 
+def test_standalone_expired_death_renders_expired():
+    """A duration expiry (journal is_expired) speaks 'expired', not 'died' —
+    ally expiry read as a kill the game never showed (Sword of Light
+    specimen 2026-07-02 18:04:31; the death event itself was causeless)."""
+    p = _OrphanProducer()
+
+    def noop(_): pass
+
+    dead = _ally_snap(uid=501, name='Sword of Light', x=4, y=9)
+    rec = {'sequence': 10, 'parent': None, 'event_type': 'EventOnDeath',
+           'payload': {'target': dead, 'is_expired': True}, 'marks': []}
+    section = p.fire([rec], show_coords=True, movement_verbose=False,
+                     log_fn=noop, telemetry=None)
+    # No wizard snapshot in this window, so no team prefix — the verb is
+    # what this test pins (Ally tagging is _name_with_coord's, tested
+    # elsewhere).
+    assert section[1] == "Sword of Light (4,9) expired."
+
+
 def test_aoe_multi_kill_counts_deaths():
     """An AoE that kills several of one group reads ', N killed'."""
     g1 = _enemy_snap(uid=301, name='Goblin', x=5, y=5)

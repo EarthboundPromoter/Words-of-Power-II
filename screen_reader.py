@@ -1,5 +1,5 @@
 # Rift Wizard 3 Screen Reader Mod — Words of Power II
-MOD_VERSION = "0.6.0"
+MOD_VERSION = "0.6.3"
 
 import sys
 import os
@@ -1526,6 +1526,7 @@ from helpers import (_cardinal_direction, _bearing_index, _direction_offset, _pl
                      _key_matches_bind, _bound_keys, _compress_crossed,
                      order_pins_in_blocks, pin_count_header, pin_block_label,
                      focus_handoff, pin_matches)
+from helpers import _clean_desc as _markup_to_words
 
 # ---- Pathfinding Via Hints ----
 _VIA_HINT_CAP = 3  # Max blocked entries per scan that get pathfinding computation
@@ -2306,7 +2307,10 @@ def on_healed(event):
                 return
             # Digest-covered: in-chain heals on non-player units (proc
             # heals, dispel-style effects) won't be re-narrated here.
-            healed_name = _name(event.unit)
+            # Ally tag matches the pipeline's _name_with_coord and the spawn
+            # announcements — untagged, a minion's self-heal read as an
+            # enemy's (Cultist specimen 2026-07-02, ally-tag omission).
+            healed_name = f"Ally {_name(event.unit)}" if is_minion else _name(event.unit)
             if _digest_suppress('on_healed.nonplayer',
                                 target=healed_name, amount=amount):
                 return
@@ -2422,8 +2426,11 @@ def on_item_pickup(event):
                 # patched_try_move): fold it in and compose the summary now.
                 _finish_autopickup(None)
             return
-        desc = ((event.item.get_description() or '') if hasattr(event.item, 'get_description')
-                else getattr(event.item, 'description', ''))
+        # Same resolve + markup transcode the describe panel gets — raw
+        # get_description() leaked bracket markup ("Remove [poison] and
+        # heal for [50 HP:heal]", Wildflower/Frost Core/Timelost
+        # specimens 2026-07-02) and would speak (template, fmt) tuples raw.
+        desc = _markup_to_words(_desc_text(event.item))
         text = f"Picked up {item_name}"
         if desc and desc != "Undescribed Item":
             text += f". {desc}"
@@ -3576,6 +3583,16 @@ if _PyGameView is not None:
         """Announce specific reason when a spell cast fails at confirmation."""
         spell = self.cur_spell
         target = self.cur_spell_target
+        # LookSpell.can_cast is False by design (RiftWizard3.py:833-834) —
+        # confirm in look mode is the game closing the cursor
+        # (cast_cur_spell nulls cur_spell unconditionally), not a failed
+        # cast. Speak the close with Escape's word instead of a
+        # manufactured reason ("look: can't target self").
+        if type(spell).__name__ == 'LookSpell':
+            _original_cast_cur_spell(self)
+            async_tts.speak("Cancelled")
+            log("[Select] Look mode closed by confirm")
+            return
         will_fail = False
         reason = ""
         if spell and target:
@@ -3593,6 +3610,122 @@ if _PyGameView is not None:
 
     _PyGameView.cast_cur_spell = patched_cast_cur_spell
     log("  Cast failure feedback hook installed")
+
+    # ---- Continue-Run Briefing ----
+    # Owner-designed 2026-07-14. load_game is the Continue path's one seam:
+    # only the title menu's Continue selection calls it (RiftWizard3.py:
+    # 7877-7878 -> load_game :10198); by return, the pickled game is fully
+    # queryable. New runs and rift transitions never pass through here.
+
+    _original_load_game = _PyGameView.load_game
+
+    def _continue_status_text(player):
+        """Active level buffs/debuffs, the F-vitals vocabulary: bless/curse
+        only (buff_type 1/2 — equipment passives are type 0 and stay
+        silent), 'Cursed' prefix on debuffs, duration when running.
+        Singular-correct turns (the '1 turns' class; crisis.py:1042 is the
+        reference behavior)."""
+        entries = []
+        for buff in getattr(player, 'buffs', []):
+            btype = getattr(buff, 'buff_type', 0)
+            if btype not in (1, 2):
+                continue
+            bname = _name(buff, "")
+            if not bname:
+                continue
+            entry = f"Cursed {bname}" if btype == 2 else bname
+            turns = getattr(buff, 'turns_left', 0)
+            if turns and turns > 0:
+                entry += f", {turns} turn{'s' if turns != 1 else ''}"
+            entries.append(entry)
+        return ("Status: " + ". ".join(entries) + ".") if entries else ""
+
+    def patched_load_game(self, filename=None):
+        """Continue-run briefing: orient the returning player — realm,
+        vitals (HP, shields, SP, active level statuses), ally count,
+        remaining opposition. Wording is the owner's script; counts and
+        team calls come from the loaded level itself (berserk quirk
+        inherited: are_hostile counts a berserked ally as an enemy, same
+        as every other mod surface)."""
+        _original_load_game(self, filename=filename)
+        try:
+            game = getattr(self, 'game', None)
+            player = getattr(game, 'p1', None) if game else None
+            if game is None or player is None:
+                return
+            parts = ["Welcome back, Wizard."]
+            realm = getattr(game, 'level_num', None)
+            if realm is not None:
+                parts.append(f"You are on Realm {realm}.")
+            vitals = (f"You have {getattr(player, 'cur_hp', 0)} of "
+                      f"{getattr(player, 'max_hp', 0)} HP")
+            shields = getattr(player, 'shields', 0)
+            if shields:
+                vitals += f", {shields} shield{'s' if shields != 1 else ''}"
+            vitals += f", {getattr(player, 'xp', 0)} SP."
+            parts.append(vitals)
+            status = _continue_status_text(player)
+            if status:
+                parts.append(status)
+            level = getattr(game, 'cur_level', None)
+            if level is not None:
+                allies = enemies = spawners = 0
+                adjacent = []
+                for u in getattr(level, 'units', []):
+                    if u is player:
+                        continue
+                    try:
+                        hostile = level.are_hostile(player, u)
+                    except Exception:
+                        hostile = getattr(u, 'team', None) != Level.TEAM_PLAYER
+                    if hostile:
+                        if getattr(u, 'is_lair', False):
+                            spawners += 1
+                        else:
+                            enemies += 1
+                        if are_adjacent(u, player):
+                            adjacent.append(u)
+                    elif getattr(u, 'team', None) == Level.TEAM_PLAYER:
+                        allies += 1
+                if adjacent:
+                    # Owner slot (2026-07-14): adjacency after vitals,
+                    # before the counts. Contact-tracker vocabulary
+                    # ("N adjacent", hostiles only) plus a direction per
+                    # unit for re-orientation. Name and direction comma-
+                    # separated as in scan speech ("Cultist, 1 east");
+                    # semicolons keep the pairs distinct (owner ruling
+                    # 2026-07-14: designations must not run together).
+                    names = "; ".join(
+                        f"{_name(u)}, "
+                        f"{_cardinal_direction(u.x - player.x, u.y - player.y)}"
+                        for u in adjacent)
+                    parts.append(
+                        f"{len(adjacent)} adjacent: {names}.")
+                # Owner-scripted shape (final ruling 2026-07-14): allies are
+                # their own sentence; then "A enemies and B spawners
+                # remain." as a separate contained pairing of facts.
+                if allies:
+                    parts.append(f"You have {allies} "
+                                 f"{'ally' if allies == 1 else 'allies'}.")
+                e_str = f"{enemies} {'enemy' if enemies == 1 else 'enemies'}"
+                s_str = f"{spawners} {'spawner' if spawners == 1 else 'spawners'}"
+                if enemies and spawners:
+                    parts.append(f"{e_str} and {s_str} remain.")
+                elif enemies:
+                    parts.append(f"{e_str} remain{'s' if enemies == 1 else ''}.")
+                elif spawners:
+                    parts.append(f"{s_str} remain{'s' if spawners == 1 else ''}.")
+                else:
+                    parts.append("No enemies remain.")
+            parts.append("Good hunting.")
+            text = " ".join(parts)
+            log(f"[Continue] {text}")
+            async_tts.speak(text)
+        except Exception as e:
+            log(f"[Continue] Error: {e}")
+
+    _PyGameView.load_game = patched_load_game
+    log("  Continue-run briefing hook installed")
 
     # ---- Shop Navigation Hooks ----
 
@@ -4239,9 +4372,14 @@ if _PyGameView is not None:
                     text = header
 
             elif shop_type == _SHOP_TYPE_CRAFTING:
-                # Craft Equipment: blueprint list
+                # Craft Equipment: blueprint list. Active filters ride the
+                # header — they persist across the component-select round
+                # trip and silently shrink the count otherwise.
                 total = len(self.get_shop_options())
                 header = f"Craft Equipment, {total} blueprints"
+                filters = _active_filter_text(self)
+                if filters:
+                    header += f". {filters}"
                 if target is not None:
                     text = f"{header}. {_describe_craft_blueprint(self, target)}"
                 else:
@@ -4260,9 +4398,14 @@ if _PyGameView is not None:
                     text = f"{header}. No usable components"
 
             else:
-                # SPELLS: "Learn Spell, N SP available"
+                # SPELLS: "Learn Spell, N SP available". Same persistent-
+                # filter rule as crafting (the game's one filter panel
+                # serves both shops).
                 sp_total = getattr(game.p1, 'xp', 0) if game and game.p1 else 0
                 header = f"Learn Spell, {sp_total} SP available"
+                filters = _active_filter_text(self)
+                if filters:
+                    header += f". {filters}"
                 if target is not None:
                     text = f"{header}. {_describe_shop_row(self, target)}"
                 else:
@@ -4457,6 +4600,43 @@ if _PyGameView is not None:
         except Exception:
             return ""
         return "No results" if count == 0 else f"{count} results"
+
+    def _active_filter_text(view):
+        """Names the filters live on a freshly opened shop, exactly as the
+        game shows them: the active-filter chips ("{cat}: {label}",
+        draw_shop_active_filters, RiftWizard3.py:4268) plus highlighted
+        global filters. Filters survive open_shop by game design (only
+        backing out to level/char sheet clears them, :5035) — a sighted
+        player sees the chips and the white-lit global; unspoken, a
+        filtered reopen read as a wrong count ("24 blueprints" when the
+        catalog holds 350 — bug queue 2026-07-14). Gated as the game
+        gates the draw: filter panel only for spell/crafting shops
+        (:4517), Can Afford drawn and applied only for crafting
+        (:4534-4536). Empty when nothing is active, so clean opens stay
+        quiet. "Filters:" is the game's own panel title (:4282)."""
+        st = getattr(view, 'shop_type', -1)
+        if st not in (_SHOP_TYPE_SPELLS, _SHOP_TYPE_CRAFTING):
+            return ""
+        parts = []
+        try:
+            for category, value in view.get_active_shop_filter_chips():
+                label = read_text(view.get_shop_filter_value_label(category, value))
+                cat = _shop_filter_category_names.get(category, '')
+                parts.append(f"{cat}: {label}" if cat else label)
+        except Exception:
+            pass
+        try:
+            can_afford_id = getattr(_main, 'SHOP_FILTER_CAN_AFFORD', 'can_afford')
+            for fid, fname in _shop_global_filter_names.items():
+                if fid == can_afford_id and st != _SHOP_TYPE_CRAFTING:
+                    continue
+                if view.is_shop_global_filter_active(fid):
+                    parts.append(read_text(fname))
+        except Exception:
+            pass
+        if not parts:
+            return ""
+        return "Filters: " + ", ".join(parts)
 
     def _active_filter_labels(view, category):
         labels = []
@@ -5417,6 +5597,7 @@ if _PyGameView is not None:
             if not tooltip:
                 continue
             tooltip = read_text(tooltip, _fmt_of(buff))  # resolve tuples AND substitute str-template placeholders; .lower() below would throw on a tuple
+            tooltip = _markup_to_words(tooltip)  # "[5:damage] [Dark:dark]" markup rode into every tier-1 on-death rider (Goatia specimen 2026-07-02)
             # Strip leading "On death, " if present — we add our own prefix
             stripped = tooltip
             if stripped.lower().startswith("on death, "):
@@ -5513,7 +5694,8 @@ if _PyGameView is not None:
     def _check_aoe_warning(view):
         """Check what units are in the current spell's AoE.
         Returns (range_warning, aoe_info, group_suffix) — all may be empty.
-        range_warning ("Out of range. " / a cast-fail reason) goes first.
+        range_warning ("Out of range. " / a cast-fail reason / the
+        projectile obstruction warning) goes first.
         aoe_info ("Within AoE You, 1 ally, 2 enemies.") goes before the tile
         brief; census order You, allies, enemies (owner ruling 2026-07-03:
         friendly-fire opt-out — ally presence must differentiate fast).
@@ -5593,6 +5775,21 @@ if _PyGameView is not None:
             footprint.discard((target.x, target.y))
             if not footprint:
                 return ("", "", "")
+            # Projectile obstruction (owner-ruled 2026-07-14): for spells
+            # with a stop-at-first-hit rule (Blood Bullet), name the unit
+            # that would actually eat the shot. Problems-first slot, ally-
+            # tagged when friendly — it's a friendly-fire warning as much
+            # as a targeting one.
+            obstruct = ""
+            blocker = _first_obstruction(spell, level, impacted,
+                                         target.x, target.y)
+            if blocker is not None:
+                b_name = _name(blocker)
+                if getattr(blocker, 'team', None) == Level.TEAM_PLAYER:
+                    b_name = f"Ally {b_name}"
+                if cfg.show_coordinates:
+                    b_name += f" ({blocker.x},{blocker.y})"
+                obstruct = f"Obstructed by {b_name}. "
             if cfg.aoe_group_names and impacted and all(hasattr(p, 'cur_hp') for p in impacted):
                 # Chain-class footprint: the engine returned the linked UNITS
                 # themselves (Mass Melt's connected group). Composition
@@ -5628,8 +5825,8 @@ if _PyGameView is not None:
                 for nm, n in enemy_counts.items():
                     parts.append(nm if n == 1 else f"{n} {_pluralize(nm)}")
                 if not parts:
-                    return ("", "", "")
-                return ("", "", f"{', '.join(parts)}.")
+                    return (obstruct, "", "")
+                return (obstruct, "", f"{', '.join(parts)}.")
             player_hit = False
             enemies = 0
             allies = 0
@@ -5652,7 +5849,7 @@ if _PyGameView is not None:
                     else:
                         enemies += 1
             if not player_hit and enemies == 0 and allies == 0:
-                return ("", "", "")
+                return (obstruct, "", "")
             details = []
             if player_hit:
                 details.append("You")
@@ -5664,10 +5861,60 @@ if _PyGameView is not None:
             if enemies > 0:
                 details.append(f"{enemies} {'enemy' if enemies == 1 else 'enemies'}")
             aoe_info = f"Within AoE {', '.join(details)}."
-            return ("", aoe_info, "")
+            return (obstruct, aoe_info, "")
         except Exception as e:
             log(f"[AoE Check] Error: {e}")
             return ("", "", "")
+
+    # ---- Per-spell projectile stop rules (owner-ruled 2026-07-14) ----
+    # The mod's first per-spell behavioral knowledge. Disjointness survey
+    # same day (BUG_QUEUE.md, Blood Bullet entry): Blood Bullet is the ONLY
+    # player-aimable spell that terminates at its first hit — every other
+    # line/beam either hits everything on the line, animates the line and
+    # hits only the aimed tile, or is never player-aimed. So the rule keys
+    # BY NAME; keying on "footprint is a line" would falsely flag the
+    # hit-everything beams. A second stop-at-first spell (or an RW3 update
+    # changing this one) is a table entry + penetration predicate, not a
+    # rewrite. Walls never enter: the cast loop skips unit-less tiles
+    # (Spells.py:15552-15556) — LoS-gated aiming can't cross walls, and
+    # Sniper-stack no-LoS bullets fly through them.
+
+    def _blood_bullet_penetrates(spell, unit):
+        """Blessed Blood passes through (and damages) Dark/Demon/Undead
+        units instead of stopping there (Spells.py:15558-15560)."""
+        try:
+            if not spell.get_stat('blessed'):
+                return False
+            bless = getattr(spell, 'bless_tags', None) or ()
+            return any(t in bless for t in getattr(unit, 'tags', ()))
+        except Exception:
+            return False
+
+    _PROJECTILE_STOP_RULES = {
+        'Blood Bullet': _blood_bullet_penetrates,
+    }
+
+    def _first_obstruction(spell, level, impacted, tx, ty):
+        """The unit that would actually eat the shot, or None when the aim
+        is true. Walks the spell's own drawn trajectory (impacted is the
+        ordered caster-to-cursor line, the same tiles the game paints at
+        aim time, RiftWizard3.py:5491) applying the spell's stop rule
+        exactly as cast() does. None when the spell has no stop rule, when
+        nothing stands in the way, or when the first stopper IS the cursor
+        tile (a normal shot)."""
+        pen = _PROJECTILE_STOP_RULES.get(_name(spell))
+        if pen is None:
+            return None
+        for p in impacted:
+            u = level.get_unit_at(p.x, p.y)
+            if not u or not u.is_alive():
+                continue
+            if pen(spell, u):
+                continue
+            if p.x == tx and p.y == ty:
+                return None
+            return u
+        return None
 
     def _prop_beneath_text(view, unit):
         """Prop on a described unit's own tile. The game's examine prefers
@@ -5939,7 +6186,18 @@ if _PyGameView is not None:
 
             unit = level.get_unit_at(x, y)
             if unit:
-                parts.append(_describe_unit_tier1(unit))
+                tier1 = _describe_unit_tier1(unit)
+                if cfg.show_coordinates:
+                    # Coordinate rides the unit NAME ("Name (x,y)", the
+                    # grammar every combat line uses) — appended after the
+                    # tier-1 tail it glued onto the last ability name
+                    # ("Melee Attack (9,9)" read as an aimed ability).
+                    uname = _name(unit)
+                    if tier1.startswith(uname):
+                        tier1 = f"{uname} ({x},{y}){tier1[len(uname):]}"
+                    else:
+                        tier1 = f"({x},{y}) {tier1}"
+                parts.append(tier1)
 
             if tile.prop:
                 parts.append(_name(tile.prop))
@@ -5955,7 +6213,7 @@ if _PyGameView is not None:
                 valid = level.can_stand(x, y, view.game.p1)
                 text = "clear" if valid else "blocked"
 
-            if cfg.show_coordinates:
+            if cfg.show_coordinates and unit is None:
                 text = f"{text} ({x},{y})"
             text = f"{text}{_latch_token(view, level, x, y)}"
 

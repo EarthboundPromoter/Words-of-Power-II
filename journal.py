@@ -624,8 +624,16 @@ def _payload_death(event):
     buff.source, recovered the same way buff snapshots do."""
     dmg = event.damage_event
     source = getattr(dmg, 'source', None)
+    # Duration expiry: the game kills with NO damage event exactly when
+    # turns_to_death hits 0 (Level.py:2167-2170) — at capture time the live
+    # unit still shows it. A mid-life dismissal has turns_to_death > 0 (and
+    # silent kills carry is_silent_kill from patched_unit_kill instead), so
+    # this flag is expiry and nothing else. Renderers speak "expired" on it,
+    # matching the batcher's grouped-death vocabulary.
+    ttd = getattr(event.unit, 'turns_to_death', None)
     return {
         'target': _snapshot_unit(event.unit),
+        'is_expired': bool(dmg is None and ttd is not None and ttd <= 0),
         'killing_damage': getattr(dmg, 'damage', None),
         'killing_dtype': _name_or(getattr(dmg, 'damage_type', None)),
         'killing_source': _name_or(source),

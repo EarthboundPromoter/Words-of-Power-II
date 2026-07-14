@@ -1,7 +1,7 @@
 # The Cursor Update — Transition Guide
 
-**Applies to:** versions 0.5.0 through 0.6.0, coming from 0.3.4 (drafted 2026-07-07,
-updated 2026-07-11). This guide is
+**Applies to:** versions 0.5.0 through 0.6.3, coming from 0.3.4 (drafted 2026-07-07,
+updated 2026-07-14). This guide is
 for players of the previous version: it covers what moved, what changed, and what's new.
 If you're new to the mod entirely, read [README.md](README.md) instead — it describes
 everything as it now is.
