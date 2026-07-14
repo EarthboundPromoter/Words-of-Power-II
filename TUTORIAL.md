@@ -58,6 +58,8 @@ When a rift is cleared, portals open to the next set. Before entering a portal, 
 
 Here's the step players most often waste: when you enter a rift, you don't appear at a fixed spot. You see the whole level first and choose your starting tile — almost anywhere walkable. This is called deploying, and it may be the single most leveraged decision you make per level.
 
+Deploying is a two-stage process, and the stages carry very different weights. Stage one is pressing Enter on a portal: that's a peek, not a commitment. The level lays itself out and the cursor is yours — look around as long as you like. The only thing that commits you is stage two: pressing Enter on a tile. Until then you can back out entirely, and peeking into several rifts before choosing is a genuinely good habit when you're unsure where to go — geography is a factor beyond enemy composition, and two rifts with the same monsters can play completely differently depending on the ground.
+
 You arrive refreshed, but you arrive alone, and everything on the map already knows where you are. Deploy in the middle of open ground and everything converges on you at once. Deploy into a corner or behind a chokepoint and enemies come to you a few at a time. Deploy near a spawner and you can put it down before it earns its keep; deploy far from all of them and you fight reinforcements all level. A bad deploy can lose the run on turn one. A good one turns a frightening level into a queue.
 
 Take your time on the deploy screen. The mod gives you tools built for exactly this — see Part 2.
@@ -106,7 +108,7 @@ L speaks the enemies in your line of sight by type and direction. T tells you wh
 
 ### Area spells
 
-When you aim a spell with an area — a fireball's blast, a lightning bolt's line, chain lightning's web — the mod reads the spell's real footprint and tells you who's standing in it, allies included. You'll hear when you're in your own blast. The workflow that follows: Tab or J onto the target cluster, listen to the census, then nudge the aim a tile or two until the footprint holds everything you want and nothing you don't. The footprint is computed by the game itself, whatever the spell's shape — splash, beam, chain, or stranger — so what you hear is what will burn.
+When you aim a spell with an area — a fireball's blast radius, the chaining targets of mass freeze, the beam of a lightning bolt — the mod reads the spell's real footprint and tells you who's standing in it, allies included. You'll hear when you're in your own blast. The workflow that follows: Tab or J onto the target cluster, listen to the census, then nudge the aim a tile or two until the footprint holds everything you want and nothing you don't. The footprint is computed by the game itself, whatever the spell's shape — splash, beam, chain, or stranger — so what you hear is what will burn.
 
 ### Getting around
 
