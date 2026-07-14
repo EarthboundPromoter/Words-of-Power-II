@@ -10,6 +10,10 @@ Early beta — core play, combat narration, and the crafting interface all work,
 some features are lightly tested. Please report anything that sounds wrong or stays
 silent when it shouldn't.
 
+**New to the game?** [TUTORIAL.md](TUTORIAL.md) is the guided tour: what kind of game
+Rift Wizard 3 is, how a run works, and how to play it with the mod — from your first
+scan to your first deploy. Start there if this is your first Rift Wizard.
+
 **Coming from an earlier version?** [TRANSITION.md](TRANSITION.md) — the transition
 guide, current through 0.6.0 — covers what moved, what changed, and what's new, with a
 five-minute quick start. Useful to anyone, but written primarily for returning

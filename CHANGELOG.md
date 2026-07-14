@@ -15,6 +15,8 @@ an early work-in-progress RW3 port — expect frequent changes.
   aim", not "From target"), teleports have a destination, pins are pins.
 - `J` joined the spoken keybind reference (Shift+/), including that it moves
   your aim while a spell is up.
+- TUTORIAL.md: a new-player guide to the game and the mod, from first scan to
+  first deploy. Linked at the top of the README.
 
 ### Fixed
 - `P` no longer says "already at target" after leaving Look mode or casting
