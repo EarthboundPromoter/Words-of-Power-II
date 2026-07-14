@@ -8,6 +8,18 @@ an early work-in-progress RW3 port — expect frequent changes.
 ### Added
 - `P` with no cursor up speaks the path to the last spoken scan result — no
   pin set, no cursor moved. Scan, hear a target, P for the route, keep scanning.
+- `P` with a cursor up names what it pathed to: "path to cursor" in Look mode,
+  "path to aim" while aiming a spell, "path to destination" for teleports.
+- One word per thing, everywhere: scanned things are targets, the Look cursor
+  is the cursor, a spell's cursor is the aim (scans mid-aim now say "From
+  aim", not "From target"), teleports have a destination, pins are pins.
+- `J` joined the spoken keybind reference (Shift+/), including that it moves
+  your aim while a spell is up.
+
+### Fixed
+- `P` no longer says "already at target" after leaving Look mode or casting
+  without moving — a stale game-side cursor was shadowing the last-scanned
+  fallback.
 
 ## 2026-07-11 — 0.6.0 — Good Looking
 

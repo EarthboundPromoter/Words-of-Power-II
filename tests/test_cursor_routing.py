@@ -269,7 +269,7 @@ def test_destination_qualifier_follows_the_routing_predicate():
     assert qual == "destination"
     disperse_view = FakeView(cur_spell=FakeSpell(tags=[_TRANSLOCATION], radius=3))
     _ref, _lvl, qual = getref(disperse_view)
-    assert qual == "target"
+    assert qual == "aim"    # vocabulary ruling 2026-07-14: "target" = entities only
     look_view = FakeView(cur_spell=LookSpell(name='look'))
     _ref, _lvl, qual = getref(look_view)
     assert qual == "cursor"

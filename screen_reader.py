@@ -7390,7 +7390,10 @@ if _PyGameView is not None:
     def _get_scan_reference(view):
         """Return (ref_point, scan_level, qualifier) for the current game state.
         qualifier is None (normal/deploy), "destination" (routing-eligible
-        teleport), "target" (other spell), or "cursor" (look mode).
+        teleport), "aim" (other spell), or "cursor" (look mode). Vocabulary
+        ruling 2026-07-14: "target" is reserved for entities (scanned/Tab-
+        cyclable things — the game's own "Next Target" sense); the spell
+        cursor is the "aim". One word per referent class.
         """
         game = view.game
         # Deploy: cursor-relative on next level, no qualifier (context is obvious)
@@ -7408,7 +7411,7 @@ if _PyGameView is not None:
             if _routes_targeting(spell):
                 return (target, game.cur_level, "destination")
             # Other spell targeting
-            return (target, game.cur_level, "target")
+            return (target, game.cur_level, "aim")
         # Normal play
         player = game.p1
         return (Level.Point(player.x, player.y), game.cur_level, None)
@@ -8023,7 +8026,9 @@ if _PyGameView is not None:
 
     def _query_path_to_cursor(view):
         """P key: announce the compressed path from player to whatever is under the
-        look-mode cursor. Discriminates between walkable destinations (terrain, props,
+        live cursor — look, spell aim, or teleport destination, each named by
+        its qualifier noun ("Path to cursor/aim/destination").
+        Discriminates between walkable destinations (terrain, props,
         allies — path arrives on tile) and non-ally units (path resolves to cheapest
         walkable adjacent neighbor, since the unit tile is impassable).
 
@@ -8039,9 +8044,14 @@ if _PyGameView is not None:
                 log("[Path] P pressed during deploy")
                 return
             point = getattr(view, 'cur_spell_target', None)
-            if point is None:
-                # Active control: no cursor exists, so the attention point
-                # is whatever the scanner last spoke.
+            if getattr(view, 'cur_spell', None) is None or point is None:
+                # Active control: no LIVE cursor, so the attention point is
+                # whatever the scanner last spoke. Liveness is the SPELL, not
+                # the target point — the game nulls only cur_spell on Escape
+                # and cast (abort_cur_spell/cast_cur_spell, RiftWizard3.py:
+                # 2348/2353), so the point dangles; an unmoved Look leaves it
+                # on the player's own tile ("Already at target" with no
+                # cursor up, field-reported 2026-07-14).
                 _query_path_to_last_scanned(view)
                 return
             level = game.cur_level
@@ -8050,20 +8060,26 @@ if _PyGameView is not None:
                 log("[Path] Cursor out of bounds")
                 return
 
+            # The spoken referent rides the SAME source as the scan
+            # qualifier (never disagree about what the cursor means):
+            # "cursor" in look, "aim" for spells, "destination" for
+            # routing teleports. "Target" is reserved for entities.
+            _, _, noun = _get_scan_reference(view)
+
             player = game.p1
             target_xy = (point.x, point.y)
             player_xy = (player.x, player.y)
 
             if target_xy == player_xy:
-                async_tts.speak("Already at target.")
-                log(f"[Path] Player on target ({point.x},{point.y})")
+                async_tts.speak(f"Already at {noun}.")
+                log(f"[Path] Player on {noun} ({point.x},{point.y})")
                 return
 
             dx = point.x - player.x
             dy = point.y - player.y
             if abs(dx) <= 1 and abs(dy) <= 1:
                 direction = _cardinal_direction(dx, dy)
-                text = f"Target adjacent, {direction}."
+                text = f"{noun.capitalize()} adjacent, {direction}."
                 async_tts.speak(text)
                 log(f"[Path] {text}")
                 return
@@ -8092,20 +8108,21 @@ if _PyGameView is not None:
                     return
                 full_seq = [start] + list(best_path)
                 text = _compress_path(full_seq, target_kind='unit')
-                async_tts.speak(text)
+                async_tts.speak(f"Path to {noun}. {text}")
                 log(f"[Path] Unit at ({point.x},{point.y}): {text}")
                 return
 
             # Walkable destination (terrain, prop, ally).
             if not tile.can_walk:
-                async_tts.speak("Target on impassable tile.")
-                log(f"[Path] Impassable target at ({point.x},{point.y})")
+                async_tts.speak(f"{noun.capitalize()} on impassable tile.")
+                log(f"[Path] Impassable {noun} at ({point.x},{point.y})")
                 return
 
             path = level.find_path(start, Level.Point(point.x, point.y), player, pythonize=True)
             if not path:
                 token = _classify_unreachable(level, target_xy)
-                msg = ("Target on impassable tile." if token == 'impassable'
+                msg = (f"{noun.capitalize()} on impassable tile."
+                       if token == 'impassable'
                        else "No route from here, may open up.")
                 async_tts.speak(msg)
                 log(f"[Path] Unreachable ({token}) at ({point.x},{point.y})")
@@ -8113,7 +8130,7 @@ if _PyGameView is not None:
 
             full_seq = [start] + list(path)
             text = _compress_path(full_seq, target_kind='terrain')
-            async_tts.speak(text)
+            async_tts.speak(f"Path to {noun}. {text}")
             log(f"[Path] To ({point.x},{point.y}): {text}")
         except Exception as e:
             log(f"[Path] Error: {e}")
@@ -9507,7 +9524,8 @@ if _PyGameView is not None:
             "D, detail. Full description of whatever is under the cursor.",
             "B, spatial scan. Walkable distances in 8 directions.",
             "X, hazard scan. Clouds and webs.",
-            "P, path to cursor in look mode. Shift P, full path to the focused pin.",
+            "P, path to the cursor or aim when one is up, else to the last scanned target. Shift P, full path to the focused pin.",
+            "J, jump to the last spoken target. While aiming a spell, moves the aim. Shift J, jump back.",
             "V, look mode. Cursor to examine tiles.",
             "C, character sheet.",
             "Control, cancel speech.",

@@ -53,7 +53,7 @@ _SCAN_SURROUNDINGS = """
 [B:shields]: Spatial scan. Walkable distance in eight directions
 [G:shields]: Charges. The active spell if you're targeting, otherwise all your spells
 [D:shields]: Full detail of whatever is under the cursor
-[P:shields]: Reports the path to the cursor in look mode. With no cursor, the path to the last spoken scan result: nothing pinned, nothing moved. Scan, hear a target, P for the route, keep scanning. Shift+P reports the path to the focused pin
+[P:shields]: Reports the walking path to your attention point, and names it: path to cursor in look mode, path to aim while aiming a spell, path to destination for teleports. With no cursor up, the path to the last scanned target instead: nothing pinned, nothing moved. Scan, hear a target, P for the route, keep scanning. Shift+P reports the path to the focused pin
 """
 
 _MOVEMENT_SPEECH = """

@@ -451,3 +451,69 @@ def test_bare_p_falls_back_to_last_scanned_read_only():
 def test_pin_speak_all_setting_declared():
     assert "'pin_speak_all', 'false'" in _src
     assert "pin_speak_all = _settings.getboolean" in _src
+
+
+# ---- Bare P liveness: a dangling cur_spell_target must not shadow the
+# ---- last-scanned fallback (field-reported 2026-07-14) ----
+#
+# The game nulls only cur_spell on Escape and after a cast (abort_cur_spell /
+# cast_cur_spell, RiftWizard3.py:2348/2353); cur_spell_target dangles until
+# the next normal-play move. An unmoved Look leaves that stale point on the
+# player's own tile, so bare P said "Already at target." instead of falling
+# through to the last scan. Liveness is the spell, not the point.
+
+class _PSpeech:
+    def __init__(self):
+        self.spoken = []
+
+    def speak(self, text):
+        self.spoken.append(text)
+
+
+def _p_query_ns(speech, recorder):
+    ns = {
+        'Level': types.SimpleNamespace(),
+        'log': lambda *a: None,
+        'async_tts': speech,
+        '_query_path_to_last_scanned': recorder,
+        # P's referent noun rides the scan-qualifier source; a live plain
+        # spell reads as "aim" (vocabulary ruling 2026-07-14).
+        '_get_scan_reference': lambda v: (v.cur_spell_target,
+                                          v.game.cur_level, "aim"),
+    }
+    exec(_extract("    def _query_path_to_cursor(view):",
+                  "    def _query_path_to_focused_pin(view):"), ns)
+    return ns
+
+
+def _p_view(cur_spell, target, px=5, py=5):
+    level = types.SimpleNamespace(
+        is_point_in_bounds=lambda p: 0 <= p.x < 18 and 0 <= p.y < 18)
+    return types.SimpleNamespace(
+        game=types.SimpleNamespace(
+            p1=types.SimpleNamespace(x=px, y=py),
+            cur_level=level,
+            deploying=False),
+        cur_spell=cur_spell,
+        cur_spell_target=target)
+
+
+def test_bare_p_dangling_target_falls_through_to_last_scanned():
+    speech = _PSpeech()
+    calls = []
+    ns = _p_query_ns(speech, lambda v: calls.append(v))
+    stale = types.SimpleNamespace(x=5, y=5)   # player tile: the Look opener
+    view = _p_view(cur_spell=None, target=stale)
+    ns['_query_path_to_cursor'](view)
+    assert calls == [view]
+    assert speech.spoken == []
+
+
+def test_bare_p_live_cursor_on_player_still_says_already_at_target():
+    speech = _PSpeech()
+    calls = []
+    ns = _p_query_ns(speech, lambda v: calls.append(v))
+    view = _p_view(cur_spell=object(), target=types.SimpleNamespace(x=5, y=5))
+    ns['_query_path_to_cursor'](view)
+    assert calls == []
+    assert speech.spoken == ["Already at aim."]
