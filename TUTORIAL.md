@@ -6,17 +6,19 @@ Welcome. This guide is in two parts: first the game, then the mod that speaks it
 
 ### What kind of game this is
 
-Rift Wizard 3 is a tactical roguelike. You are a wizard descending through 21 rifts — self-contained battle levels — to reach and destroy Mordred. Every rift is procedurally generated, so no two runs are alike. Death is permanent: when you die, the run is over and the next one starts fresh. That sounds harsh, but it's the engine of the whole game — every run teaches you something the next one uses.
+Rift Wizard 3 is a tactical roguelike. You are a wizard descending through 21 rifts — self-contained battle levels — to reach and destroy Mordred. The object of every rift is total: kill every entity on it, spawners included. When the last one falls, the level chime sounds — and pressing A from there auto-walks you to every pickup you haven't collected yet. Every rift is procedurally generated, so no two runs are alike. Death is permanent: when you die, the run is over and the next one starts fresh. That sounds harsh, but it's the engine of the whole game — every run teaches you something the next one uses.
 
 The game is turn-based on a grid. Nothing moves until you do. Take a step, cast a spell, or pass, and then every enemy takes its turn. There is no time pressure, ever. You can sit on a single turn for ten minutes, check everything twice, and the game will wait. Good players do exactly that on hard turns.
 
 ### Your spells
 
-Spells are your entire offense and most of your defense. You buy them with SP — skill points — at the spell shop, which you can open anytime. SP comes mainly from Memory Orbs, small pickups scattered through the rifts that grant 1 SP each when you step on them.
+Spells are your entire offense and most of your defense. You buy them with SP — skill points — at the spell shop, opened with S, anytime. SP comes mainly from Memory Orbs, small pickups scattered through the rifts that grant 1 SP each when you step on them.
+
+The spell list is enormous, and that's normal — experimentation is a core tenet of the game, so don't be frightened by the size of it. Think of it as a deadly candy store.
 
 Every spell has charges: a limited number of casts. When you leave a rift, you arrive at the next one fully refreshed — all health, all charges — so charges are a per-level budget, not a lifetime one. Spending your best spell freely in a hard fight is usually right; hoarding it until the level is over is usually wrong.
 
-Each spell can also hold two upgrades, bought with SP from the spell's own upgrade menu. This sets up the recurring decision of the whole game: spend SP on upgrades to make what you have stronger, or on new spells to widen your options. Depth versus breadth. There's no universal answer — but a spell you've upgraded twice is often a different weapon entirely, and a build with no second option can be shut out cold (more on that under rifts).
+Each spell can also hold two upgrades, bought with SP from the spell's own upgrade menu. This sets up the recurring decision of the whole game: spend SP on upgrades to make what you have stronger, or on new spells to widen your options. Depth versus breadth. There's no universal answer — but know that upgrades can vastly change how a spell behaves, not just make it bigger. And because each spell holds two, you're really choosing a pairing: the right combination is often a different weapon entirely. A build with no second option can be shut out cold (more on that under rifts).
 
 ### Equipment, components, and crafting
 
@@ -34,7 +36,7 @@ One more layer: rare components. Instead of a pickup effect, a rare fires when y
 
 Rifts contain more than enemies. The things worth walking to:
 
-Shops and menu shrines offer a choice: step on one, and you pick a single option from a short list. Plain shops sell spells, equipment, or blessings. The shrines each do one strange, powerful thing — the Shrine of Reformation lets you permanently remove a spell or item and get its cost back; the Shrine of Knowledge trades one of your components for a random spell sharing its tags; others duplicate, evolve, or dissolve what you own. Read what's offered; the option to walk away is always free.
+Menu landmarks offer a choice: step on one, and you pick a single option from a short list. Nothing is spent — the pick itself is the whole transaction. Some offer spells, equipment, or blessings. The shrines each do one strange, powerful thing — the Shrine of Reformation lets you permanently remove a spell or item and get its cost back; the Shrine of Knowledge trades one of your components for a random spell sharing its tags; others duplicate, evolve, or dissolve what you own. Read what's offered; the option to walk away is always free.
 
 Walk-on landmarks fire the moment you step on them. Ruby Hearts raise your maximum health by 25 and heal you to full. Memory Orbs grant the SP mentioned above. A few rare shrines transform you outright — read them with the examine key before stepping on if you like surprises to be consensual.
 
@@ -82,7 +84,7 @@ The bridge between them is J: jump. J moves the cursor to the last thing a scan 
 
 ### Casting a spell
 
-Press a number key, 1 through 9, to select that spell. An aim appears, starting on your own tile — so if you cast immediately, you target yourself. Move the aim with the arrows, or press Tab to snap it between targets the spell can actually hit, or scan and press J to put the aim on something the scan found. Enter casts. Escape backs out, spell unspent.
+Press a number key, 1 through 0, to select that spell. An aim appears, starting on your own tile — so if you cast immediately, you target yourself. Move the aim with the arrows, or press Tab to snap it between targets the spell can actually hit, or scan and press J to put the aim on something the scan found. Enter casts. Escape backs out, spell unspent.
 
 While you're aiming, scans keep working, and they measure from your aim rather than from you — "From aim" — so you can check what's around the spot you're about to hit. If the cast fails, the mod tells you why: out of range, no line of sight, not enough charges.
 
@@ -112,7 +114,9 @@ When you aim a spell with an area — a fireball's blast radius, the chaining ta
 
 ### Getting around
 
-Movement is the standard eight directions. The idioms worth knowing: press two arrows together for a diagonal. Hold Shift with a direction to stride the cursor four tiles at once. Hold Ctrl and press a direction to peek — a temporary look cursor that steps as long as you hold Ctrl and vanishes when you let go. Ctrl+Shift+direction jumps the cursor along a line to the next interesting thing, announcing what it crossed. "Edge" means the map ends that way.
+Movement is the standard eight directions. The idiom worth knowing: press two arrows together for a diagonal.
+
+Looking has its own gears, and two of them deserve special billing, because together they're the fastest way to see anywhere on the map without leaving your tile. Hold Ctrl and press a direction to peek: a temporary look cursor appears at your feet and steps wherever you point, for as long as Ctrl is held — release, and it vanishes, nothing spent. Ctrl+Shift+direction is the jump: it skims the cursor along a line straight to the next interesting thing — a unit, an item, a wall — announcing what it crossed on the way. And once a look cursor is up, Shift with a direction strides it four tiles at a time — the middle gear between stepping and jumping. Peek to feel out the ground around you; jump to case a whole corridor in one press. "Edge" means the map ends that way.
 
 One asymmetry to know: the numpad works for plain steps and diagonals, but Windows interferes with the Ctrl+Shift numpad chords, so jumps live on the arrow keys. Everything the mod does is reachable from the letters and arrows; the numpad is a convenience, not a requirement.
 
