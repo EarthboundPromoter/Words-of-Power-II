@@ -3,6 +3,12 @@
 All notable changes to **Words of Power II** are listed here, newest first. This is
 an early work-in-progress RW3 port — expect frequent changes.
 
+## Unreleased
+
+### Changed
+- Internal: combat narration reads records through one shared index. No speech
+  changes; composition cost no longer grows with time spent on a level.
+
 ## 2026-07-14 — 0.6.3 — Pathfinder
 
 ### Added

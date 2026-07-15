@@ -374,9 +374,14 @@ class ParityChecker:
         if not callable(enabled) or not enabled():
             return
 
-        window = [r for r in records if r.get('sequence', 0) > self._cursor]
+        # Slice 0: tail by sequence cursor (append-order invariant) —
+        # the fifth cursor's full-list filter converts like the four
+        # producers'. Semantics identical; the cursor deliberately
+        # survives reset() as before.
+        from journal import tail_after
+        window = tail_after(records, self._cursor)
         if window:
-            self._cursor = max(r.get('sequence', 0) for r in window)
+            self._cursor = max(self._cursor, window[-1].get('sequence', 0))
 
         avail = Counter(r.get('event_type') for r in window)
         table = rows()

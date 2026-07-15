@@ -180,6 +180,9 @@ def _claim(record):
     marks = record.setdefault('marks', [])
     if ORPHAN_MARK not in marks:
         marks.append(ORPHAN_MARK)
+        # Slice 0: feed the pipeline's double-claim watchdog.
+        from journal import journal as _j
+        _j.note_producer_mark(record)
 
 
 def _is_wizard_snap(snap):
@@ -1741,7 +1744,8 @@ class _OrphanProducer:
     def fire(self, journal_records, show_coords, movement_verbose,
               log_fn, telemetry=None, wizard_pos=None,
               los_grouping='section', spawn_coord_cap=5,
-              enemy_shield_totals=True, ally_shield_totals=False):
+              enemy_shield_totals=True, ally_shield_totals=False,
+              shared_index=None):
         """Compose the orphan section for this turn boundary.
 
         Args:
@@ -1774,20 +1778,32 @@ class _OrphanProducer:
         if not journal_records:
             return (PRIORITY_STANDARD_ORPHAN, "")
 
+        # Slice 0: tail by this producer's own sequence cursor (never a
+        # list offset — build law 1); the shared index replaces the
+        # per-fire full-list index build and wizard-team scan.
+        # shared_index=None (tests, standalone) keeps the local builds.
+        # The section renderers below stay untouched: their _gather_chain
+        # calls are WINDOW-scoped (new_records) — O(window), not O(list) —
+        # and the idx they receive is the same seq->record dict shape
+        # either way (plan §2b).
+        from journal import tail_after as _tail_after
+        tail = _tail_after(journal_records, self._last_processed_seq)
         new_records = [
-            r for r in journal_records
-            if r.get('sequence') is not None
-            and r.get('sequence') > self._last_processed_seq
+            r for r in tail if r.get('sequence') is not None
         ]
-
-        max_seq = max((r.get('sequence', -1) for r in journal_records), default=-1)
-        self._last_processed_seq = max(self._last_processed_seq, max_seq)
+        if tail:
+            self._last_processed_seq = max(
+                self._last_processed_seq, tail[-1].get('sequence', -1))
 
         if not new_records:
             return (PRIORITY_STANDARD_ORPHAN, "")
 
-        idx = _build_index(journal_records)
-        wizard_team = _find_wizard_team(journal_records)
+        if shared_index is not None:
+            idx = shared_index.by_seq
+            wizard_team = shared_index.wizard_team
+        else:
+            idx = _build_index(journal_records)
+            wizard_team = _find_wizard_team(journal_records)
 
         action_items, action_claimed = _render_action_section(
             new_records, idx, wizard_team, show_coords, movement_verbose,

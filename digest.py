@@ -1821,38 +1821,55 @@ def compose_digest(chain):
         if r.get('event_type') in ('EventOnShieldRemoved', 'shield_blocked')
         and not (((r.get('payload') or {}).get('target') or {})
                  .get('is_player_controlled')))
-    has_spawns = bool(compose_spawned_section(chain))
-    has_debuffs = bool(compose_debuffs_applied_section(chain))
-    has_buffs = bool(compose_buffs_applied_section(chain))
-    has_move = bool(compose_moved_section(chain))
-    has_shield_grants = bool(compose_shields_granted_section(chain))
-    has_shield_strips = bool(compose_shields_stripped_section(chain))
-    has_team_changes = bool(compose_team_changes_section(chain))
+    # Slice 0: the router's probes ARE the standard form's sections —
+    # compose each once and hand the results down instead of recomposing
+    # (the probe-then-recompose shape paid every non-trivial chain's
+    # section cost roughly twice). The section composers are pure
+    # (verified: the only record mutation in this module is _claim_chain,
+    # which runs after compose), so reuse is behavior-identical.
+    spawned = compose_spawned_section(chain)
+    debuffs = compose_debuffs_applied_section(chain)
+    buffs = compose_buffs_applied_section(chain)
+    moved = compose_moved_section(chain)
+    shields_granted = compose_shields_granted_section(chain)
+    shields_stripped = compose_shields_stripped_section(chain)
+    team_changes = compose_team_changes_section(chain)
 
     if (cast_count == 1 and damage_count <= 1 and blocked_count == 0
-            and not has_spawns and not has_debuffs and not has_buffs
-            and not has_move and not has_shield_grants and not has_shield_strips
-            and not has_team_changes):
+            and not spawned and not debuffs and not buffs
+            and not moved and not shields_granted and not shields_stripped
+            and not team_changes):
         return _compose_streamlined(chain)
-    return _compose_standard(chain)
+    return _compose_standard(chain, _precomposed=(
+        spawned, debuffs, buffs, moved, shields_granted,
+        shields_stripped, team_changes))
 
 
-def _compose_standard(chain):
+def _compose_standard(chain, _precomposed=None):
     """Standard digest with seven sections. Sections separated by space;
     each self-contained ending in period. Empty
     Killed/Surviving/Debuffs/Buffs/Spawned sections omit; if all five
     are empty (no damage landed AND nothing spawned AND no statuses
-    applied) emit 'No damage.' between Cast and Side."""
+    applied) emit 'No damage.' between Cast and Side.
+
+    _precomposed: the router's probe results (slice 0 compose-once) —
+    (spawned, debuffs, buffs, moved, shields_granted, shields_stripped,
+    team_changes). None (direct/test callers) composes locally, verbatim
+    the old behavior."""
+    if _precomposed is not None:
+        (spawned, debuffs, buffs, moved, shields_granted,
+         shields_stripped, team_changes) = _precomposed
+    else:
+        debuffs = compose_debuffs_applied_section(chain)
+        shields_stripped = compose_shields_stripped_section(chain)
+        buffs = compose_buffs_applied_section(chain)
+        shields_granted = compose_shields_granted_section(chain)
+        team_changes = compose_team_changes_section(chain)
+        spawned = compose_spawned_section(chain)
+        moved = compose_moved_section(chain)
     cast = compose_cast_section(chain)
     killed = compose_killed_section(chain)
     surviving = compose_surviving_section(chain)
-    debuffs = compose_debuffs_applied_section(chain)
-    shields_stripped = compose_shields_stripped_section(chain)
-    buffs = compose_buffs_applied_section(chain)
-    shields_granted = compose_shields_granted_section(chain)
-    team_changes = compose_team_changes_section(chain)
-    spawned = compose_spawned_section(chain)
-    moved = compose_moved_section(chain)
     side = compose_side_section(chain)
 
     parts = []
@@ -2238,6 +2255,9 @@ def _claim_chain(chain, mark):
         marks = rec.setdefault('marks', [])
         if mark not in marks:
             marks.append(mark)
+            # Slice 0: feed the pipeline's double-claim watchdog.
+            from journal import journal as _j
+            _j.note_producer_mark(rec)
 
 
 class _DigestComposer:
@@ -2265,11 +2285,22 @@ class _DigestComposer:
         Stamps DIGEST_MARK on all chain records claimed. Per-chain
         digest_emit / digest_unmodeled telemetry still fires (one event
         per chain processed)."""
-        from journal import journal
+        from journal import journal, tail_after, gather_descendants
         _tel = telemetry
 
+        # Slice 0: root-scan over the tail past this composer's own root
+        # cursor (the live list is append-order by invariant; the pure
+        # function keeps its full-scan semantics for test callers), and
+        # chains gather through the shared index — the per-root
+        # full-index-rebuild-plus-full-walk pair dies here. Pending
+        # roots are parent-None player keypress casts, exactly
+        # gather_descendants' equal-membership case (plan §2b).
+        journal.extend_index()
+        threshold = (self._last_digested_root_seq
+                     if self._last_digested_root_seq is not None else -1)
         pending = find_all_pending_roots(
-            journal.records, self._last_digested_root_seq
+            tail_after(journal.records, threshold),
+            self._last_digested_root_seq
         )
         if not pending:
             return (PRIORITY_STANDARD_DIGEST, "")
@@ -2277,7 +2308,7 @@ class _DigestComposer:
         chain_outputs = []
 
         for root in pending:
-            chain = gather_chain_events(journal.records, root)
+            chain = gather_descendants(root, journal.record_index)
             digest_output = compose_digest(chain)
 
             root_seq = root.get('sequence')
