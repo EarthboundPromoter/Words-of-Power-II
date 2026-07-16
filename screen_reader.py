@@ -10976,7 +10976,14 @@ if _PyGameView is not None:
                     f"{confirm} to rebind. {abort} to save and exit")
 
         if state == _STATE_SETUP_CUSTOM:
-            return (f"{nav_ud} to browse mutators. {nav_lr} between available, play, and selected. "
+            # PgUp/PgDn are the GAME's hardcoded binding here (RiftWizard3.py
+            # process_setup_custom_input) and break the RW idiom (normally
+            # tooltip cycling): they flip PAGES of the mutator list, and
+            # up/down wraps within the current page only — unhinted, the
+            # rest of the catalog is undiscoverable.
+            return (f"{nav_ud} to browse mutators. "
+                    f"Page up and down between pages of the mutator list. "
+                    f"{nav_lr} between mutator list, play, and active mutators. "
                     f"{confirm} to add or remove. {abort} to cancel")
 
         if state == _STATE_PICK_MUTATOR_PARAMS:
@@ -12133,21 +12140,94 @@ if _PyGameView is not None:
     # ---- STATE_SETUP_CUSTOM (custom game mutator selection) ----
     _orig_process_setup_custom = _PyGameView.process_setup_custom_input
     _sr_setup_custom_entered = [False]
+    # Set by the params/value submenu wrappers when they hand the state back:
+    # the game teleports focus to all_mutators[0] on BOTH finalize and abort
+    # (finalize_custom_mutator / clear_custom_mutator), so the next setup
+    # frame announces the landing instead of re-greeting the whole screen.
+    _sr_setup_custom_returning = [False]
+
+    def _mutator_instance_name(view, mut):
+        """Spoken name for a CONFIGURED mutator instance: class name plus its
+        configured args, mirroring the game's column-4 rendering
+        ('MonsterHPMult (2)' drawn -> 'MonsterHPMult 2' spoken)."""
+        name = mut.__class__.__name__
+        try:
+            customs = list(getattr(view, 'custom_mutators', []) or [])
+            args_list = list(getattr(view, 'custom_mutator_args', []) or [])
+            i = customs.index(mut)
+            if i < len(args_list) and args_list[i]:
+                arg_strs = [str(view.format_param_value(a)) for a in args_list[i]]
+                return f"{name} " + " ".join(arg_strs)
+        except Exception:
+            pass
+        return name
+
+    def _mutator_column(view, target):
+        """Which picker column a focus target lives in: 'play', 'selected',
+        'available', or None. Mirrors the game's focus model: available holds
+        classes, selected holds configured instances, play is the literal
+        string."""
+        if target == "play":
+            return 'play'
+        if target is None:
+            return None
+        if not isinstance(target, type) and target in (getattr(view, 'custom_mutators', []) or []):
+            return 'selected'
+        if target in getattr(_main, 'all_mutators', []):
+            return 'available'
+        return None
+
+    def _speak_mutator_list_change(view, before, after):
+        """Voice adds to / removals from the configured list. The game's Enter
+        is a silent toggle (confirm blip, no focus change): no-arg classes
+        append instantly, already-configured instances delete instantly, and
+        submenu finalize appends off-screen. Returns True if spoken."""
+        added = [m for m in after if m not in before]
+        removed = [m for m in before if m not in after]
+        if not added and not removed:
+            return False
+        parts = [f"Added {_mutator_instance_name(view, m)}" for m in added]
+        parts += [f"Removed {m.__class__.__name__}" for m in removed]
+        parts.append(f"{len(after)} active")
+        msg = ". ".join(parts) + "."
+        async_tts.speak(msg)
+        log(f"[State] SETUP_CUSTOM: {msg}")
+        return True
 
     def _mutator_label(view, target):
         """Build spoken label for a mutator or special target in custom setup."""
         if target == "play":
-            n = len(view.custom_mutators) if hasattr(view, 'custom_mutators') else 0
-            return f"Play. {n} mutator{'s' if n != 1 else ''} selected"
+            customs = list(getattr(view, 'custom_mutators', []) or [])
+            if not customs:
+                return "Play. No mutators active"
+            names = ", ".join(_mutator_instance_name(view, m) for m in customs)
+            n = len(customs)
+            return f"Play. {n} mutator{'s' if n != 1 else ''} active: {names}"
         if target is None:
             return ""
-        # Active (configured) mutator instance
-        custom = getattr(view, 'custom_mutators', [])
-        if custom and target in custom:
-            name = getattr(target, 'name', target.__class__.__name__)
-            desc = getattr(target, 'description', '')
-            first_line = desc.split('\n')[0] if desc else ''
-            return f"Selected. {name}. {first_line}" if first_line else f"Selected. {name}"
+        # Configured (selected-column) mutator instance
+        customs = list(getattr(view, 'custom_mutators', []) or [])
+        if not isinstance(target, type) and target in customs:
+            i = customs.index(target)
+            name = _mutator_instance_name(view, target)
+            first_line = ''
+            try:
+                desc = read_text(target.get_description(), _fmt_of(target))
+                first_line = desc.split('\n')[0] if desc else ''
+            except Exception:
+                pass
+            # Position counter trails (owner ruling 2026-07-16, generalizing
+            # the 2026-07-09 examine-pager ruling): X-of-Y browse counters
+            # are supplemental, never vital — leading, they're fatigue to
+            # listen past; trailing, they're skippable. No "Selected."
+            # prefix either (same ruling): membership is announced at
+            # add/remove time, and there's no multi-highlight state to
+            # mirror — the counter itself marks the configured column
+            # (the available column carries none).
+            base = name
+            if first_line:
+                base = f"{base}. {first_line}"
+            return f"{base}. {i + 1} of {len(customs)}"
         # Available mutator class
         _all_mut = getattr(_main, 'all_mutators', [])
         if target in _all_mut:
@@ -12163,17 +12243,43 @@ if _PyGameView is not None:
     def _patched_process_setup_custom(self):
         if not _sr_setup_custom_entered[0]:
             _sr_setup_custom_entered[0] = True
-            label = _mutator_label(self, self.examine_target)
-            async_tts.speak(f"Custom Game Setup. {label}" if label else "Custom Game Setup")
+            if _sr_setup_custom_returning[0]:
+                _sr_setup_custom_returning[0] = False
+                name = getattr(self.examine_target, '__name__', None) or str(self.examine_target)
+                async_tts.speak(f"Back to mutator list. {name}")
+            else:
+                label = _mutator_label(self, self.examine_target)
+                customs = list(getattr(self, 'custom_mutators', []) or [])
+                if customs:
+                    # The game never clears the configured list between visits
+                    # (clear_custom_mutator resets only pending state): say so,
+                    # or leftovers from an earlier visit ride along unheard.
+                    label = f"{len(customs)} already active. {label}" if label else f"{len(customs)} already active"
+                async_tts.speak(f"Custom Game Setup. {label}" if label else "Custom Game Setup")
             log("[State] SETUP_CUSTOM entered")
 
         prev_sel = self.examine_target
+        before = list(getattr(self, 'custom_mutators', []) or [])
         _orig_process_setup_custom(self)
+        after = list(getattr(self, 'custom_mutators', []) or [])
 
+        changed = _speak_mutator_list_change(self, before, after)
         if self.state != _STATE_SETUP_CUSTOM:
             _sr_setup_custom_entered[0] = False
-        elif self.examine_target != prev_sel and self.examine_target is not None:
+        elif (not changed and self.examine_target != prev_sel
+                and self.examine_target is not None):
             label = _mutator_label(self, self.examine_target)
+            cur_col = _mutator_column(self, self.examine_target)
+            prev_col = _mutator_column(self, prev_sel)
+            if cur_col != prev_col:
+                # Name the panel on entry (owner ruling 2026-07-16):
+                # "Active mutators" = the configured list, "Mutator list" =
+                # the pick-from panel. Without it a column crossing sounds
+                # like more of the same list.
+                if cur_col == 'available':
+                    label = f"Mutator list. {label}" if label else "Mutator list"
+                elif cur_col == 'selected':
+                    label = f"Active mutators. {label}" if label else "Active mutators"
             if label:
                 async_tts.speak(label)
                 log(f"[State] SETUP_CUSTOM: {label}")
@@ -12195,10 +12301,21 @@ if _PyGameView is not None:
             log("[State] PICK_MUTATOR_PARAMS entered")
 
         prev_sel = self.examine_target
+        before = list(getattr(self, 'custom_mutators', []) or [])
         _orig_process_pick_params(self)
 
         if self.state != _STATE_PICK_MUTATOR_PARAMS:
             _sr_pick_params_entered[0] = False
+            if self.state == _STATE_SETUP_CUSTOM:
+                # Hand-back to the picker: finalize (param-only mutators add
+                # here) or Escape-abort. Value-taking mutators leave for
+                # ENTER_MUTATOR_VALUE instead; that wrapper takes over.
+                _sr_setup_custom_returning[0] = True
+                after = list(getattr(self, 'custom_mutators', []) or [])
+                if not _speak_mutator_list_change(self, before, after):
+                    msg = "Cancelled. Nothing added."
+                    async_tts.speak(msg)
+                    log(f"[State] PICK_MUTATOR_PARAMS: {msg}")
         elif self.examine_target != prev_sel and self.examine_target is not None:
             label = self.format_param_value(self.examine_target)
             if label:
@@ -12221,10 +12338,22 @@ if _PyGameView is not None:
             log("[State] ENTER_MUTATOR_VALUE entered")
 
         prev_buf = getattr(self, 'pending_value_buffer', '')
+        before = list(getattr(self, 'custom_mutators', []) or [])
         _orig_process_enter_value(self)
 
         if self.state != _STATE_ENTER_MUTATOR_VALUE:
             _sr_enter_value_entered[0] = False
+            if self.state == _STATE_SETUP_CUSTOM:
+                _sr_setup_custom_returning[0] = True
+                after = list(getattr(self, 'custom_mutators', []) or [])
+                if not _speak_mutator_list_change(self, before, after):
+                    # Enter with an empty/zero buffer aborts via
+                    # clear_custom_mutator -- indistinguishable from success
+                    # by sound alone, and the landing focus is an actionable
+                    # mutator (a stray retry Enter adds it unheard).
+                    msg = "Cancelled. Nothing added."
+                    async_tts.speak(msg)
+                    log(f"[State] ENTER_VALUE: {msg}")
         else:
             cur_buf = getattr(self, 'pending_value_buffer', '')
             if cur_buf != prev_buf:

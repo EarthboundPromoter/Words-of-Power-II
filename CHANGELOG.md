@@ -5,6 +5,11 @@ an early work-in-progress RW3 port — expect frequent changes.
 
 ## Unreleased
 
+### Added
+- Custom game setup is fully voiced: browse the mutator list and your active
+  mutators, hear every add and removal, and the parameter and value submenus
+  speak their hand-backs. Page up and down (the game's own paging) is hinted.
+
 ### Fixed
 - Crowded turns no longer stall speech for minutes: ambient narration gathers
   its chains through the shared index. What you hear is unchanged.
