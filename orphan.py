@@ -813,7 +813,7 @@ def _render_cast_line(chain, caster, spell_name, melee, caster_id,
 
 def _render_action_section(records, idx, wizard_team, show_coords,
                             movement_verbose, wizard_pos=None,
-                            spawn_coord_cap=5):
+                            spawn_coord_cap=5, shared_index=None):
     """Render the non-player actions section. Returns (items, claimed_records).
 
     Walks for non-player cast_begin roots. Single-target chains collapse
@@ -826,13 +826,23 @@ def _render_action_section(records, idx, wizard_team, show_coords,
     if not roots:
         return [], []
 
+    # Children-map gather when the shared index is present (the adjacency
+    # follow-up): O(chain) per root, not the walk-every-record rescan.
+    # Window scope is preserved by sequence contiguity — an in-window
+    # root's descendants all sit past the cursor too. shared_index=None
+    # (tests, standalone) keeps the old gather verbatim.
+    _gd = None
+    if shared_index is not None:
+        from journal import gather_descendants as _gd
+
     chains_by_sig = {}
     chain_order = []
     standalone_chains = []
     claimed = []
 
     for root in roots:
-        chain = _gather_chain(records, root, idx)
+        chain = (_gd(root, shared_index) if _gd is not None
+                 else _gather_chain(records, root, idx))
         sig = _build_action_signature(chain)
         if sig is None:
             standalone_chains.append((root, chain))
@@ -1009,12 +1019,21 @@ def _render_collapsed_action(items, wizard_team, show_coords, movement_verbose):
 # ======================================================================
 
 
-def _render_status_ticks(records, idx, wizard_team, show_coords):
+def _render_status_ticks(records, idx, wizard_team, show_coords,
+                          shared_index=None):
     """Compose status tick lines: DOT damage, buff fades, unfreeze events,
     all on non-wizard targets. Returns (items, claimed_records) — each line
     wrapped as a rank-STATUS line-item anchored on its target(s)."""
     out_items = []
     claimed = []
+
+    # Children-map gather when the shared index is present (the adjacency
+    # follow-up; window scope preserved by sequence contiguity — see
+    # _render_action_section). This function was the strain run's hot
+    # site: docs/ORPHAN_ADJACENCY_EVIDENCE.md.
+    _gd = None
+    if shared_index is not None:
+        from journal import gather_descendants as _gd
 
     # DOT ticks: walk for buff_tick chain roots. Each chain may contain
     # damage events whose source is the buff itself.
@@ -1036,7 +1055,8 @@ def _render_status_ticks(records, idx, wizard_team, show_coords):
     dot_dead_ids = set()  # targets a DOT killed this turn (death capstone)
 
     for root in buff_tick_roots:
-        chain = _gather_chain(records, root, idx)
+        chain = (_gd(root, shared_index) if _gd is not None
+                 else _gather_chain(records, root, idx))
         dot_dead_ids.update(_deaths_in_chain(chain))
         for rec in chain:
             if rec.get('event_type') != 'EventOnDamaged':
@@ -1127,7 +1147,8 @@ def _render_status_ticks(records, idx, wizard_team, show_coords):
     cloud_pt_order = []
     cloud_dead_ids = set()
     for root in cloud_tick_roots:
-        chain = _gather_chain(records, root, idx)
+        chain = (_gd(root, shared_index) if _gd is not None
+                 else _gather_chain(records, root, idx))
         cloud_dead_ids.update(_deaths_in_chain(chain))
         cloud_name = (root.get('payload') or {}).get('cloud_name') or 'cloud'
         for rec in chain:
@@ -1782,10 +1803,13 @@ class _OrphanProducer:
         # list offset — build law 1); the shared index replaces the
         # per-fire full-list index build and wizard-team scan.
         # shared_index=None (tests, standalone) keeps the local builds.
-        # The section renderers below stay untouched: their _gather_chain
-        # calls are WINDOW-scoped (new_records) — O(window), not O(list) —
-        # and the idx they receive is the same seq->record dict shape
-        # either way (plan §2b).
+        # Adjacency follow-up (2026-07-16): the action/status renderers
+        # take shared_index too — their gathers ride the children map,
+        # O(chain) per root, replacing the O(roots × window × depth)
+        # walk-every-record rescan measured on the 2026-07-15 strain run
+        # (docs/ORPHAN_ADJACENCY_EVIDENCE.md). Window scope survives the
+        # swap by sequence contiguity: an in-window root's descendants
+        # all carry sequences past the cursor, so they share its tail.
         from journal import tail_after as _tail_after
         tail = _tail_after(journal_records, self._last_processed_seq)
         new_records = [
@@ -1807,10 +1831,11 @@ class _OrphanProducer:
 
         action_items, action_claimed = _render_action_section(
             new_records, idx, wizard_team, show_coords, movement_verbose,
-            wizard_pos, spawn_coord_cap
+            wizard_pos, spawn_coord_cap, shared_index=shared_index
         )
         tick_items, tick_claimed = _render_status_ticks(
-            new_records, idx, wizard_team, show_coords
+            new_records, idx, wizard_team, show_coords,
+            shared_index=shared_index
         )
         # Bare-root procs (gear that fired outside any chain) — claimed last,
         # after action/status sections have taken their chains.

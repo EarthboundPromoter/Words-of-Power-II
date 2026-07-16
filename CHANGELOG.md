@@ -5,6 +5,10 @@ an early work-in-progress RW3 port — expect frequent changes.
 
 ## Unreleased
 
+### Fixed
+- Crowded turns no longer stall speech for minutes: ambient narration gathers
+  its chains through the shared index. What you hear is unchanged.
+
 ### Changed
 - Internal: combat narration reads records through one shared index. No speech
   changes; composition cost no longer grows with time spent on a level.
