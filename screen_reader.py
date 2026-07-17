@@ -441,6 +441,12 @@ _SETTINGS_SCHEMA = [
      "# Off by default — useful if you micro your allies' defensive buffer,\n"
      "# noise if you don't. Independent of enemy_shield_totals.\n"
      "# Default: false"),
+    ('Composer', 'review_buffer_enabled', 'false',
+     "# Retain each turn's composed narration as structured items in an\n"
+     "# in-memory ring buffer — the data source for the future turn-review\n"
+     "# screen. Costs memory only; speech is identical either way. Off by\n"
+     "# default until the review feature ships.\n"
+     "# Default: false"),
 ]
 
 
@@ -530,6 +536,7 @@ class _Cfg:
     ).strip().lower()
     enemy_shield_totals = _settings.getboolean('Composer', 'enemy_shield_totals', fallback=True)
     ally_shield_totals = _settings.getboolean('Composer', 'ally_shield_totals', fallback=False)
+    review_buffer_enabled = _settings.getboolean('Composer', 'review_buffer_enabled', fallback=False)
 
 cfg = _Cfg()
 if cfg.orphan_los_grouping not in ('section', 'block', 'line'):
@@ -569,6 +576,7 @@ log(f"[Settings] spawn_coord_cap = {cfg.spawn_coord_cap}")
 log(f"[Settings] orphan_los_grouping = {cfg.orphan_los_grouping}")
 log(f"[Settings] enemy_shield_totals = {cfg.enemy_shield_totals}")
 log(f"[Settings] ally_shield_totals = {cfg.ally_shield_totals}")
+log(f"[Settings] review_buffer_enabled = {cfg.review_buffer_enabled}")
 
 # Startup block complete — switch the log to its configured mode. Everything
 # above (banner, settings echo) lands in every mode; hook-install lines below

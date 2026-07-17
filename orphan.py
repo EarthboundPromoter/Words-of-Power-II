@@ -29,6 +29,7 @@ from helpers import (
     _pluralize, source_attributed_line, chebyshev_distance,
     format_spawn_locality, dedupe_unit_members,
 )
+from composed_items import make_item as _shared_make_item
 
 
 ORPHAN_MARK = "orphan_v1"
@@ -48,15 +49,43 @@ _FAR_DISTANCE = 10 ** 6
 _OUT_OF_SIGHT = "Out of sight."
 
 
-def _make_item(rank, anchors, text):
+def _make_item(rank, anchors, text, row_key=None, seqs=None):
     """A composed orphan line plus the spatial metadata needed to order it.
 
     `anchors` is the list of unit snapshots the line is "about" (the caster
     for an action line, the target for a status line, all members for a
     collapsed line). The producer reads `x`/`y` and the capture-time
     `can_see_wizard` off the nearest anchor to compute the (in-sight,
-    distance) sort key. `text` is the already-rendered sentence(s)."""
-    return {'rank': rank, 'anchors': [a for a in anchors if a], 'text': text}
+    distance) sort key. `text` is the already-rendered sentence(s).
+
+    Slice 1 stage A: delegates to the shared constructor so every
+    producer's items carry one shape. `row_key` is the (provisional)
+    registry row that produced the line; `seqs` the source record
+    sequences it was composed from — the review-layer refs the
+    items-are-a-product rule requires."""
+    return _shared_make_item(rank, anchors, text, row_key=row_key, seqs=seqs)
+
+
+def _seqs_for(pairs, members):
+    """The seqs belonging to `members` out of a (snapshot, seq) pair list.
+    Matches by unit id when present, object identity otherwise — the pair
+    lists hold the same snapshot objects the group members do."""
+    idents = {id(m) for m in members}
+    uids = {m.get('id') for m in members if m.get('id') is not None}
+    out = []
+    for snap, seq in pairs:
+        if seq is None:
+            continue
+        if id(snap) in idents or (
+                snap.get('id') is not None and snap.get('id') in uids):
+            out.append(seq)
+    return out
+
+
+def _chain_seqs(chain):
+    """All record sequences in a chain (the action-line refs: the whole
+    chain IS the line's source)."""
+    return [r.get('sequence') for r in chain if r.get('sequence') is not None]
 
 
 def _item_spatial(item, wx, wy):
@@ -872,13 +901,18 @@ def _render_action_section(records, idx, wizard_team, show_coords,
                                          show_coords, movement_verbose,
                                          wizard_pos, spawn_coord_cap)
             anchors = [(first_chain[0].get('payload') or {}).get('caster')]
+            row_key = 'orphan.action.single'
+            seqs = _chain_seqs(first_chain)
         else:
             line = _render_collapsed_action(group, wizard_team,
                                              show_coords, movement_verbose)
             anchors = [(item[0].get('payload') or {}).get('caster')
                        for item in group]
+            row_key = 'orphan.action.collapsed'
+            seqs = [s for _root, ch in group for s in _chain_seqs(ch)]
         if line:
-            out_items.append(_make_item(_rank(is_ally), anchors, line))
+            out_items.append(_make_item(_rank(is_ally), anchors, line,
+                                        row_key=row_key, seqs=seqs))
         # claim==render: only claim the chain when we actually rendered a line.
         # A dropped (None) chain leaves its records — notably any non-wizard
         # EventOnDeath / EventOnUnitAdded — UNclaimed so the standalone-death
@@ -898,7 +932,9 @@ def _render_action_section(records, idx, wizard_team, show_coords,
                                      spawn_coord_cap)
         if line:
             anchors = [(chain[0].get('payload') or {}).get('caster')]
-            out_items.append(_make_item(_rank(is_ally), anchors, line))
+            out_items.append(_make_item(_rank(is_ally), anchors, line,
+                                        row_key='orphan.action.single',
+                                        seqs=_chain_seqs(chain)))
             for rec in chain:
                 if not _is_claimed_by_other(rec):
                     _claim(rec)
@@ -1079,11 +1115,13 @@ def _render_status_ticks(records, idx, wizard_team, show_coords,
                 per_target[key] = {
                     'target': target, 'buff_name': buff_name,
                     'dtype': dtype, 'damage': damage, 'turns': turns,
+                    'seqs': [rec.get('sequence')],
                 }
             else:
                 acc['damage'] += damage
                 if turns > acc['turns']:
                     acc['turns'] = turns
+                acc['seqs'].append(rec.get('sequence'))
         for rec in chain:
             # claim==render: a buff-tick chain on the wizard has its damage
             # child owned by crisis; don't double-mark it.
@@ -1096,6 +1134,7 @@ def _render_status_ticks(records, idx, wizard_team, show_coords,
     # same damage (the death is the salient distinction, and the killed unit
     # has no remaining duration to renotify).
     dot_groups = {}
+    dot_group_seqs = {}
     dot_order = []
     for key in pt_order:
         acc = per_target[key]
@@ -1106,11 +1145,14 @@ def _render_status_ticks(records, idx, wizard_team, show_coords,
         if sig not in dot_groups:
             dot_order.append(sig)
             dot_groups[sig] = []
+            dot_group_seqs[sig] = []
         dot_groups[sig].append(t)
+        dot_group_seqs[sig].extend(acc['seqs'])
 
     for sig in dot_order:
         buff_name, target_name, _tier, dtype, damage, turns, died = sig
         members = dot_groups[sig]
+        seqs = dot_group_seqs[sig]
         dtype_str = f" {dtype}" if dtype else ""
         # A killed target has no live duration left, so suppress the countdown
         # in favor of the death capstone.
@@ -1120,7 +1162,8 @@ def _render_status_ticks(records, idx, wizard_team, show_coords,
             killed = _killed_suffix(1 if died else 0)
             target_str = _name_with_coord(members[0], wizard_team, show_coords)
             out_items.append(_make_item(RANK_STATUS, [members[0]],
-                f"{target_str} {buff_name}: {damage}{dtype_str}{turns_str}{killed}."))
+                f"{target_str} {buff_name}: {damage}{dtype_str}{turns_str}{killed}.",
+                row_key='orphan.dot', seqs=seqs))
         else:
             killed = _killed_suffix(len(members) if died else 0)
             plural = _pluralize(target_name or 'enemy')
@@ -1128,7 +1171,8 @@ def _render_status_ticks(records, idx, wizard_team, show_coords,
             coords = _coord_list(members, show_coords)
             out_items.append(_make_item(RANK_STATUS, members,
                 f"{len(members)} {prefix}{plural}{coords} {buff_name}:"
-                f" {damage}{dtype_str} each{turns_str}{killed}."))
+                f" {damage}{dtype_str} each{turns_str}{killed}.",
+                row_key='orphan.dot', seqs=seqs))
 
     # Cloud ticks on non-wizard targets (R1). Off-tile cloud damage on
     # allies/enemies was previously silent — crisis claims only the
@@ -1167,15 +1211,18 @@ def _render_status_ticks(records, idx, wizard_team, show_coords,
                 cloud_per_target[key] = {
                     'target': target, 'cloud_name': cloud_name,
                     'dtype': dtype, 'damage': damage,
+                    'seqs': [rec.get('sequence')],
                 }
             else:
                 acc['damage'] += damage
+                acc['seqs'].append(rec.get('sequence'))
         for rec in chain:
             if not _is_claimed_by_other(rec):
                 _claim(rec)
                 claimed.append(rec)
 
     cloud_groups = {}
+    cloud_group_seqs = {}
     cloud_order = []
     for key in cloud_pt_order:
         acc = cloud_per_target[key]
@@ -1186,17 +1233,21 @@ def _render_status_ticks(records, idx, wizard_team, show_coords,
         if sig not in cloud_groups:
             cloud_order.append(sig)
             cloud_groups[sig] = []
+            cloud_group_seqs[sig] = []
         cloud_groups[sig].append(t)
+        cloud_group_seqs[sig].extend(acc['seqs'])
 
     for sig in cloud_order:
         cloud_name, target_name, _tier, dtype, damage, died = sig
         members = cloud_groups[sig]
+        seqs = cloud_group_seqs[sig]
         dtype_str = f" {dtype}" if dtype else ""
         if len(members) == 1:
             killed = _killed_suffix(1 if died else 0)
             target_str = _name_with_coord(members[0], wizard_team, show_coords)
             out_items.append(_make_item(RANK_STATUS, [members[0]],
-                f"{target_str} in {cloud_name}: {damage}{dtype_str}{killed}."))
+                f"{target_str} in {cloud_name}: {damage}{dtype_str}{killed}.",
+                row_key='orphan.cloud', seqs=seqs))
         else:
             killed = _killed_suffix(len(members) if died else 0)
             plural = _pluralize(target_name or 'enemy')
@@ -1204,7 +1255,8 @@ def _render_status_ticks(records, idx, wizard_team, show_coords,
             coords = _coord_list(members, show_coords)
             out_items.append(_make_item(RANK_STATUS, members,
                 f"{len(members)} {prefix}{plural}{coords} in {cloud_name}:"
-                f" {damage}{dtype_str} each{killed}."))
+                f" {damage}{dtype_str} each{killed}.",
+                row_key='orphan.cloud', seqs=seqs))
 
     # Buff fades on non-wizard targets — natural duration expiry. A fade that
     # is half of a same-turn STACK_REPLACE churn is suppressed (its re-apply
@@ -1255,26 +1307,31 @@ def _render_status_ticks(records, idx, wizard_team, show_coords,
         if sig not in fade_groups:
             fade_order.append(sig)
             fade_groups[sig] = []
-        fade_groups[sig].append(target)
+        fade_groups[sig].append((target, rec.get('sequence')))
         _claim(rec)
         claimed.append(rec)
 
     for sig in fade_order:
         bname, target_name, _tier = sig
+        pairs = fade_groups[sig]
         # Multi-stack fades on one unit collapse to one line — the fact is
         # "the buff is gone", matching the apply side's single collapsed
-        # announcement (the "Necrosis faded" x3 sibling specimen).
-        members = [m for m, _c in dedupe_unit_members(fade_groups[sig])]
+        # announcement (the "Necrosis faded" x3 sibling specimen). Refs keep
+        # every contributing fade record (deduped members included).
+        members = [m for m, _c in dedupe_unit_members([t for t, _s in pairs])]
+        seqs = [s for _t, s in pairs if s is not None]
         if len(members) == 1:
             target_str = _name_with_coord(members[0], wizard_team, show_coords)
             out_items.append(_make_item(RANK_STATUS, [members[0]],
-                f"{target_str} {bname} faded."))
+                f"{target_str} {bname} faded.",
+                row_key='orphan.fade', seqs=seqs))
         else:
             plural = _pluralize(target_name or 'enemy')
             prefix = _team_prefix(members[0], wizard_team)
             coords = _coord_list(members, show_coords)
             out_items.append(_make_item(RANK_STATUS, members,
-                f"{len(members)} {prefix}{plural}{coords} {bname} faded."))
+                f"{len(members)} {prefix}{plural}{coords} {bname} faded.",
+                row_key='orphan.fade', seqs=seqs))
 
     # Unfreeze events on non-wizard targets.
     unfreeze_records = [
@@ -1290,7 +1347,8 @@ def _render_status_ticks(records, idx, wizard_team, show_coords,
             continue
         target_str = _name_with_coord(target, wizard_team, show_coords)
         out_items.append(_make_item(RANK_STATUS, [target],
-            f"{target_str} Frozen broke."))
+            f"{target_str} Frozen broke.",
+            row_key='orphan.unfreeze', seqs=[rec.get('sequence')]))
         _claim(rec)
         claimed.append(rec)
 
@@ -1326,7 +1384,9 @@ def _render_standalone_deaths(records, wizard_team, show_coords):
         # legacy announcer and grouped speech already say "expired") —
         # "died" implied a kill the game never showed.
         verb = "expired" if p.get('is_expired') else "died"
-        out_items.append(_make_item(RANK_STATUS, [t], f"{name_str} {verb}."))
+        out_items.append(_make_item(RANK_STATUS, [t], f"{name_str} {verb}.",
+                                    row_key='orphan.death',
+                                    seqs=[r.get('sequence')]))
         _claim(r)
         claimed.append(r)
     return out_items, claimed
@@ -1367,13 +1427,16 @@ def _render_spawns(records, idx, wizard_team, show_coords, wizard_pos,
         # death line; don't also announce it as a fresh spawn.
         if u.get('id') in death_ids:
             continue
-        pending.append(u)
+        pending.append((u, r.get('sequence')))
 
-    for name, team, members in _spawn_groups(pending):
+    pending_units = [u for u, _s in pending]
+    for name, team, members in _spawn_groups(pending_units):
         phrase = _render_spawn_phrase(members, wizard_team, show_coords,
                                       wizard_pos, spawn_coord_cap)
         if phrase:
-            out_items.append(_make_item(RANK_STATUS, members, phrase + "."))
+            out_items.append(_make_item(RANK_STATUS, members, phrase + ".",
+                                        row_key='orphan.spawn',
+                                        seqs=_seqs_for(pending, members)))
     return out_items, claimed
 
 
@@ -1434,27 +1497,31 @@ def _render_buff_applies(records, wizard_team, show_coords):
         if sig not in groups:
             order.append(sig)
             groups[sig] = []
-        groups[sig].append(t)
+        groups[sig].append((t, r.get('sequence')))
         _claim(r)
         claimed.append(r)
 
     for sig in order:
         bname, btype, target_name, _tier, turns = sig
+        pairs = groups[sig]
         # Categorical onset — dedup by unit id (defensive; re-stacks are
         # already filtered upstream by stack_count_after).
-        members = [m for m, _c in dedupe_unit_members(groups[sig])]
+        members = [m for m, _c in dedupe_unit_members([t for t, _s in pairs])]
+        seqs = [s for _t, s in pairs if s is not None]
         turns_str = f", {turns} turns" if turns and turns > 0 else ""
         gained = "gained " if btype == 1 else ""
         if len(members) == 1:
             target_str = _name_with_coord(members[0], wizard_team, show_coords)
             out_items.append(_make_item(RANK_STATUS, [members[0]],
-                f"{target_str} {gained}{bname}{turns_str}."))
+                f"{target_str} {gained}{bname}{turns_str}.",
+                row_key='orphan.buff_apply', seqs=seqs))
         else:
             plural = _pluralize(target_name or 'enemy')
             prefix = _team_prefix(members[0], wizard_team)
             coords = _coord_list(members, show_coords)
             out_items.append(_make_item(RANK_STATUS, members,
-                f"{len(members)} {prefix}{plural}{coords} {gained}{bname}{turns_str}."))
+                f"{len(members)} {prefix}{plural}{coords} {gained}{bname}{turns_str}.",
+                row_key='orphan.buff_apply', seqs=seqs))
     return out_items, claimed
 
 
@@ -1516,12 +1583,13 @@ def _render_shield_changes(records, wizard_team, show_coords,
         if sig not in groups:
             order.append(sig)
             groups[sig] = []
-        groups[sig].append(t)
+        groups[sig].append((t, r.get('sequence')))
         _claim(r)
         claimed.append(r)
 
     for sig in order:
         et, amount, target_name, _tier, _team, total = sig
+        pairs = groups[sig]
         if et == 'shield_gained':
             amt = amount or 0
             sh = "shield" if amt == 1 else "shields"
@@ -1535,18 +1603,21 @@ def _render_shield_changes(records, wizard_team, show_coords,
             each_applicable = bool(total_tail)
         # One unit changed N times is repetition, not N units (same class
         # as the block/damage multiplicity specimens).
-        deduped = dedupe_unit_members(groups[sig])
+        deduped = dedupe_unit_members([t for t, _s in pairs])
         for m, c in [mc for mc in deduped if mc[1] > 1]:
             target_str = _name_with_coord(m, wizard_team, show_coords)
             out_items.append(_make_item(RANK_STATUS, [m],
-                f"{target_str} {core}, {c} times{total_tail}."))
+                f"{target_str} {core}, {c} times{total_tail}.",
+                row_key='orphan.shield_change', seqs=_seqs_for(pairs, [m])))
         members = [m for m, c in deduped if c == 1]
         if not members:
             continue
         if len(members) == 1:
             target_str = _name_with_coord(members[0], wizard_team, show_coords)
             out_items.append(_make_item(RANK_STATUS, [members[0]],
-                f"{target_str} {core}{total_tail}."))
+                f"{target_str} {core}{total_tail}.",
+                row_key='orphan.shield_change',
+                seqs=_seqs_for(pairs, members)))
         else:
             plural = _pluralize(target_name or 'enemy')
             prefix = _team_prefix(members[0], wizard_team)
@@ -1555,7 +1626,9 @@ def _render_shield_changes(records, wizard_team, show_coords,
             # carries none, so it stays plain.
             each = " each" if each_applicable else ""
             out_items.append(_make_item(RANK_STATUS, members,
-                f"{len(members)} {prefix}{plural}{coords} {core}{total_tail}{each}."))
+                f"{len(members)} {prefix}{plural}{coords} {core}{total_tail}{each}.",
+                row_key='orphan.shield_change',
+                seqs=_seqs_for(pairs, members)))
     return out_items, claimed
 
 
@@ -1585,25 +1658,30 @@ def _render_team_changes(records, wizard_team, show_coords):
         if sig not in groups:
             order.append(sig)
             groups[sig] = []
-        groups[sig].append(t)
+        groups[sig].append((t, r.get('sequence')))
         _claim(r)
         claimed.append(r)
 
     for sig in order:
         et, target_name, _tier = sig
+        pairs = groups[sig]
         # A flip is categorical — a unit can only end up on one team; dedup
-        # guards against double-fired records reading as two units.
-        members = [m for m, _c in dedupe_unit_members(groups[sig])]
+        # guards against double-fired records reading as two units. Refs
+        # keep every contributing flip record.
+        members = [m for m, _c in dedupe_unit_members([t for t, _s in pairs])]
+        seqs = [s for _t, s in pairs if s is not None]
         disposition = 'friendly' if et == 'team_joined' else 'hostile'
         if len(members) == 1:
             m = members[0]
             name = m.get('name') or 'Unknown'
             out_items.append(_make_item(RANK_STATUS, [m],
-                f"{name}{_coord_str(m, show_coords)} turned {disposition}."))
+                f"{name}{_coord_str(m, show_coords)} turned {disposition}.",
+                row_key='orphan.team_flip', seqs=seqs))
         else:
             plural = _pluralize(target_name or 'enemy')
             out_items.append(_make_item(RANK_STATUS, members,
-                f"{len(members)} {plural}{_coord_list(members, show_coords)} turned {disposition}."))
+                f"{len(members)} {plural}{_coord_list(members, show_coords)} turned {disposition}.",
+                row_key='orphan.team_flip', seqs=seqs))
     return out_items, claimed
 
 
@@ -1647,13 +1725,14 @@ def _render_shield_blocks(records, wizard_team, show_coords,
         if sig not in groups:
             order.append(sig)
             groups[sig] = []
-        groups[sig].append(t)
+        groups[sig].append((t, r.get('sequence')))
         _claim(r)
         claimed.append(r)
 
     for sig in order:
         amount, dtype, source, target_name, _tier, _team, remaining = sig
-        members = groups[sig]
+        pairs = groups[sig]
+        members = [t for t, _s in pairs]
         # Build the block clause guardedly, mirroring crisis: each part only
         # when captured.
         block = "blocked"
@@ -1687,21 +1766,26 @@ def _render_shield_blocks(records, wizard_team, show_coords,
                 rblock += f" from {source}"
             target_str = _name_with_coord(m, wizard_team, show_coords)
             out_items.append(_make_item(RANK_STATUS, [m],
-                f"{target_str} {rblock}{left}."))
+                f"{target_str} {rblock}{left}.",
+                row_key='orphan.shield_block', seqs=_seqs_for(pairs, [m])))
         members = [m for m, c in deduped if c == 1]
         if not members:
             continue
         if len(members) == 1:
             target_str = _name_with_coord(members[0], wizard_team, show_coords)
             out_items.append(_make_item(RANK_STATUS, [members[0]],
-                f"{target_str} {block}{left}."))
+                f"{target_str} {block}{left}.",
+                row_key='orphan.shield_block',
+                seqs=_seqs_for(pairs, members)))
         else:
             plural = _pluralize(target_name or 'enemy')
             prefix = _team_prefix(members[0], wizard_team)
             coords = _coord_list(members, show_coords)
             each = " each" if left else ""
             out_items.append(_make_item(RANK_STATUS, members,
-                f"{len(members)} {prefix}{plural}{coords} {block}{left}{each}."))
+                f"{len(members)} {prefix}{plural}{coords} {block}{left}{each}.",
+                row_key='orphan.shield_block',
+                seqs=_seqs_for(pairs, members)))
     return out_items, claimed
 
 
@@ -1748,7 +1832,9 @@ def _render_bare_effect_section(records, wizard_team, show_coords):
                 source_is_buff=p.get('source_is_buff'),
                 source_buff_type=p.get('source_buff_type'))
         if line:
-            out_items.append(_make_item(RANK_BARE, [target], line + "."))
+            out_items.append(_make_item(RANK_BARE, [target], line + ".",
+                                        row_key='orphan.bare',
+                                        seqs=[r.get('sequence')]))
             _claim(r)
             claimed.append(r)
     return out_items, claimed
@@ -1766,7 +1852,7 @@ class _OrphanProducer:
               log_fn, telemetry=None, wizard_pos=None,
               los_grouping='section', spawn_coord_cap=5,
               enemy_shield_totals=True, ally_shield_totals=False,
-              shared_index=None):
+              shared_index=None, items_sink=None):
         """Compose the orphan section for this turn boundary.
 
         Args:
@@ -1883,6 +1969,13 @@ class _OrphanProducer:
                      + spawn_items + buff_items + shield_items
                      + shield_block_items + team_items)
         text = _assemble_items(all_items, wizard_pos, los_grouping)
+
+        # Slice 1 stage A: export the composed items (rank/anchors/text plus
+        # row_key/seqs) to the pipeline's sink — the review-layer data spine.
+        # Extended only after a successful compose so sink contents always
+        # match what was actually spoken.
+        if items_sink is not None:
+            items_sink.extend(it for it in all_items if it.get('text'))
 
         if telemetry is not None:
             try:

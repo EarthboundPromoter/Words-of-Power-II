@@ -9,6 +9,8 @@ an early work-in-progress RW3 port — expect frequent changes.
 - Custom game setup is fully voiced: browse the mutator list and your active
   mutators, hear every add and removal, and the parameter and value submenus
   speak their hand-backs. Page up and down (the game's own paging) is hinted.
+- Groundwork for the coming turn-review screen: narration is retained as
+  expandable structured items (off by default: `review_buffer_enabled`).
 
 ### Fixed
 - Crowded turns no longer stall speech for minutes: ambient narration gathers

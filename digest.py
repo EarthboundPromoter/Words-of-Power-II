@@ -2272,7 +2272,7 @@ class _DigestComposer:
         # None if no digest has been emitted yet this session.
         self._last_digested_root_seq = None
 
-    def compose_section(self, log_fn, telemetry=None):
+    def compose_section(self, log_fn, telemetry=None, items_sink=None):
         """Compose the digest section for the unified emitter.
 
         Returns a (priority, text) tuple suitable for the pipeline's
@@ -2284,7 +2284,15 @@ class _DigestComposer:
 
         Stamps DIGEST_MARK on all chain records claimed. Per-chain
         digest_emit / digest_unmodeled telemetry still fires (one event
-        per chain processed)."""
+        per chain processed).
+
+        items_sink (slice 1 stage A): optional list; when provided, one
+        composed item per rendered chain is appended — COARSE grain by
+        the stage-A ruling (one item per keypress chain, refs = the whole
+        chain's record sequences; finer per-line items are additive
+        later precisely because the refs are retained). Flushed only
+        after the whole compose completes, so sink contents always match
+        the emitted section."""
         from journal import journal, tail_after, gather_descendants
         _tel = telemetry
 
@@ -2306,6 +2314,7 @@ class _DigestComposer:
             return (PRIORITY_STANDARD_DIGEST, "")
 
         chain_outputs = []
+        chain_items = []
 
         for root in pending:
             chain = gather_descendants(root, journal.record_index)
@@ -2341,6 +2350,16 @@ class _DigestComposer:
 
             if digest_output:
                 chain_outputs.append(digest_output)
+                if items_sink is not None:
+                    from composed_items import make_item
+                    chain_items.append(make_item(
+                        None, [], digest_output,
+                        row_key='digest.chain',
+                        seqs=[r.get('sequence') for r in chain
+                              if r.get('sequence') is not None]))
+
+        if items_sink is not None:
+            items_sink.extend(chain_items)
 
         text = " ".join(chain_outputs).strip()
         if text:

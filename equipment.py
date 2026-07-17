@@ -550,7 +550,7 @@ class _EquipmentProducer:
         self._last_processed_seq = -1
 
     def fire(self, journal_records, show_coords, log_fn, telemetry=None,
-             shared_index=None):
+             shared_index=None, items_sink=None):
         """Compose the equipment section for this turn boundary.
 
         Returns:
@@ -591,6 +591,7 @@ class _EquipmentProducer:
         ]
 
         lines = []
+        chain_items = []
         for root in roots:
             # Full-history chain membership (this producer's shipped
             # scope — orphan's gathers are window-scoped, this one is
@@ -604,6 +605,20 @@ class _EquipmentProducer:
                 chain = _gather_chain(journal_records, root, idx)
             new_lines = _render_equipment_chain(chain, wizard_team, show_coords)
             lines.extend(new_lines)
+            # Slice 1 stage A: one item per rendered equipment chain,
+            # refs = the whole chain (coarse grain; finer is additive).
+            if new_lines and items_sink is not None:
+                from composed_items import make_item
+                chain_items.append(make_item(
+                    None, [], " ".join(new_lines),
+                    row_key='equipment.chain',
+                    seqs=[r.get('sequence') for r in chain
+                          if r.get('sequence') is not None]))
+
+        # Flushed only after the whole compose completes (sink always
+        # matches the emitted section).
+        if items_sink is not None:
+            items_sink.extend(chain_items)
 
         text = " ".join(lines).strip()
 

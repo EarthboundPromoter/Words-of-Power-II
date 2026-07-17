@@ -85,6 +85,16 @@ _STAGED_CAPTURE_ONLY_KINDS = frozenset({
 })
 
 
+# Slice 1 stage A: while a fire() is running this holds the list
+# collecting the sequences of records claimed by THAT fire — the
+# per-fire item's source refs. None outside a fire. Crisis renders
+# line-by-line through many claim sites, so the collector rides the
+# claim chokepoint instead of threading a parameter through every
+# renderer. Single-threaded by construction (one producer singleton,
+# fired only from the pipeline boundary).
+_fire_claim_seqs = None
+
+
 def _claim(record):
     """Stamp CRISIS_MARK on a record so other producers skip it."""
     marks = record.setdefault('marks', [])
@@ -94,6 +104,10 @@ def _claim(record):
         # noted records instead of walking the whole level list).
         from journal import journal as _j
         _j.note_producer_mark(record)
+        if _fire_claim_seqs is not None:
+            seq = record.get('sequence')
+            if seq is not None:
+                _fire_claim_seqs.append(seq)
 
 
 def _has_crisis_mark(record):
@@ -621,7 +635,7 @@ class _CrisisProducer:
         return float('inf') if not turns else turns
 
     def fire(self, journal_records, wizard_unit, log_fn, telemetry=None,
-             damage_summed=False, shared_index=None):
+             damage_summed=False, shared_index=None, items_sink=None):
         """Walk journal records since last fire. Identify wizard-target
         events. Stamp marks. Compose Wizard-prefix lines.
 
@@ -670,6 +684,14 @@ class _CrisisProducer:
                 self._last_processed_seq,
                 tail[-1].get('sequence', -1),
             )
+
+        # Slice 1 stage A: arm the per-fire claim collector — the item's
+        # source refs. Re-armed (fresh list) at every fire, read and
+        # disarmed at the emit point below; a renderer exception leaves it
+        # armed but the next fire's re-arm makes that harmless (crisis
+        # claims happen only inside fire).
+        global _fire_claim_seqs
+        _fire_claim_seqs = []
 
         lines = []
         categories_present = set()
@@ -848,6 +870,18 @@ class _CrisisProducer:
             categories_present.add('agency_countdown')
 
         text = " ".join(lines).strip()
+
+        # Slice 1 stage A: one coarse item per fire (crisis is wizard-lane,
+        # single-subject — per-line items are additive later). seqs = the
+        # records this fire claimed; may be empty when only the polls spoke
+        # (HP threshold / agency countdown have no records). Collector
+        # disarmed here.
+        claimed_seqs = _fire_claim_seqs or []
+        _fire_claim_seqs = None
+        if items_sink is not None and text:
+            from composed_items import make_item
+            items_sink.append(make_item(
+                None, [], text, row_key='crisis.fire', seqs=claimed_seqs))
 
         if telemetry is not None:
             try:

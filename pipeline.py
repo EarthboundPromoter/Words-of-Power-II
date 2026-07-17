@@ -79,6 +79,12 @@ def fire_pipeline(tts, log_fn, cfg, wizard_unit, telemetry=None):
     journal.extend_index()
     shared = journal.record_index
 
+    # Slice 1 stage A: every producer appends its composed ITEMS here
+    # (rendered text + row_key + source record seqs — the review-layer
+    # data spine, SLICE1_BURST_AGGREGATION_BUILD_PLAN.md §6). Voice is
+    # untouched: the spoken utterance is still the section join below.
+    items = []
+
     sections = []
 
     if cfg.crisis_enabled:
@@ -88,6 +94,7 @@ def fire_pipeline(tts, log_fn, cfg, wizard_unit, telemetry=None):
                 journal.records, wizard_unit, log_fn, telemetry=telemetry,
                 damage_summed=getattr(cfg, 'crisis_damage_summed', False),
                 shared_index=shared,
+                items_sink=items,
             ),
             log_fn,
         )
@@ -97,7 +104,8 @@ def fire_pipeline(tts, log_fn, cfg, wizard_unit, telemetry=None):
     if cfg.digest_enabled:
         section = _safe_fire(
             'digest',
-            lambda: _digest.composer.compose_section(log_fn, telemetry=telemetry),
+            lambda: _digest.composer.compose_section(
+                log_fn, telemetry=telemetry, items_sink=items),
             log_fn,
         )
         if section is not None:
@@ -114,6 +122,7 @@ def fire_pipeline(tts, log_fn, cfg, wizard_unit, telemetry=None):
                 journal.records, cfg.show_coordinates,
                 log_fn, telemetry=telemetry,
                 shared_index=shared,
+                items_sink=items,
             ),
             log_fn,
         )
@@ -142,6 +151,7 @@ def fire_pipeline(tts, log_fn, cfg, wizard_unit, telemetry=None):
                 enemy_shield_totals=getattr(cfg, 'enemy_shield_totals', True),
                 ally_shield_totals=getattr(cfg, 'ally_shield_totals', False),
                 shared_index=shared,
+                items_sink=items,
             ),
             log_fn,
         )
@@ -175,6 +185,22 @@ def fire_pipeline(tts, log_fn, cfg, wizard_unit, telemetry=None):
     text = " ".join(parts).strip()
     if not text:
         return
+
+    # Slice 1 stage A: retain this fire's items in the flag-gated ring
+    # buffer (memory only; the review layer's data spine). Keyed
+    # (level_id, turn_no) — turn read off the live level with
+    # log_capture's max(1, ...) setup-turn convention; None when no live
+    # level is bound (replay, between levels). Exception-guarded: the
+    # buffer must never be able to mute a turn's speech.
+    if items and getattr(cfg, 'review_buffer_enabled', False):
+        try:
+            from composed_items import buffer as _item_buffer
+            _lvl = getattr(journal, '_level', None)
+            _turn = (max(1, getattr(_lvl, 'turn_no', 0) or 0)
+                     if _lvl is not None else None)
+            _item_buffer.append(journal.level_id, _turn, items)
+        except Exception as e:
+            log_fn(f"[Pipeline] item buffer append failed: {e!r}")
 
     log_fn(f"[Pipeline] emitting: {text}")
     try:
